@@ -275,6 +275,85 @@ impl MaskDistortNode {
 	}
 }
 
+/// Combined mask fragment shader for the `"mask"` shader id, replacing
+/// the C++ chain — matte rasterize -> optional invert -> optional 2-pass
+/// feather blur -> multiply over base — with a single GPU pass: the base
+/// texture is multiplied by the polygon matte (odd-even fill of the
+/// closed point loop, same transform as the polygon generator), the
+/// matte is optionally inverted and optionally softened with a 2D
+/// gaussian (one pass; the C++ `blur.frag` horizontal+vertical
+/// iterations, evaluated as the separable product — sigma = radius/2,
+/// matching the C++ gaussian2 call). Feather radius is capped at 16 px
+/// for pass cost; the C++ cap is the full blur shader.
+const SHADER_MASK_FRAG: &str = r#"// Input texture
+uniform sampler2D base_in;
+uniform int point_count;
+uniform vec4 points_in[64];
+uniform float feather_in;
+uniform bool invert_in;
+uniform vec2 resolution_in;
+
+in vec2 ove_texcoord;
+out vec4 frag_color;
+
+void main(void) {
+    vec2 pixel = ove_texcoord * resolution_in;
+    vec4 base = texture(base_in, ove_texcoord);
+    float matte = 0.0;
+    float cx = resolution_in.x * 0.5;
+    float cy = resolution_in.y * 0.5;
+
+    if (point_count >= 3) {
+        int crossings = 0;
+        for (int i = 0; i < point_count; i++) {
+            vec2 a = vec2(points_in[i].x + cx, cy - points_in[i].y);
+            vec2 b = vec2(points_in[(i + 1) % point_count].x + cx, cy - points_in[(i + 1) % point_count].y);
+            if ((a.y <= pixel.y && b.y > pixel.y) || (b.y <= pixel.y && a.y > pixel.y)) {
+                float x_cross = a.x + (pixel.y - a.y) / (b.y - a.y) * (b.x - a.x);
+                if (x_cross > pixel.x) {
+                    crossings++;
+                }
+            }
+        }
+        matte = (crossings % 2 == 1) ? 1.0 : 0.0;
+    }
+
+    if (feather_in > 0.0) {
+        float r = min(feather_in, 16.0);
+        float sigma = r * 0.5;
+        float wsum = 0.0;
+        float acc = 0.0;
+        for (int y = -int(ceil(r)); y <= int(ceil(r)); y++) {
+            for (int x = -int(ceil(r)); x <= int(ceil(r)); x++) {
+                vec2 p = clamp(ove_texcoord + vec2(float(x), float(y)) / resolution_in, 0.0, 1.0);
+                vec2 pp = p * resolution_in;
+                int cs = 0;
+                for (int i = 0; i < point_count; i++) {
+                    vec2 a = vec2(points_in[i].x + cx, cy - points_in[i].y);
+                    vec2 b = vec2(points_in[(i + 1) % point_count].x + cx, cy - points_in[(i + 1) % point_count].y);
+                    if ((a.y <= pp.y && b.y > pp.y) || (b.y <= pp.y && a.y > pp.y)) {
+                        float x_cross = a.x + (pp.y - a.y) / (b.y - a.y) * (b.x - a.x);
+                        if (x_cross > pp.x) {
+                            cs++;
+                        }
+                    }
+                }
+                float inside = (cs % 2 == 1) ? 1.0 : 0.0;
+                float w = exp(-0.5 * ((float(x) * float(x)) + (float(y) * float(y))) / (sigma * sigma));
+                acc += w * inside;
+                wsum += w;
+            }
+        }
+        matte = acc / max(wsum, 1e-6);
+    }
+
+    if (invert_in) {
+        matte = 1.0 - matte;
+    }
+    frag_color = vec4(base.rgb * matte, base.a * matte);
+}
+"#;
+
 impl NodeBehavior for MaskDistortNode {
 	/// Human-readable name (C++ `name()`).
 	fn name(&self) -> &str {
@@ -312,25 +391,14 @@ impl NodeBehavior for MaskDistortNode {
 		}
 	}
 
-	/// Evaluate outputs (C++ `value()`): generates the polygon matte
-	/// (via the inherited `get_generate_job`) at the base texture's
-	/// params or the global video params when there is no base; if
-	/// `invert_in` is set wraps the matte in an `"invert"` shader job;
-	/// with a base texture pushes an `"mrg"` multiply merge of base
-	/// (`tex_a`) and matte (`tex_b`) — where `feather_in` > 0.0 the
-	/// matte is first nested in a two-iteration gaussian `"feather"`
-	/// blur job (method gaussian, horiz/vert/repeat-edge true, radius =
-	/// feather value, `resolution_in` from the texture or the global
-	/// square resolution); without a base texture pushes the matte
-	/// itself.
-	///
-	/// The chain starts with a CPU rasterization of the polygon matte
-	/// (C++ `get_generate_job`), which a [`ShaderJobPayload`] cannot
-	/// express — the payload has no generate phase. The output is kept
-	/// as a null texture handle marking "renderer must produce this
-	/// texture"; expressing the rasterize -> (optional `"invert"`) ->
-	/// (optional `"feather"` nested in) `"mrg"` multiply chain as
-	/// payloads is a renderer TODO (`// CPP-PARITY: mask.cpp` `value()`).
+	/// Evaluate outputs (C++ `value()`): pushes a REAL single
+	/// [`ShaderJobPayload`] whose `"mask"` fragment shader does the whole
+	/// C++ chain on the GPU — yes. One pass multiplies the base texture
+	/// by the polygon matte (odd-even fill), optionally invert, and the
+	/// optional feather gaussian softens the matte during sampling. The
+	/// payload's params carry `points_in` (the inherited array, collected
+	/// as in the polygon generator), `point_count`, `invert_in` and
+	/// `feather_in`, with the base texture under the effect input.
 	fn value(
 		&self,
 		core: &NodeCore,
@@ -338,10 +406,37 @@ impl NodeBehavior for MaskDistortNode {
 		time: oak_core::Rational,
 		table: &mut crate::value::NodeValueTable,
 	) {
-		let _ = (core, inputs, time);
+		let points = crate::nodes::polygon::point_array(core, inputs, time);
+		let point_count = points.len();
+		let mut params = inputs.clone();
+		params.insert(
+			crate::nodes::polygon::POINTS_INPUT.to_string(),
+			crate::value::NodeValue::Vec4Array(points),
+		);
+		params.insert(
+			"point_count".to_string(),
+			crate::value::NodeValue::Int(point_count as i64),
+		);
+		// The row carries invert/feather in the traverser flow; fall back
+		// to the node's own values for direct `value()` calls.
+		for id in [INVERT_INPUT, FEATHER_INPUT] {
+			if !params.contains_key(id) {
+				params.insert(id.to_string(), core.value_at_time(id, -1, time));
+			}
+		}
+		let job = crate::handle::make_owned(crate::nodes::jobs::ShaderJobPayload {
+			node_id: crate::id::NodeId::INVALID,
+			time,
+			iterations: 1,
+			type_id: self.type_id().to_string(),
+			shader_id: "mask".to_string(),
+			effect_input: crate::nodes::generatorwithmerge::BASE_INPUT.to_string(),
+			params,
+			iterative_input: String::new(),
+		});
 		table.push(
 			crate::value::ValueType::Texture,
-			crate::value::NodeValue::Texture(crate::handle::CHandle::null()),
+			crate::value::NodeValue::Texture(job),
 			None,
 		);
 	}
@@ -355,6 +450,7 @@ impl NodeBehavior for MaskDistortNode {
 			"mrg" => Some(SHADER_MRG_FRAG.to_string()),
 			"feather" => Some(SHADER_FEATHER_FRAG.to_string()),
 			"invert" => Some(SHADER_INVERT_FRAG.to_string()),
+			"mask" => Some(SHADER_MASK_FRAG.to_string()),
 			_ => self.polygon.shader_code(request),
 		}
 	}
@@ -532,9 +628,9 @@ mod tests {
 	}
 
 	#[test]
-	fn value_always_pushes_deferred_matte_or_merge() {
+	fn value_pushes_real_mask_job() {
 		let (core, behavior) = create();
-		// No inputs at all: the matte is generated and pushed.
+		// No inputs at all: the matte job pushes with defaults.
 		let mut table = NodeValueTable::default();
 		behavior.value(
 			&core,
@@ -542,16 +638,36 @@ mod tests {
 			Rational::new(0, 1),
 			&mut table,
 		);
-		assert!(table.get(ValueType::Texture).is_some());
-
-		// With a base texture: an "mrg" merge job is pushed instead.
-		let inputs = crate::value::NodeValueRow::from([(
-			crate::nodes::generatorwithmerge::BASE_INPUT.to_string(),
-			NodeValue::Texture(crate::handle::CHandle::null()),
-		)]);
-		let mut table = NodeValueTable::default();
-		behavior.value(&core, &inputs, Rational::new(0, 1), &mut table);
-		assert!(table.get(ValueType::Texture).is_some());
+		let tex = table.get(ValueType::Texture).expect("texture pushed");
+		let NodeValue::Texture(handle) = tex else {
+			panic!("pushed value is not a texture handle");
+		};
+		let job = unsafe {
+			crate::handle::get_checked::<crate::nodes::jobs::ShaderJobPayload>(handle)
+		}
+		.expect("real shader job");
+		assert_eq!(job.shader_id, "mask");
+		assert_eq!(job.type_id, "org.olivevideoeditor.Olive.mask");
+		assert_eq!(
+			job.effect_input,
+			crate::nodes::generatorwithmerge::BASE_INPUT
+		);
+		match job.params.get(crate::nodes::polygon::POINTS_INPUT) {
+			Some(NodeValue::Vec4Array(points)) => {
+				assert_eq!(points.len(), 5, "default pentagon");
+				assert_eq!(points[0], [0.0, -135.0, 0.0, 0.0]);
+			}
+			other => panic!("points_in is not a Vec4Array: {other:?}"),
+		}
+		assert_eq!(
+			job.params.get("point_count"),
+			Some(&NodeValue::Int(5))
+		);
+		assert_eq!(
+			job.params.get(INVERT_INPUT),
+			Some(&NodeValue::Boolean(false))
+		);
+		assert_eq!(job.params.get(FEATHER_INPUT), Some(&NodeValue::Float(0.0)));
 	}
 
 	#[test]
@@ -565,6 +681,11 @@ mod tests {
 		assert!(feather.contains("gaussian2"));
 		let invert = n.shader_code("invert").unwrap();
 		assert!(invert.contains("color = 1.0 - color;"));
+		let mask = n.shader_code("mask").unwrap();
+		assert!(mask.contains("points_in[64]"));
+		assert!(mask.contains("feather_in"));
+		assert!(mask.contains("invert_in"));
+		assert!(mask.contains("base.rgb * matte"));
 	}
 
 	#[test]

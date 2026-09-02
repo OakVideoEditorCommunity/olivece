@@ -39,24 +39,54 @@ pub const COLOR_INPUT: &str = "color_in";
 /// `NodeCore::gizmos`, so they are omitted.
 pub struct PolygonGenerator;
 
-/// Fragment shader for the `"rgb"` shader id (C++ loads
-/// `:/shaders/rgb.frag` in `get_shader_code`), recoloring the rasterized
-/// polygon mask with the color input. Text copied verbatim from
-/// `engine/shaders/rgb.frag`.
-const RGB_SHADER_FRAG: &str = r#"// Input texture
-uniform sampler2D texture_in;
+/// Fragment shader for the `"rgb"` shader id: rasterizes the point
+/// polygon on the GPU. The C++ pipeline rasterized the (bezier) path
+/// on the CPU and recolored it with `:/shaders/rgb.frag` (sampling
+/// `texture_in`); the Rust equivalent skips the CPU rasterization
+/// entirely and draws the closed point loop direct in the fragment
+/// shader — an odd-even (nonzero-winding-equivalent here) fill test
+/// per pixel against the point positions, outputting `color_in` when
+/// the pixel is inside and transparent otherwise. Points are in the
+/// C++ generator's space (relative to the frame center, y-up); the
+/// shader translates to the texture coordinate space (bottom-left
+/// origin, y-down via the center y flip).
+const RGB_SHADER_FRAG: &str = r#"// Point polygon rasterization
+uniform int point_count;
+uniform vec4 points_in[64];
+uniform vec2 resolution_in;
+uniform vec4 color_in;
 
-// Input texture coordinate
 in vec2 ove_texcoord;
 out vec4 frag_color;
 
-// Input color
-uniform vec4 color_in;
+void main(void) {
+    vec2 pixel = ove_texcoord * resolution_in;
+    if (point_count < 3) {
+        frag_color = vec4(0.0);
+        return;
+    }
 
-void main() {
-  vec4 color = texture(texture_in, ove_texcoord);
-  color.rgb = color_in.rgb * color.a;
-  frag_color = color;
+    float cx = resolution_in.x * 0.5;
+    float cy = resolution_in.y * 0.5;
+    int crossings = 0;
+
+    for (int i = 0; i < point_count; i++) {
+        vec2 a = vec2(points_in[i].x + cx, cy - points_in[i].y);
+        vec2 b = vec2(points_in[(i + 1) % point_count].x + cx, cy - points_in[(i + 1) % point_count].y);
+
+        if ((a.y <= pixel.y && b.y > pixel.y) || (b.y <= pixel.y && a.y > pixel.y)) {
+            float x_cross = a.x + (pixel.y - a.y) / (b.y - a.y) * (b.x - a.x);
+            if (x_cross > pixel.x) {
+                crossings++;
+            }
+        }
+    }
+
+    if (crossings % 2 == 1) {
+        frag_color = color_in;
+    } else {
+        frag_color = vec4(0.0);
+    }
 }
 "#;
 
@@ -66,6 +96,61 @@ impl PolygonGenerator {
 	fn rgb_shader_frag() -> &'static str {
 		RGB_SHADER_FRAG
 	}
+}
+
+/// Collect the point array of the polygon input (C++ iterating
+/// `GetValueAtTime(k_points_in, i)`): per-element row keys
+/// (`points_in[i]`, the connected-array convention) first, then the
+/// node's own standard/keyframe values per element — an unconnected
+/// array resolves to the default pentagon — sized by the input's
+/// array_size (capped at the shader's 64-element uniform array). An
+/// absent array falls back to a single bare-key value (non-array
+/// connection) or a single degenerate point, so `value()` consumers
+/// always receive a closed loop of at least one point.
+pub fn point_array(core: &NodeCore, inputs: &crate::value::NodeValueRow, time: oak_core::Rational) -> Vec<[f64; 4]> {
+	let size = core
+		.inputs
+		.iter()
+		.find(|i| i.id == POINTS_INPUT)
+		.map(|i| (i.array_size as usize).min(64))
+		.unwrap_or(5);
+	let mut points: Vec<[f64; 4]> = Vec::new();
+	for i in 0..size {
+		let key = format!("{POINTS_INPUT}[{i}]");
+		let value = match inputs.get(&key) {
+			Some(v) => v.clone(),
+			None => core.value_at_time(POINTS_INPUT, i as i32, time),
+		};
+		match value {
+			crate::value::NodeValue::Vec4(v) => points.push(v),
+			crate::value::NodeValue::Vec2(v) => {
+				points.push([v[0], v[1], 0.0, 0.0]);
+			}
+			crate::value::NodeValue::Color(v) => {
+				let mut p = [0.0f64; 4];
+				let n = v.len().min(4);
+				p[..n].copy_from_slice(&v[..n]);
+				points.push(p);
+			}
+			_ => continue,
+		}
+	}
+	if points.is_empty() {
+		match inputs.get(POINTS_INPUT) {
+			Some(crate::value::NodeValue::Vec4(v)) => points.push(*v),
+			Some(crate::value::NodeValue::Vec2(v)) => {
+				points.push([v[0], v[1], 0.0, 0.0]);
+			}
+			Some(crate::value::NodeValue::Color(v)) => {
+				let mut p = [0.0f64; 4];
+				let n = v.len().min(4);
+				p[..n].copy_from_slice(&v[..n]);
+				points.push(p);
+			}
+			_ => points.push([0.0, 0.0, 0.0, 0.0]),
+		}
+	}
+	points
 }
 
 impl NodeBehavior for PolygonGenerator {
@@ -101,21 +186,22 @@ impl NodeBehavior for PolygonGenerator {
 		}
 	}
 
-	/// Evaluate outputs (C++ `value()`): wraps the generate job
-	/// (rasterized at u8 pixel format, then recolored by an `"rgb"`
-	/// shader job sampling it as `texture_in` with `color_in`) in a
-	/// texture at the sequence video params and pushes it through
-	/// `push_mergable_job` (merged over `base_in` when connected).
+	/// Evaluate outputs (C++ `value()`): emits the polygon rasterization
+	/// as a REAL [`ShaderJobPayload`] — the fragment shader (`"rgb"`)
+	/// rasterizes the point polygon in screen space (odd-even fill of the
+	/// closed point loop) and multiplies the color input, all on the GPU.
+	/// The bezier control points are not representable (the crate has no
+	/// bezier value type), so the polygon is drawn with straight segments
+	/// between the point positions — the C++ curve smoothing is a UI-only
+	/// refinement the shader omits here.
 	///
-	/// The C++ chain starts with `get_generate_job()` — a CPU
-	/// rasterization of the polygon path (QPainterPath bezier fill into
-	/// an RGBA8888 frame via `generate_frame()`), which a
-	/// [`ShaderJobPayload`] cannot express: the payload has no generate
-	/// phase, and the rasterize -> `"rgb"` recolor -> optional `"mrg"`
-	/// alpha-over chain has no Rust equivalent. The output is kept as a
-	/// null texture handle marking "renderer must produce this texture";
-	/// expressing the chain as payloads is a renderer TODO
-	/// (`// CPP-PARITY: polygon.cpp` `value()`).
+	/// The payload params carry `point_count`, the `points_in` array
+	/// (packed into the std140 uniform block as `vec4[N]`; the renderer
+	/// pads short arrays to the declared size) and `color_in`; the
+	/// renderer injects `resolution_in` at job-build time. With an
+	/// upstream `base_in` connected the payload is handed through
+	/// `push_mergable_job` (alpha-over the generator output over the
+	/// base); otherwise it is pushed as the node's output.
 	fn value(
 		&self,
 		core: &NodeCore,
@@ -123,12 +209,40 @@ impl NodeBehavior for PolygonGenerator {
 		time: oak_core::Rational,
 		table: &mut crate::value::NodeValueTable,
 	) {
-		let _ = (core, inputs, time);
-		table.push(
-			crate::value::ValueType::Texture,
-			crate::value::NodeValue::Texture(crate::handle::CHandle::null()),
-			None,
+		// Collect the point array (row element keys, else the node's own
+		// standard/keyframe values — an unconnected array resolves to the
+		// default pentagon; see [`point_array`]).
+		let points = point_array(core, inputs, time);
+		let point_count = points.len();
+		let mut params = inputs.clone();
+		params.insert(
+			POINTS_INPUT.to_string(),
+			crate::value::NodeValue::Vec4Array(points),
 		);
+		params.insert(
+			"point_count".to_string(),
+			crate::value::NodeValue::Int(point_count as i64),
+		);
+		// The color is part of the row in the traverser flow (the bare
+		// key is always inserted for an unconnected input); fall back to
+		// the node's own value for direct `value()` calls.
+		if !params.contains_key(COLOR_INPUT) {
+			params.insert(
+				COLOR_INPUT.to_string(),
+				core.value_at_time(COLOR_INPUT, -1, time),
+			);
+		}
+		let job = crate::handle::make_owned(crate::nodes::jobs::ShaderJobPayload {
+			node_id: crate::id::NodeId::INVALID,
+			time,
+			iterations: 1,
+			type_id: self.type_id().to_string(),
+			shader_id: "rgb".to_string(),
+			effect_input: core.effect_input.clone(),
+			params,
+			iterative_input: String::new(),
+		});
+		super::generatorwithmerge::GeneratorWithMerge::push_mergable_job(inputs, job, table);
 	}
 
 	/// Direct frame generation (C++ `generate_frame()`): clears the RGBA
@@ -312,7 +426,7 @@ mod tests {
 	}
 
 	#[test]
-	fn value_pushes_deferred_job() {
+	fn value_pushes_real_shader_job_with_pentagon() {
 		let (core, behavior) = create();
 		let mut table = NodeValueTable::default();
 		behavior.value(
@@ -321,7 +435,27 @@ mod tests {
 			Rational::new(0, 1),
 			&mut table,
 		);
-		assert!(table.get(ValueType::Texture).is_some());
+		let tex = table.get(ValueType::Texture).expect("texture pushed");
+		let NodeValue::Texture(handle) = tex else {
+			panic!("pushed value is not a texture handle");
+		};
+		let job = unsafe {
+			crate::handle::get_checked::<crate::nodes::jobs::ShaderJobPayload>(handle)
+		}
+		.expect("real shader job");
+		assert_eq!(job.shader_id, "rgb");
+		assert_eq!(job.type_id, "org.olivevideoeditor.Olive.polygon");
+		match job.params.get("points_in") {
+			Some(NodeValue::Vec4Array(points)) => {
+				assert_eq!(points.len(), 5, "default pentagon");
+			}
+			other => panic!("points_in is not a Vec4Array: {other:?}"),
+		}
+		assert_eq!(job.params.get("point_count"), Some(&NodeValue::Int(5)));
+		assert_eq!(
+			job.params.get(COLOR_INPUT),
+			Some(&NodeValue::Color([1.0, 1.0, 1.0, 1.0]))
+		);
 	}
 
 	#[test]
@@ -340,7 +474,9 @@ mod tests {
 	fn shader_code_dispatches() {
 		let n = PolygonGenerator;
 		let rgb = n.shader_code("rgb").unwrap();
-		assert!(rgb.contains("color.rgb = color_in.rgb * color.a;"));
+		assert!(rgb.contains("points_in[64]"));
+		assert!(rgb.contains("crossings % 2 == 1"));
+		assert!(rgb.contains("frag_color = color_in;"));
 		let mrg = n.shader_code("mrg").unwrap();
 		assert!(mrg.contains("base_col *= 1.0 - blend_col.a;"));
 		assert!(n.shader_code("other").is_none());

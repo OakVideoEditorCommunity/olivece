@@ -56,6 +56,9 @@ pub enum UniformType {
 	Vec4,
 	/// `mat4`.
 	Mat4,
+	/// `vec4[N]` (an array uniform; the polygon generator's bezier point
+	/// table is the only consumer, indexed by `[i]` in the shader body).
+	Vec4Array(usize),
 }
 
 impl UniformType {
@@ -74,7 +77,9 @@ impl UniformType {
 		})
 	}
 
-	/// The GLSL keyword back (block re-emission).
+	/// The GLSL keyword back (block re-emission). Array types have their
+	/// count appended (`vec4{name}[{count}]`), matching C++ uniform-array
+	/// declarations.
 	fn keyword(self) -> &'static str {
 		match self {
 			UniformType::Float => "float",
@@ -84,6 +89,7 @@ impl UniformType {
 			UniformType::Vec3 => "vec3",
 			UniformType::Vec4 => "vec4",
 			UniformType::Mat4 => "mat4",
+			UniformType::Vec4Array(_) => "vec4",
 		}
 	}
 
@@ -93,6 +99,7 @@ impl UniformType {
 			UniformType::Float | UniformType::Int | UniformType::Bool => 4,
 			UniformType::Vec2 => 8,
 			UniformType::Vec3 | UniformType::Vec4 | UniformType::Mat4 => 16,
+			UniformType::Vec4Array(_) => 16,
 		}
 	}
 
@@ -104,6 +111,7 @@ impl UniformType {
 			UniformType::Vec3 => 12,
 			UniformType::Vec4 => 16,
 			UniformType::Mat4 => 64,
+			UniformType::Vec4Array(n) => 16 * n.max(1),
 		}
 	}
 }
@@ -368,6 +376,17 @@ pub fn pack_uniforms(
 			(UniformType::Vec4, NodeValue::Vec4(v) | NodeValue::Color(v)) => {
 				v.iter().map(|x| *x as f32).collect()
 			}
+			(UniformType::Vec4Array(n), NodeValue::Vec4Array(v)) => {
+				let mut out = Vec::with_capacity(n * 4);
+				for el in v.iter().take(n) {
+					out.extend(el.iter().map(|x| *x as f32));
+				}
+				// Pad to the declared count (each element is 16 bytes; the
+				// buffer is sized n*16 regardless).
+				let have = out.len();
+				out.resize((n * 4).max(have), 0.0f32);
+				out
+			}
 			// Matrices: GLSL mat4 is column-major; the NodeValue comment
 			// marks the layout row-major, so transpose on the way in.
 			(UniformType::Mat4, NodeValue::Matrix(m)) => {
@@ -405,9 +424,11 @@ fn is_sampler_type(kw: &str) -> bool {
 
 /// Parse a `uniform <type> <name>;` declaration line (the constrained
 /// style of the node shader corpus: one declaration per line, no layout
-/// qualifiers, no initializers, no arrays — arrays are reported as
-/// unsupported, matching the C++ Blit). Returns `(type, name)`.
-fn parse_uniform_line(line: &str) -> Option<(&str, &str)> {
+/// qualifiers, no initializers). Arrays ARE supported:
+/// `uniform <type> <name>[<count>];` (the polygon generator's point
+/// table). `None` for any other line (samplers are handled by the
+/// caller). Returns `(base keyword, name, array count)`.
+fn parse_uniform_line(line: &str) -> Option<(&str, &str, usize)> {
 	let t = line.trim_start();
 	let rest = t.strip_prefix("uniform")?;
 	if !rest.starts_with(char::is_whitespace) {
@@ -415,11 +436,19 @@ fn parse_uniform_line(line: &str) -> Option<(&str, &str)> {
 	}
 	let rest = rest.trim_start();
 	let (ty, rest) = rest.split_once(char::is_whitespace)?;
-	let name = rest.trim().strip_suffix(';')?.trim();
+	let rest = rest.trim_start().trim_end_matches(';');
+	let (name, count) = if let Some(idx) = rest.find('[') {
+		let name = rest[..idx].trim();
+		let end = rest[idx..].find(']')?;
+		let count: usize = rest[idx + 1..idx + end].trim().parse().ok()?;
+		(name, count.max(1))
+	} else {
+		(rest.trim(), 1)
+	};
 	if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
 		return None;
 	}
-	Some((ty, name))
+	Some((ty, name, count))
 }
 
 /// Translate one GLSL fragment shader to WGSL (naga glsl-in → wgsl-out).
@@ -427,26 +456,29 @@ fn parse_uniform_line(line: &str) -> Option<(&str, &str)> {
 /// docs for the rewrite steps.
 pub fn translate(glsl: &str) -> Result<TranslatedShader> {
 	let mut body_lines: Vec<String> = Vec::new();
-	let mut uniforms: Vec<(UniformType, String)> = Vec::new();
+	let mut uniforms: Vec<(UniformType, String, usize)> = Vec::new();
 	let mut textures: Vec<String> = Vec::new();
 
 	for line in glsl.lines() {
-		if let Some((ty, name)) = parse_uniform_line(line) {
+		if let Some((ty, name, count)) = parse_uniform_line(line) {
 			if is_sampler_type(ty) {
-				textures.push(name.to_string());
+				for _ in 0..count {
+					textures.push(name.to_string());
+				}
 				continue;
 			}
-			match UniformType::from_keyword(ty) {
-				Some(t) => {
-					uniforms.push((t, name.to_string()));
-					continue;
-				}
-				None => {
+			let base = UniformType::from_keyword(ty);
+			let uniform = match (base, count) {
+				(Some(UniformType::Vec4), n) if n > 1 => UniformType::Vec4Array(n),
+				(Some(t), n) if n == 1 => t,
+				_ => {
 					return Err(Error::Failed(format!(
-						"unsupported uniform type in shader: {ty} {name}"
+						"unsupported array uniform type in shader: {ty} {name}[{count}]"
 					)));
 				}
-			}
+			};
+			uniforms.push((uniform, name.to_string(), count));
+			continue;
 		}
 		body_lines.push(line.to_string());
 	}
@@ -465,7 +497,7 @@ pub fn translate(glsl: &str) -> Result<TranslatedShader> {
 		src.push_str("layout(std140, set = 0, binding = ");
 		src.push_str(&UNIFORM_BLOCK_BINDING.to_string());
 		src.push_str(") uniform OakParams {\n");
-		for (ty, name) in &uniforms {
+		for (ty, name, count) in &uniforms {
 			// bools are declared as int (WGSL has no host-shareable
 			// bool); the body's uses were rewritten to `bool(x)`.
 			let kw = if *ty == UniformType::Bool {
@@ -473,7 +505,11 @@ pub fn translate(glsl: &str) -> Result<TranslatedShader> {
 			} else {
 				ty.keyword()
 			};
-			src.push_str(&format!("    {kw} {name};\n"));
+			if *count > 1 {
+				src.push_str(&format!("    {kw} {name}[{}];\n", count));
+			} else {
+				src.push_str(&format!("    {kw} {name};\n"));
+			}
 		}
 		src.push_str("};\n");
 	}
@@ -513,7 +549,7 @@ pub fn translate(glsl: &str) -> Result<TranslatedShader> {
 		}
 		// WGSL has no host-shareable bool: bool uniforms live in the
 		// block as `int`, so their uses become `bool(x)` (nonzero test).
-		for (ty, name) in &uniforms {
+		for (ty, name, _count) in &uniforms {
 			if *ty == UniformType::Bool {
 				l = replace_ident(&l, name, &format!("bool({name})"));
 			}
@@ -556,7 +592,7 @@ pub fn translate(glsl: &str) -> Result<TranslatedShader> {
 	// std140 offsets (declaration order; the block tail pads to 16).
 	let mut offset = 0usize;
 	let mut decls = Vec::with_capacity(uniforms.len());
-	for (ty, name) in uniforms {
+	for (ty, name, _count) in uniforms {
 		let align = ty.align();
 		offset = offset.next_multiple_of(align);
 		decls.push(UniformDecl { name, ty, offset });
@@ -642,14 +678,65 @@ void main() {
 		assert_eq!(out.uniform_block_bytes, 48);
 	}
 
-	/// Array uniforms are unsupported (C++ Blit skipped them too).
+	/// Array uniforms translate into the block as packed std140 arrays
+	/// (polygon's `points_in[64]`; the declaration order determines the
+	/// offsets: `int` @0, the vec4 array aligned to 16 @16, the trailing
+	/// vec2 aligned to 8).
 	#[test]
-	fn array_uniforms_are_rejected() {
-		let glsl = "uniform float taps_in[8];\nvoid main() {}\n";
-		// The array syntax is not a parseable `uniform <type> <name>;`
-		// line for our parser, so the declaration is left in the body and
-		// naga sees it — either way the translation must not panic.
-		let _ = translate(glsl);
+	fn array_uniforms_translate_and_pack() {
+		use oak_node::value::{NodeValue, NodeValueRow};
+		let glsl = r#"
+uniform int point_count;
+uniform vec4 points_in[64];
+uniform vec2 resolution_in;
+
+in vec2 ove_texcoord;
+out vec4 frag_color;
+
+void main() { frag_color = vec4(0.0); }
+"#;
+		let out = translate(glsl).expect("translate array uniforms");
+		let decls: Vec<(&str, &UniformType, usize)> = out
+			.uniforms
+			.iter()
+			.map(|u| (u.name.as_str(), &u.ty, u.offset))
+			.collect();
+		assert_eq!(
+			decls,
+			vec![
+				("point_count", &UniformType::Int, 0),
+				("points_in", &UniformType::Vec4Array(64), 16),
+				("resolution_in", &UniformType::Vec2, 16 + 64 * 16),
+			]
+		);
+		assert_eq!(
+			out.uniform_block_bytes,
+			(16 + 64 * 16 + 8usize).next_multiple_of(16)
+		);
+
+		let mut row = NodeValueRow::new();
+		row.insert("point_count".into(), NodeValue::Int(3));
+		row.insert(
+			"points_in".into(),
+			NodeValue::Vec4Array(vec![[1.0, 2.0, 0.0, 0.0], [3.0, 4.0, 0.0, 0.0]]),
+		);
+		let buf = pack_uniforms(&out, &row);
+		assert_eq!(buf.len(), out.uniform_block_bytes);
+		let count = out.uniforms.iter().find(|u| u.name == "point_count").unwrap();
+		assert_eq!(
+			i32::from_le_bytes(buf[count.offset..count.offset + 4].try_into().unwrap()),
+			3
+		);
+		let points = out.uniforms.iter().find(|u| u.name == "points_in").unwrap();
+		let at = |i: usize, c: usize| points.offset + i * 16 + c * 4;
+		assert_eq!(f32::from_le_bytes(buf[at(0, 0)..at(0, 1)].try_into().unwrap()), 1.0);
+		assert_eq!(f32::from_le_bytes(buf[at(0, 1)..at(0, 2)].try_into().unwrap()), 2.0);
+		assert_eq!(f32::from_le_bytes(buf[at(1, 0)..at(1, 1)].try_into().unwrap()), 3.0);
+		// Short arrays pad the remaining slots to zero.
+		assert_eq!(
+			f32::from_le_bytes(buf[at(63, 0)..at(63, 1)].try_into().unwrap()),
+			0.0
+		);
 	}
 
 	/// Uniform packing follows the declared types and std140 offsets.
@@ -814,6 +901,165 @@ void main() { frag_color = texture(tex_in, ove_texcoord); }
 				"px {x}: got {got}, want {want}"
 			);
 		}
+		ctx.destroy_texture(src);
+		ctx.destroy_texture(dst);
+	}
+	/// The polygon generator's shader rasterizes the default pentagon on
+	/// the GPU: the center texel inside the closed point loop is opaque
+	/// white, the frame corner is transparent, and the 1-point fallback
+	/// renders nothing.
+	#[test]
+	fn gpu_polygon_rasterizes_pentagon() {
+		let Some(ctx) = gpu() else {
+			eprintln!("no adapter; skipping");
+			return;
+		};
+		let (_core, behavior) = oak_node::factory::Factory::global()
+			.create_any("org.olivevideoeditor.Olive.polygon")
+			.unwrap();
+		let glsl = behavior.shader_code("rgb").unwrap();
+		let effect = compile_effect(&ctx, "test/polygon", &glsl, false).unwrap();
+
+		let dst = ctx.create_texture(512, 512).unwrap();
+		let mut row = oak_node::value::NodeValueRow::new();
+		row.insert(
+			"points_in".into(),
+			oak_node::value::NodeValue::Vec4Array(vec![
+				[0.0, -135.0, 0.0, 0.0],
+				[135.0, -45.0, 0.0, 0.0],
+				[90.0, 120.0, 0.0, 0.0],
+				[-90.0, 120.0, 0.0, 0.0],
+				[-135.0, -45.0, 0.0, 0.0],
+			]),
+		);
+		row.insert("point_count".into(), oak_node::value::NodeValue::Int(5));
+		row.insert(
+			"color_in".into(),
+			oak_node::value::NodeValue::Color([1.0, 1.0, 1.0, 1.0]),
+		);
+		run_effect(&ctx, &effect, &row, &[], dst, (512, 512), 1).unwrap();
+		let out = ctx.download(dst).unwrap();
+
+		let center = pixel(&out, 256 * 512 + 256);
+		assert_eq!(center, [1.0, 1.0, 1.0, 1.0], "center is inside the pentagon");
+		let corner = pixel(&out, 0);
+		assert_eq!(corner, [0.0, 0.0, 0.0, 0.0], "corner is outside");
+
+		// Degenerate: a single point draws nothing.
+		row.insert("point_count".into(), oak_node::value::NodeValue::Int(1));
+		run_effect(&ctx, &effect, &row, &[], dst, (512, 512), 1).unwrap();
+		let out = ctx.download(dst).unwrap();
+		assert_eq!(
+			pixel(&out, 256 * 512 + 256),
+			[0.0, 0.0, 0.0, 0.0],
+			"single point draws nothing"
+		);
+
+		ctx.destroy_texture(dst);
+	}
+
+	/// The mask effect's shader multiplies the base texture by the
+	/// pentagon matte on the GPU: the center texel keeps the base value,
+	/// the corner is cleared, and with `invert_in` the result flips.
+	#[test]
+	fn gpu_mask_multiplies_base_by_pentagon() {
+		let Some(ctx) = gpu() else {
+			eprintln!("no adapter; skipping");
+			return;
+		};
+		let (_core, behavior) = oak_node::factory::Factory::global()
+			.create_any("org.olivevideoeditor.Olive.mask")
+			.unwrap();
+		let glsl = behavior.shader_code("mask").unwrap();
+		let effect = compile_effect(&ctx, "test/mask", &glsl, false).unwrap();
+
+		let src = ctx.create_texture(512, 512).unwrap();
+		let dst = ctx.create_texture(512, 512).unwrap();
+		let gray = crate::shaderfx::tests::f32_frame(512, 512, |_| {
+			[0.5, 0.5, 0.5, 1.0]
+		});
+		ctx.upload(src, &gray).unwrap();
+
+		let mut row = oak_node::value::NodeValueRow::new();
+		row.insert(
+			"points_in".into(),
+			oak_node::value::NodeValue::Vec4Array(vec![
+				[0.0, -135.0, 0.0, 0.0],
+				[135.0, -45.0, 0.0, 0.0],
+				[90.0, 120.0, 0.0, 0.0],
+				[-90.0, 120.0, 0.0, 0.0],
+				[-135.0, -45.0, 0.0, 0.0],
+			]),
+		);
+		row.insert("point_count".into(), oak_node::value::NodeValue::Int(5));
+		row.insert("feather_in".into(), oak_node::value::NodeValue::Float(0.0));
+		row.insert("invert_in".into(), oak_node::value::NodeValue::Boolean(false));
+		run_effect(
+			&ctx,
+			&effect,
+			&row,
+			&[("base_in".to_string(), src)],
+			dst,
+			(512, 512),
+			1,
+		)
+		.unwrap();
+		let out = ctx.download(dst).unwrap();
+		let center = pixel(&out, 256 * 512 + 256);
+		assert_eq!(center, [0.5, 0.5, 0.5, 1.0], "center keeps the base");
+		assert_eq!(pixel(&out, 0), [0.0, 0.0, 0.0, 0.0], "corner is masked out");
+
+		// Inverted: the corner keeps the base, the center is cleared.
+		row.insert("invert_in".into(), oak_node::value::NodeValue::Boolean(true));
+		run_effect(
+			&ctx,
+			&effect,
+			&row,
+			&[("base_in".to_string(), src)],
+			dst,
+			(512, 512),
+			1,
+		)
+		.unwrap();
+		let out = ctx.download(dst).unwrap();
+		assert_eq!(pixel(&out, 0), [0.5, 0.5, 0.5, 1.0], "inverted corner keeps base");
+		assert_eq!(
+			pixel(&out, 256 * 512 + 256),
+			[0.0, 0.0, 0.0, 0.0],
+			"inverted center cleared"
+		);
+
+		// Feather: a square polygon with radius 4 softens the edge — the
+		// pixel right outside the crisp edge becomes partially visible.
+		row.insert("invert_in".into(), oak_node::value::NodeValue::Boolean(false));
+		row.insert("feather_in".into(), oak_node::value::NodeValue::Float(4.0));
+		row.insert(
+			"points_in".into(),
+			oak_node::value::NodeValue::Vec4Array(vec![
+				[-150.0, -150.0, 0.0, 0.0],
+				[150.0, -150.0, 0.0, 0.0],
+				[150.0, 150.0, 0.0, 0.0],
+				[-150.0, 150.0, 0.0, 0.0],
+			]),
+		);
+		row.insert("point_count".into(), oak_node::value::NodeValue::Int(4));
+		run_effect(
+			&ctx,
+			&effect,
+			&row,
+			&[("base_in".to_string(), src)],
+			dst,
+			(512, 512),
+			1,
+		)
+		.unwrap();
+		let out = ctx.download(dst).unwrap();
+		let soft = pixel(&out, 408 * 512 + 256)[0];
+		assert!(
+			soft > 0.02 && soft < 0.6,
+			"just outside the feathered edge is partially visible: {soft}"
+		);
+
 		ctx.destroy_texture(src);
 		ctx.destroy_texture(dst);
 	}

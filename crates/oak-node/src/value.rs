@@ -142,6 +142,9 @@ pub enum NodeValue {
 	Vec4([f64; 4]),
 	/// 4x4 matrix, row-major 16 elements (C++ `k_matrix`).
 	Matrix([f64; 16]),
+	/// Array of `vec4` values (C++ bezier `points_in` array input; the
+	/// polygon generator's point table, packed as `vec4[i]` uniforms).
+	Vec4Array(Vec<[f64; 4]>),
 	/// Combo index.
 	Combo(i64),
 	/// String combo.
@@ -410,6 +413,7 @@ impl NodeValue {
 			NodeValue::Vec2(_) => ValueType::Vec2,
 			NodeValue::Vec3(_) => ValueType::Vec3,
 			NodeValue::Vec4(_) => ValueType::Vec4,
+			NodeValue::Vec4Array(_) => ValueType::Vec4,
 			NodeValue::Matrix(_) => ValueType::Matrix,
 			NodeValue::Combo(_) => ValueType::Combo,
 			NodeValue::StrCombo(_) => ValueType::StrCombo,
@@ -710,6 +714,7 @@ impl Clone for NodeValue {
 			NodeValue::Vec2(v) => NodeValue::Vec2(*v),
 			NodeValue::Vec3(v) => NodeValue::Vec3(*v),
 			NodeValue::Vec4(v) => NodeValue::Vec4(*v),
+			NodeValue::Vec4Array(v) => NodeValue::Vec4Array(v.clone()),
 			NodeValue::Matrix(v) => NodeValue::Matrix(*v),
 			NodeValue::Combo(v) => NodeValue::Combo(*v),
 			NodeValue::StrCombo(v) => NodeValue::StrCombo(v.clone()),
