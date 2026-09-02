@@ -82,6 +82,68 @@ pub struct OCIOGradingTransformLinearNode {
 	base: OcioBase,
 }
 
+/// Fragment shader. The `%1` marker is replaced at request time with the
+/// OCIO-generated grading-primary GLSL stub for the linear style (the
+/// renderer's OCIO_GRADING_STUBS entry; the stub declares
+/// the `ocio_grading_primary_*` uniforms and `ove_grading_primary`), and
+/// the body applies it to the sampled input. The uniform names match the
+/// grading input ids, so the rewritten params row binds by name — the
+/// C++ job's `values` assigned to the GPU uniforms by name-match the same
+/// way.
+const SHADER_FRAG: &str = r#"// Main texture input
+uniform sampler2D tex_in;
+
+// Main texture coordinate
+in vec2 ove_texcoord;
+out vec4 frag_color;
+
+// Program will replace this with OCIO's auto-generated shader code
+%1
+
+void main() {
+  vec4 col = texture(tex_in, ove_texcoord);
+  frag_color = ove_grading_primary(col);
+}
+"#;
+
+/// Row value for `id` (the traverser convention), else the node's own
+/// standard/keyframe value (C++ `GetValueAtTime` parity for direct
+/// calls).
+fn row_or_standard(
+	core: &NodeCore,
+	inputs: &crate::value::NodeValueRow,
+	id: &str,
+	time: oak_core::Rational,
+) -> crate::value::NodeValue {
+	match inputs.get(id) {
+		Some(v) => v.clone(),
+		None => core.value_at_time(id, -1, time),
+	}
+}
+
+/// A vec4 input value as `[x, y, z, w]` (x = master per the RGBM
+/// convention), collecting a generic numeric value into a padded array.
+fn to_vec4(v: crate::value::NodeValue) -> [f64; 4] {
+	match v {
+		crate::value::NodeValue::Vec4(v) => v,
+		crate::value::NodeValue::Vec3(v) => [v[0], v[1], v[2], 0.0],
+		crate::value::NodeValue::Vec2(v) => [v[0], v[1], 0.0, 0.0],
+		crate::value::NodeValue::Float(v) => [v, v, v, v],
+		_ => [0.0; 4],
+	}
+}
+
+/// The per-channel vec3 the OCIO GPU uniforms expect: `rgb[i] =
+/// f(channel[i], master)`.
+fn channel_merge(v: [f64; 4], f: impl Fn(f64, f64) -> f64) -> crate::value::NodeValue {
+	let m = v[0];
+	crate::value::NodeValue::Vec3([
+		f(v[1], m),
+		f(v[2], m),
+		f(v[3], m),
+	])
+}
+
 /// Set or replace an input property (C++ `set_input_property`).
 fn set_input_property(core: &mut NodeCore, input: &str, key: &str, value: crate::value::NodeValue) {
 	if let Some(input) = core.get_input_mut(input) {
@@ -291,15 +353,20 @@ impl NodeBehavior for OCIOGradingTransformLinearNode {
 	}
 
 	/// Evaluate outputs (C++ `value()`): no texture -> push nothing;
-	/// processor not ready -> push nothing (unlike the base, there is no
-	/// pass-through branch). Otherwise builds a `ColorTransformJob` from
-	/// the whole input row and rewrites the vec4 (RGBM: x = master)
-	/// inputs into the vec3 form the GPU uniforms expect: offset RGB =
-	/// channel + master; exposure RGB = 2^(channel + master); contrast
-	/// RGB = channel * master. Disabled clamps are pushed as
-	/// `GradingPrimary::NoClampBlack()/NoClampWhite()`, and when both
-	/// clamps are enabled the white clamp is raised to black + 0.000001
-	/// per frame if keyframed/connected values violate white > black.
+	/// otherwise pushes a REAL [`ShaderJobPayload`] whose params carry the
+	/// input row rewritten into the vec3 form the OCIO-generated GPU
+	/// uniforms expect — the C++ job's `values` rewrite, applied to the
+	/// uniform names the renderer's grading stub declares:
+	/// `ocio_grading_primary_contrast` RGB = channel * master, `offset`
+	/// RGB = channel + master, `exposure` RGB = 2^(channel + master).
+	/// Disabled clamps are pushed as `GradingPrimary::NoClampBlack()`
+	/// (-1.0) / `NoClampWhite()` (2.0), and when both clamps are enabled
+	/// the white clamp is raised to black + 0.000001 per frame if
+	/// keyframed/connected values violate white > black. The transform
+	/// itself is the OCIO shader the renderer splices in — the processor
+	/// is generated at render time from the default config, so the
+	/// evaluation-time guard (C++ processor gate) is replaced by the
+	/// node's own presence check on the input texture.
 	fn value(
 		&self,
 		core: &NodeCore,
@@ -307,33 +374,97 @@ impl NodeBehavior for OCIOGradingTransformLinearNode {
 		time: oak_core::Rational,
 		table: &mut crate::value::NodeValueTable,
 	) {
-		let _ = (core, time);
-		match inputs.get(crate::nodes::ociobase::TEXTURE_INPUT) {
-			Some(crate::value::NodeValue::Texture(_)) => {
-				if self.base.processor().is_some() {
-					// `// CPP-PARITY: ociogradingtransformlinear.cpp`
-					// `value()` — the C++ builds a ColorTransformJob and
-					// rewrites the vec4 (RGBM: x = master) inputs into the
-					// vec3 GPU uniform form: offset RGB = channel +
-					// master, exposure RGB = 2^(channel + master),
-					// contrast RGB = channel * master. Disabled clamps
-					// are pushed as `ocio::GradingPrimary::NoClampBlack()`
-					// (-1.0) / `NoClampWhite()` (2.0), and when both
-					// clamps are enabled the white clamp is raised to
-					// black + 0.000001 per frame if keyframed/connected
-					// values violate white > black. The Rust model has no
-					// color-transform job payload: the renderer seam
-					// resolves the deferred job from this null handle.
-					table.push(
-						crate::value::ValueType::Texture,
-						crate::value::NodeValue::Texture(crate::handle::CHandle::null()),
-						None,
-					);
-				}
-				// Processor not ready: push nothing (no pass-through).
-			}
-			_ => {}
+		let _ = self;
+		if !matches!(
+			inputs.get(crate::nodes::ociobase::TEXTURE_INPUT),
+			Some(crate::value::NodeValue::Texture(_))
+		) {
+			return;
 		}
+
+		let mut params = inputs.clone();
+
+		// vec4 (RGBM: x = master) inputs -> the vec3 GPU uniform form.
+		let contrast = to_vec4(row_or_standard(core, inputs, CONTRAST_INPUT, time));
+		let offset = to_vec4(row_or_standard(core, inputs, OFFSET_INPUT, time));
+		let exposure = to_vec4(row_or_standard(core, inputs, EXPOSURE_INPUT, time));
+		params.insert(
+			CONTRAST_INPUT.to_string(),
+			channel_merge(contrast, |c, m| c * m),
+		);
+		params.insert(
+			OFFSET_INPUT.to_string(),
+			channel_merge(offset, |c, m| c + m),
+		);
+		params.insert(
+			EXPOSURE_INPUT.to_string(),
+			channel_merge(exposure, |c, m| 2f64.powf(c + m)),
+		);
+
+		// Scalar uniforms (the IDs are the generated uniform names).
+		params.insert(
+			SATURATION_INPUT.to_string(),
+			row_or_standard(core, inputs, SATURATION_INPUT, time),
+		);
+		params.insert(
+			PIVOT_INPUT.to_string(),
+			row_or_standard(core, inputs, PIVOT_INPUT, time),
+		);
+
+		// Clamps: enabled -> the value, disabled -> the OCIO sentinels
+		// (NoClampBlack -1 / NoClampWhite 2 keep the GPU clamp a no-op).
+		let black_enabled = row_or_standard(core, inputs, CLAMP_BLACK_ENABLE_INPUT, time)
+			.to_double() != 0.0;
+		let white_enabled = row_or_standard(core, inputs, CLAMP_WHITE_ENABLE_INPUT, time)
+			.to_double() != 0.0;
+		let mut black =
+			row_or_standard(core, inputs, CLAMP_BLACK_INPUT, time).to_double();
+		let mut white =
+			row_or_standard(core, inputs, CLAMP_WHITE_INPUT, time).to_double();
+		if black_enabled && white_enabled {
+			// ocio::GradingPrimary::validate: white > black (per frame,
+			// when the static UI minimum cannot follow animated values).
+			white = white.max(black + 0.000001);
+		}
+		params.insert(
+			CLAMP_BLACK_INPUT.to_string(),
+			crate::value::NodeValue::Float(if black_enabled { black } else { -1.0 }),
+		);
+		params.insert(
+			CLAMP_WHITE_INPUT.to_string(),
+			crate::value::NodeValue::Float(if white_enabled { white } else { 2.0 }),
+		);
+		params.insert(
+			"ocio_grading_primary_localBypass".to_string(),
+			crate::value::NodeValue::Boolean(false),
+		);
+
+		let job = crate::handle::make_owned(crate::nodes::jobs::ShaderJobPayload {
+			node_id: crate::id::NodeId::INVALID,
+			time,
+			iterations: 1,
+			type_id: self.type_id().to_string(),
+			shader_id: "rgb".to_string(),
+			effect_input: crate::nodes::ociobase::TEXTURE_INPUT.to_string(),
+			params,
+			iterative_input: String::new(),
+		});
+		table.push(
+			crate::value::ValueType::Texture,
+			crate::value::NodeValue::Texture(job),
+			None,
+		);
+	}
+
+	/// Shader code request (C++ `get_shader_code()`): reads the fragment
+	/// shader and replaces every `%1` marker with `request` — the OCIO
+	/// auto-generated grading-primary shader text (C++ `GetShaderCode`
+	/// receives the stub from the renderer's color context; the Rust
+	/// renderer resolves it from the `OCIO_GRADING_STUBS` table before
+	/// calling, see [`crate::nodes::ociogradingtransformlog`]'s sibling
+	/// wiring).
+	fn shader_code(&self, request: &str) -> Option<String> {
+		Some(SHADER_FRAG.replace("%1", request))
 	}
 
 	/// Added to a graph (C++ base `AddedToGraphEvent`): captures the
@@ -767,31 +898,116 @@ mod tests {
 	}
 
 	#[test]
-	fn value_texture_without_processor_pushes_nothing() {
-		// Unlike the OCIO base, grading has no pass-through branch.
-		let core = NodeCore::new();
-		let n = node();
-		let inputs = crate::value::NodeValueRow::from([(
-			crate::nodes::ociobase::TEXTURE_INPUT.to_string(),
-			NodeValue::Texture(crate::handle::CHandle::null()),
-		)]);
+	fn value_texture_pushes_real_grading_job() {
+		let (core, behavior) = create();
+		let inputs = crate::value::NodeValueRow::from([
+			(
+				crate::nodes::ociobase::TEXTURE_INPUT.to_string(),
+				NodeValue::Texture(crate::handle::CHandle::null()),
+			),
+			(CONTRAST_INPUT.to_string(), NodeValue::Vec4([0.5, 0.25, 0.5, 0.75])),
+			(OFFSET_INPUT.to_string(), NodeValue::Vec4([0.25, -0.125, 0.0, 0.125])),
+			(EXPOSURE_INPUT.to_string(), NodeValue::Vec4([1.0, 0.0, 0.0, 0.0])),
+		]);
 		let mut table = NodeValueTable::default();
-		n.value(&core, &inputs, Rational::new(0, 1), &mut table);
-		assert!(table.is_empty());
+		behavior.value(&core, &inputs, Rational::new(0, 1), &mut table);
+		let tex = table.get(ValueType::Texture).expect("texture pushed");
+		let NodeValue::Texture(handle) = tex else {
+			panic!("pushed value is not a texture handle");
+		};
+		let job = unsafe {
+			crate::handle::get_checked::<crate::nodes::jobs::ShaderJobPayload>(handle)
+		}
+		.expect("real shader job");
+		assert_eq!(job.shader_id, "rgb");
+		assert_eq!(
+			job.type_id,
+			"org.olivevideoeditor.Olive.ociogradingtransformlinear"
+		);
+		assert_eq!(job.effect_input, crate::nodes::ociobase::TEXTURE_INPUT);
+		// vec4 (RGBM: x = master) rewrites: contrast RGB = c*m, offset
+		// RGB = c+m, exposure RGB = 2^(c+m).
+		assert_eq!(
+			job.params.get(CONTRAST_INPUT),
+			Some(&NodeValue::Vec3([0.125, 0.25, 0.375]))
+		);
+		assert_eq!(
+			job.params.get(OFFSET_INPUT),
+			Some(&NodeValue::Vec3([0.125, 0.25, 0.375]))
+		);
+		assert_eq!(
+			job.params.get(EXPOSURE_INPUT),
+			Some(&NodeValue::Vec3([2.0, 2.0, 2.0]))
+		);
+		// Scalar defaults from the node's standard values.
+		assert_eq!(
+			job.params.get(SATURATION_INPUT),
+			Some(&NodeValue::Float(1.0))
+		);
+		assert_eq!(job.params.get(PIVOT_INPUT), Some(&NodeValue::Float(0.18)));
+		// Clamps disabled -> OCIO sentinels (NoClampBlack/NoClampWhite).
+		assert_eq!(
+			job.params.get(CLAMP_BLACK_INPUT),
+			Some(&NodeValue::Float(-1.0))
+		);
+		assert_eq!(
+			job.params.get(CLAMP_WHITE_INPUT),
+			Some(&NodeValue::Float(2.0))
+		);
+		assert_eq!(
+			job.params.get("ocio_grading_primary_localBypass"),
+			Some(&NodeValue::Boolean(false))
+		);
 	}
 
 	#[test]
-	fn value_texture_with_processor_pushes_deferred_job() {
-		let core = NodeCore::new();
-		let mut n = node();
-		n.base.set_processor(Some(crate::handle::CHandle::null()));
-		let inputs = crate::value::NodeValueRow::from([(
-			crate::nodes::ociobase::TEXTURE_INPUT.to_string(),
-			NodeValue::Texture(crate::handle::CHandle::null()),
-		)]);
+	fn value_enables_clamp_when_flagged_of_white_and_black() {
+		let (core, behavior) = create();
+		let inputs = crate::value::NodeValueRow::from([
+			(
+				crate::nodes::ociobase::TEXTURE_INPUT.to_string(),
+				NodeValue::Texture(crate::handle::CHandle::null()),
+			),
+			(
+				CLAMP_BLACK_ENABLE_INPUT.to_string(),
+				NodeValue::Boolean(true),
+			),
+			(
+				CLAMP_WHITE_ENABLE_INPUT.to_string(),
+				NodeValue::Boolean(true),
+			),
+			(CLAMP_BLACK_INPUT.to_string(), NodeValue::Float(0.5)),
+			(CLAMP_WHITE_INPUT.to_string(), NodeValue::Float(0.4)),
+		]);
 		let mut table = NodeValueTable::default();
-		n.value(&core, &inputs, Rational::new(0, 1), &mut table);
-		assert!(table.get(ValueType::Texture).is_some());
+		behavior.value(&core, &inputs, Rational::new(0, 1), &mut table);
+		let tex = table.get(ValueType::Texture).expect("texture pushed");
+		let NodeValue::Texture(handle) = tex else {
+			panic!("pushed value is not a texture handle");
+		};
+		let job = unsafe {
+			crate::handle::get_checked::<crate::nodes::jobs::ShaderJobPayload>(handle)
+		}
+		.expect("real shader job");
+		// White <= black is raised to black + 0.000001.
+		assert_eq!(
+			job.params.get(CLAMP_BLACK_INPUT),
+			Some(&NodeValue::Float(0.5))
+		);
+		assert_eq!(
+			job.params.get(CLAMP_WHITE_INPUT),
+			Some(&NodeValue::Float(0.500001))
+		);
+	}
+
+	#[test]
+	fn shader_code_splices_stub_marker() {
+		let n = node();
+		let stub = "vec4 ove_grading_primary(vec4 c) { return c; }";
+		let code = n.shader_code(stub).unwrap();
+		assert!(!code.contains("%1"));
+		assert!(code.contains("ove_grading_primary(col)"));
+		assert!(code.contains(stub));
 	}
 
 	#[test]

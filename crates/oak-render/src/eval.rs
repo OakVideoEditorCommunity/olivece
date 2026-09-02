@@ -60,6 +60,22 @@ pub const OCIO_SHADER_STUBS: &[(&str, &str, &str, &str)] = &[(
 	"cie_xyz_d65_interchange",
 )];
 
+/// Static mapping of the OCIO grading nodes to the grading-primary style
+/// whose dynamic GPU shader they splice at their `%1` marker (C++
+/// `oakrender_color_processor_create_grading_primary` with the node's
+/// `GRADING_LIN`/`GRADING_LOG` style; the processor is built against the
+/// default config at render time).
+pub const OCIO_GRADING_STUBS: &[(&str, crate::color::GradingStyle)] = &[
+	(
+		"org.olivevideoeditor.Olive.ociogradingtransformlinear",
+		crate::color::GradingStyle::Lin,
+	),
+	(
+		"org.olivevideoeditor.Olive.OCIO_NAMESPACEgradingtransformlog",
+		crate::color::GradingStyle::Log,
+	),
+];
+
 /// The OCIO GPU function shader for `type_id` (the `%1` stub), or `None`
 /// when the node is not OCIO-based or the processor cannot be generated
 /// (no default config, or a LUT processor the renderer cannot upload).
@@ -69,6 +85,16 @@ pub fn ocio_stub_for(type_id: &str) -> Option<String> {
 		.find(|(id, ..)| *id == type_id)
 		.copied()?;
 	crate::color::ocio_function_shader(fn_name, from, to)
+}
+
+/// The OCIO grading GPU shader for `type_id` (the `%1` stub), or `None`
+/// when the node is not a grading node or no default config is set up.
+pub fn grading_stub_for(type_id: &str) -> Option<String> {
+	let (_, style) = OCIO_GRADING_STUBS
+		.iter()
+		.find(|(id, _)| *id == type_id)
+		.copied()?;
+	crate::color::grading_primary_function_shader(style)
 }
 
 /// Job specification: the closed set of C++ `*Job` payloads
@@ -573,8 +599,24 @@ impl RenderEvalHooks {
 			.iter()
 			.find(|(id, ..)| *id == payload.type_id)
 			.copied();
-		let glsl = match ocio_entry {
-			Some((_, fn_name, from, to)) => {
+		let grading_entry = OCIO_GRADING_STUBS
+			.iter()
+			.find(|(id, _)| *id == payload.type_id)
+			.copied();
+		let glsl = match (grading_entry, ocio_entry) {
+			(Some((_, style)), _) => {
+				let Some(stub) = crate::color::grading_primary_function_shader(style) else {
+					return None;
+				};
+				match behavior.shader_code(&stub) {
+					Some(glsl) => glsl,
+					None => {
+						warn("shader not found");
+						return None;
+					}
+				}
+			}
+			(None, Some((_, fn_name, from, to))) => {
 				let Some(stub) = crate::color::ocio_function_shader(fn_name, from, to) else {
 					return None;
 				};
@@ -586,7 +628,7 @@ impl RenderEvalHooks {
 					}
 				}
 			}
-			None => match behavior.shader_code(&payload.shader_id) {
+			(None, None) => match behavior.shader_code(&payload.shader_id) {
 				Some(glsl) => glsl,
 				None => {
 					warn("shader not found");
@@ -598,18 +640,18 @@ impl RenderEvalHooks {
 		// Pipeline cache key: the type id plus the shader-variant id (the
 		// OCIO stub text folds in too, so a config change recompiles
 		// instead of reusing a stale variant).
-		let key = match ocio_entry {
-			Some(_) => {
-				let mut h = std::collections::hash_map::DefaultHasher::new();
-				std::hash::Hash::hash(&glsl, &mut h);
-				format!(
-					"{}:{}:ocio:{}",
-					payload.type_id,
-					payload.shader_id,
-					std::hash::Hasher::finish(&h)
-				)
-			}
-			None => format!("{}:{}", payload.type_id, payload.shader_id),
+		let spliced_ocio = grading_entry.is_some() || ocio_entry.is_some();
+		let key = if spliced_ocio {
+			let mut h = std::collections::hash_map::DefaultHasher::new();
+			std::hash::Hash::hash(&glsl, &mut h);
+			format!(
+				"{}:{}:ocio:{}",
+				payload.type_id,
+				payload.shader_id,
+				std::hash::Hasher::finish(&h)
+			)
+		} else {
+			format!("{}:{}", payload.type_id, payload.shader_id)
 		};
 		let compiled = match compile_effect(&ctx, &key, &glsl, ctx.is_filterable()) {
 			Ok(effect) => effect,

@@ -1064,6 +1064,179 @@ void main() { frag_color = texture(tex_in, ove_texcoord); }
 		ctx.destroy_texture(dst);
 	}
 
+	/// The linear grading node's OCIO-spliced shader doubles gray under
+	/// +1 stop of master exposure (2^1 * 0.2 = 0.4) and gates the
+	/// transform behind the localBypass uniform off.
+	#[test]
+	fn gpu_grading_linear_applies_exposure() {
+		let Some(ctx) = gpu() else {
+			eprintln!("no adapter; skipping");
+			return;
+		};
+		let Some(stub) = crate::eval::grading_stub_for(
+			"org.olivevideoeditor.Olive.ociogradingtransformlinear",
+		) else {
+			eprintln!("no OCIO config; skipping");
+			return;
+		};
+		let (_core, behavior) = oak_node::factory::Factory::global()
+			.create_any("org.olivevideoeditor.Olive.ociogradingtransformlinear")
+			.unwrap();
+		let glsl = behavior.shader_code(&stub).unwrap();
+		let effect = compile_effect(&ctx, "test/grading-lin", &glsl, false).unwrap();
+
+		let src = ctx.create_texture(8, 4).unwrap();
+		let dst = ctx.create_texture(8, 4).unwrap();
+		let gray = crate::shaderfx::tests::f32_frame(8, 4, |_| [0.2, 0.2, 0.2, 1.0]);
+		ctx.upload(src, &gray).unwrap();
+
+		let mut row = oak_node::value::NodeValueRow::new();
+		row.insert(
+			"ocio_grading_primary_exposure".into(),
+			oak_node::value::NodeValue::Vec3([2.0, 2.0, 2.0]),
+		);
+		row.insert(
+			"ocio_grading_primary_contrast".into(),
+			oak_node::value::NodeValue::Vec3([1.0, 1.0, 1.0]),
+		);
+		row.insert(
+			"ocio_grading_primary_offset".into(),
+			oak_node::value::NodeValue::Vec3([0.0, 0.0, 0.0]),
+		);
+		row.insert(
+			"ocio_grading_primary_saturation".into(),
+			oak_node::value::NodeValue::Float(1.0),
+		);
+		row.insert(
+			"ocio_grading_primary_pivot".into(),
+			oak_node::value::NodeValue::Float(0.18),
+		);
+		row.insert(
+			"ocio_grading_primary_clampBlack".into(),
+			oak_node::value::NodeValue::Float(-1.0),
+		);
+		row.insert(
+			"ocio_grading_primary_clampWhite".into(),
+			oak_node::value::NodeValue::Float(2.0),
+		);
+		row.insert(
+			"ocio_grading_primary_localBypass".into(),
+			oak_node::value::NodeValue::Boolean(false),
+		);
+		run_effect(
+			&ctx,
+			&effect,
+			&row,
+			&[("tex_in".to_string(), src)],
+			dst,
+			(8, 4),
+			1,
+		)
+		.unwrap();
+		let out = ctx.download(dst).unwrap();
+		for px in 0..8usize {
+			let got = pixel(&out, px);
+			let want = [0.4f32, 0.4, 0.4, 1.0];
+			assert!(
+				(got[0] - want[0]).abs() < 1e-3,
+				"px {px}: exposure must double gray, got {got:?}"
+			);
+		}
+
+		ctx.destroy_texture(src);
+		ctx.destroy_texture(dst);
+	}
+
+	/// The log grading node's OCIO-spliced shader: brightness (lift) of
+	/// +0.1 shifts 0.2 gray to 0.3 with the identity gain/gamma/pivot
+	/// defaults.
+	#[test]
+	fn gpu_grading_log_applies_lift() {
+		let Some(ctx) = gpu() else {
+			eprintln!("no adapter; skipping");
+			return;
+		};
+		let Some(stub) = crate::eval::grading_stub_for(
+			"org.olivevideoeditor.Olive.OCIO_NAMESPACEgradingtransformlog",
+		) else {
+			eprintln!("no OCIO config; skipping");
+			return;
+		};
+		let (_core, behavior) = oak_node::factory::Factory::global()
+			.create_any("org.olivevideoeditor.Olive.OCIO_NAMESPACEgradingtransformlog")
+			.unwrap();
+		let glsl = behavior.shader_code(&stub).unwrap();
+		let effect = compile_effect(&ctx, "test/grading-log", &glsl, false).unwrap();
+
+		let src = ctx.create_texture(8, 4).unwrap();
+		let dst = ctx.create_texture(8, 4).unwrap();
+		let gray = crate::shaderfx::tests::f32_frame(8, 4, |_| [0.2, 0.2, 0.2, 1.0]);
+		ctx.upload(src, &gray).unwrap();
+
+		let mut row = oak_node::value::NodeValueRow::new();
+		row.insert(
+			"ocio_grading_primary_brightness".into(),
+			oak_node::value::NodeValue::Vec3([0.1, 0.1, 0.1]),
+		);
+		row.insert(
+			"ocio_grading_primary_contrast".into(),
+			oak_node::value::NodeValue::Vec3([1.0, 1.0, 1.0]),
+		);
+		row.insert(
+			"ocio_grading_primary_gamma".into(),
+			oak_node::value::NodeValue::Vec3([1.0, 1.0, 1.0]),
+		);
+		row.insert(
+			"ocio_grading_primary_saturation".into(),
+			oak_node::value::NodeValue::Float(1.0),
+		);
+		row.insert(
+			"ocio_grading_primary_pivot".into(),
+			oak_node::value::NodeValue::Float(-0.2),
+		);
+		row.insert(
+			"ocio_grading_primary_pivotBlack".into(),
+			oak_node::value::NodeValue::Float(0.0),
+		);
+		row.insert(
+			"ocio_grading_primary_pivotWhite".into(),
+			oak_node::value::NodeValue::Float(1.0),
+		);
+		row.insert(
+			"ocio_grading_primary_clampBlack".into(),
+			oak_node::value::NodeValue::Float(-1.0),
+		);
+		row.insert(
+			"ocio_grading_primary_clampWhite".into(),
+			oak_node::value::NodeValue::Float(2.0),
+		);
+		row.insert(
+			"ocio_grading_primary_localBypass".into(),
+			oak_node::value::NodeValue::Boolean(false),
+		);
+		run_effect(
+			&ctx,
+			&effect,
+			&row,
+			&[("tex_in".to_string(), src)],
+			dst,
+			(8, 4),
+			1,
+		)
+		.unwrap();
+		let out = ctx.download(dst).unwrap();
+		for px in 0..8usize {
+			let got = pixel(&out, px);
+			assert!(
+				(got[0] - 0.3).abs() < 1e-3,
+				"px {px}: lift must shift gray, got {got:?}"
+			);
+		}
+
+		ctx.destroy_texture(src);
+		ctx.destroy_texture(dst);
+	}
+
 	/// Every registered node type that ships a shader must translate (the
 	/// all-shaders sweep). OCIO-stubbed shaders (`%1` markers needing the
 	/// OCIO-generated function text) retry with the real OCIO stub first;
@@ -1089,29 +1262,38 @@ void main() { frag_color = texture(tex_in, ove_texcoord); }
 					// OCIO config is available (stub build), fall back to
 					// a pass-through function so the sweep still covers
 					// the node's own shader body.
-					let retried = crate::eval::ocio_stub_for(meta.type_id)
-						.or_else(|| {
-							crate::eval::OCIO_SHADER_STUBS
-								.iter()
-								.find(|(id, ..)| *id == meta.type_id)
-								.map(|(_, fn_name, ..)| {
-									format!("vec4 {fn_name}(vec4 c) {{ return c; }}")
-								})
-						});
-					match retried {
-						Some(stub) => match translate(&behavior.shader_code(&stub).unwrap()) {
-							Ok(_) => ok.push(meta.type_id),
-							Err(e) => {
-								failed.push((meta.type_id, format!("with OCIO stub: {e:?}")))
-							}
-						},
-						None if msg.contains("SceneLinear") || msg.contains("UnknownFunction") => {
-							// Not in the stub table but still OCIO-shaped:
-							// report separately, not as a regression.
-							ocio_stubbed.push(meta.type_id);
+				let retried = crate::eval::ocio_stub_for(meta.type_id)
+					.or_else(|| {
+						crate::eval::OCIO_SHADER_STUBS
+							.iter()
+							.find(|(id, ..)| *id == meta.type_id)
+							.map(|(_, fn_name, ..)| {
+								format!("vec4 {fn_name}(vec4 c) {{ return c; }}")
+							})
+					})
+					.or_else(|| crate::eval::grading_stub_for(meta.type_id))
+					.or_else(|| {
+						crate::eval::OCIO_GRADING_STUBS
+							.iter()
+							.find(|(id, _)| *id == meta.type_id)
+							.map(|_| "vec4 ove_grading_primary(vec4 c) { return c; }".to_string())
+					});
+				match retried {
+					Some(stub) => match translate(&behavior.shader_code(&stub).unwrap()) {
+						Ok(_) => ok.push(meta.type_id),
+						Err(e) => {
+							failed.push((meta.type_id, format!("with OCIO stub: {e:?}")))
 						}
-						None => failed.push((meta.type_id, msg)),
+					},
+					None if msg.contains("SceneLinear")
+						|| msg.contains("UnknownFunction")
+						|| msg.contains("ove_grading_primary") => {
+						// Not in the stub table but still OCIO-shaped:
+						// report separately, not as a regression.
+						ocio_stubbed.push(meta.type_id);
 					}
+					None => failed.push((meta.type_id, msg)),
+				}
 				}
 			}
 		}

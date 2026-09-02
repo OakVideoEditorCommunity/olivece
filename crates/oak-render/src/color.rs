@@ -675,6 +675,64 @@ fn build_ocio_function_shader(
 	desc.shader_text()
 }
 
+/// Cache of generated grading GLSL stubs, keyed by style + config cache id
+/// (same shape as [`OCIO_STUB_CACHE`]; grading is analytic so the result is
+/// deterministic per key).
+static OCIO_GRADING_CACHE: LazyLock<Mutex<HashMap<String, Option<String>>>> =
+	LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The GLSL text of the dynamic grading-primary processor for `style`
+/// (C++ oakrender creates the same processor via
+/// `oakrender_color_processor_create_grading_primary` and the renderer
+/// applies it between passes; the Rust equivalent generates the OCIO GPU
+/// shader the node splices at its `%1` marker). `None` when no default
+/// config exists or the processor is LUT-based (the same guard as
+/// [`ocio_function_shader`] — grading is analytic, so this is purely a
+/// config-availability check).
+pub fn grading_primary_function_shader(style: GradingStyle) -> Option<String> {
+	let config = default_config()?;
+	let style_id = match style {
+		GradingStyle::Lin => "lin",
+		GradingStyle::Log => "log",
+	};
+	let cache_key = format!("{style_id}:{}", config.cache_id().unwrap_or_default());
+	if let Some(hit) = OCIO_GRADING_CACHE
+		.lock()
+		.unwrap_or_else(|e| e.into_inner())
+		.get(&cache_key)
+	{
+		return hit.clone();
+	}
+	let stub = build_ocio_grading_shader(&config, style);
+	OCIO_GRADING_CACHE
+		.lock()
+		.unwrap_or_else(|e| e.into_inner())
+		.insert(cache_key, stub.clone());
+	stub
+}
+
+/// Build (but do not cache) the grading GLSL stub: a dynamic
+/// grading-primary transform on `config`, extracted exactly like
+/// [`build_ocio_function_shader`].
+fn build_ocio_grading_shader(config: &SafeConfig, style: GradingStyle) -> Option<String> {
+	let transform = ocio_rs::transform::GradingPrimaryTransform::create(style.to_ocio()).ok()?;
+	transform.make_dynamic();
+	transform.set_direction(ocio_rs::TransformDirection::Forward);
+	let processor = config
+		.processor_from_transform(&transform, ocio_rs::TransformDirection::Forward)
+		.ok()?;
+	let gpu = processor.default_gpu_processor().ok()?;
+	let mut desc = ocio_rs::GpuShaderDesc::create().ok()?;
+	desc.set_language(ocio_rs::GpuLanguage::GlslEs3_0).ok()?;
+	desc.set_function_name("ove_grading_primary").ok()?;
+	desc.set_resource_prefix("ocio_").ok()?;
+	gpu.try_extract_shader_info(&mut desc).ok()?;
+	if desc.num_textures() > 0 || desc.num_3d_textures() > 0 {
+		return None;
+	}
+	desc.shader_text()
+}
+
 // ---- LUT library (C++ LUTLibrary) ------------------------------------------
 
 /// Supported LUT extensions (C++ `LUTLibrary::supported_extensions()`).
@@ -1095,6 +1153,26 @@ mod tests {
 				assert!(p.is_valid());
 				assert!(!p.cache_id().is_empty(), "OCIO cache id present");
 			}
+		}
+	}
+
+	#[test]
+	fn grading_primary_shader_generates_analytic_glsl() {
+		let _lock = config_lock();
+		if set_up_default_config().is_err() {
+			return; // Bundled OCIO missing (e.g. stub build): skip.
+		}
+		for style in [GradingStyle::Lin, GradingStyle::Log] {
+			let stub = grading_primary_function_shader(style)
+				.expect("default config generates an analytic grading shader");
+			assert!(
+				stub.contains("ove_grading_primary"),
+				"function name present"
+			);
+			assert!(!stub.contains("sampler"), "no LUT upload expected for grading");
+			// Cache hit: a repeated call returns the same text.
+			let again = grading_primary_function_shader(style).unwrap();
+			assert_eq!(stub, again);
 		}
 	}
 
