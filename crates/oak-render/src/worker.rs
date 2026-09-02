@@ -287,9 +287,23 @@ struct SnapshotEntry {
 }
 
 impl GraphSnapshotStore {
-	/// Empty store rooted in the process temp directory.
+	/// Empty store rooted in the process temp directory. The directory is
+	/// unique per CALLER-subdirectory: tests run in parallel inside one
+	/// process, and a shared `oakrender-snapshots-<pid>` root let one
+	/// test's `cleanup()` delete another test's live snapshot (the
+	/// "acquire_rewrite_forces_file_rewrite_on_same_key" flake on the
+	/// high-core Windows runner — the file existed right after acquire,
+	/// then vanished).
 	pub fn new() -> Self {
-		let dir = std::env::temp_dir().join(format!("oakrender-snapshots-{}", std::process::id()));
+		let dir = std::env::temp_dir().join(format!(
+			"oakrender-snapshots-{}-{:x}",
+			std::process::id(),
+			{
+				use std::sync::atomic::{AtomicU64, Ordering};
+				static SEQ: AtomicU64 = AtomicU64::new(0);
+				SEQ.fetch_add(1, Ordering::Relaxed)
+			}
+		));
 		let _ = std::fs::create_dir_all(&dir);
 		Self {
 			entries: Mutex::new(HashMap::new()),
