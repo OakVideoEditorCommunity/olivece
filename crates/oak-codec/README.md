@@ -42,15 +42,15 @@ and never blocks.
    virtual chain.
 3. **`Frame` owns its params by value.** `olive::Frame` wraps an
    `OakVideoParams` handle plus a `Vec<u8>` pixel buffer. In Rust the
-   params are held as an `oakcommon::videoparams::VideoParams` value
-   (single-lib unification dropped the refcounted oakcommon handle);
+   params are held as an `oak_core::videoparams::VideoParams` value
+   (single-lib unification dropped the refcounted oak_core handle);
    the buffer is a plain `Vec<u8>`.
 4. **No adapter layer.** Codec calls the other module crates directly
-   (`oakcommon`, `oakcore-rs`, `oakffmpeg-link`), keeping the 2026-08
+   (`oak_core`, `oakcore-rs`, `oakffmpeg-link`), keeping the 2026-08
    decision recorded in NOTES.md §6. Only genuinely repeated
    conversions survive as small module-local helpers.
 5. **XML stays on the C++ side.** `EncodingParams::load/save` use
-   oakcommon's C++ `XmlStreamWriter/Reader` classes
+   oak_core's C++ `XmlStreamWriter/Reader` classes
    (`src/common/src/xmlutils.h`), exactly as oaknode/oakrender do —
    the one C++-to-C++ coupling the bridge cannot cover (NOTES.md §7).
 6. **Threading.** `FrameManager` keeps its background GC thread behind

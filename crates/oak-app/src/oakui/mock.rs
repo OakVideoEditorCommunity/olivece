@@ -43,19 +43,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use gpui::effect_stack::{
-	EffectCardKind, EffectData, EffectId, EffectStackDataSource, EffectStackEvent,
+    EffectCardKind, EffectData, EffectId, EffectStackDataSource, EffectStackEvent,
 };
 use gpui::node_graph::{
-	EdgeData, EdgeId, NodeData, NodeGraphDataSource, NodeGraphEvent, NodeId, PortData,
-	PortDataType, PortId, PortKind,
+    EdgeData, EdgeId, NodeData, NodeGraphDataSource, NodeGraphEvent, NodeId, PortData,
+    PortDataType, PortId, PortKind,
 };
 use gpui::timeline::{
-	ClipData, ClipId, Frame, FrameRange, FrameRate, Marker, TimelineDataSource, TimelineEvent,
-	TrackData, TrackKind, TrimEdge,
+    ClipData, ClipId, Frame, FrameRange, FrameRate, Marker, TimelineDataSource, TimelineEvent,
+    TrackData, TrackKind, TrimEdge,
 };
 use gpui::{
-	hsla, point, prelude::*, px, App, Context, Entity, Hsla, Pixels, Point, RenderImage,
-	SharedString,
+    hsla, point, prelude::*, px, App, Context, Entity, Hsla, Pixels, Point, RenderImage,
+    SharedString,
 };
 use gpui_widgets::audio_meter::AudioMeterDataSource;
 use gpui_widgets::project_explorer::{ProjectDataSource, ProjectEntry};
@@ -67,8 +67,8 @@ use oak_node::track::TrackType;
 use oak_timeline::util::{block_clip_create, track_append_block};
 
 use super::engine::{
-	AppEngine, EngineGateway, ExportEvent, ExportSession, LibraryProject, Monitor, MulticamState,
-	Project, ScopeData, Sequence, VideoFormat, WizardFootage, WizardSyncOffset,
+    AppEngine, EngineGateway, ExportEvent, ExportSession, LibraryProject, Monitor, MulticamState,
+    Project, ScopeData, Sequence, VideoFormat, WizardFootage, WizardSyncOffset,
 };
 use super::graphops;
 use super::transport::TransportState;
@@ -2060,7 +2060,7 @@ impl AppEngine for MockEngine {
 		let trimmed = path.trim().to_string();
 		// Validate like the real engine (a bogus path keeps the dialog open).
 		if !trimmed.is_empty() {
-			oak_render::color::set_up_default_config_from(Some(&trimmed))
+			oak_core::color::set_up_default_config_from(Some(&trimmed))
 				.map_err(|e| e.to_string())?;
 		}
 		self.ocio_config = trimmed;
@@ -2582,11 +2582,11 @@ impl DemoMulticamGraph {
 	/// tracks are built directly in the graph (no `Add Track` undo entries —
 	/// the demo's initial state is not a user edit).
 	fn build() -> Self {
-		use oak_node::node::NodeCore;
-		use oak_node::sequence::SequenceBehavior;
-		use oak_node::track::{TrackBehavior, TrackListBehavior};
+        use oak_node::node::NodeCore;
+        use oak_node::sequence::SequenceBehavior;
+        use oak_node::track::{TrackBehavior, TrackListBehavior};
 
-		let project = graphops::create_project();
+        let project = graphops::create_project();
 		let sequence = graphops::create_sequence(&project, "Multicam Demo");
 		// A video track list with four tracks, wired into the sequence.
 		{
@@ -2863,10 +2863,10 @@ impl MockEngine {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use gpui::TestAppContext;
+    use super::*;
+    use gpui::TestAppContext;
 
-	fn demo_engine(app: &mut gpui::App) -> Entity<MockEngine> {
+    fn demo_engine(app: &mut gpui::App) -> Entity<MockEngine> {
 		app.new(|cx| MockEngine::demo(cx))
 	}
 
@@ -2932,8 +2932,8 @@ mod tests {
 	/// The stop-on-last tick pauses on the final frame instead of wrapping.
 	#[test]
 	fn clock_tick_stops_on_the_last_frame_when_asked() {
-		use std::time::{Duration, Instant};
-		let mut clock = MockClock::new(FrameRate::new(30, 1));
+        use std::time::{Duration, Instant};
+        let mut clock = MockClock::new(FrameRate::new(30, 1));
 		clock.play();
 		// 10 s at 30 fps = 300 frames into a 5-frame sequence: wrapped 60×.
 		clock.started = Some((Instant::now() - Duration::from_secs(10), Frame(0)));
@@ -2953,8 +2953,8 @@ mod tests {
 	/// Without stop-on-last the tick wraps modulo the sequence length.
 	#[test]
 	fn clock_tick_loops_when_not_stopping() {
-		use std::time::{Duration, Instant};
-		let mut clock = MockClock::new(FrameRate::new(30, 1));
+        use std::time::{Duration, Instant};
+        let mut clock = MockClock::new(FrameRate::new(30, 1));
 		clock.play();
 		clock.started = Some((Instant::now() - Duration::from_secs(10), Frame(0)));
 

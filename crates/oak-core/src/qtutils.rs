@@ -211,7 +211,7 @@ mod tests {
 		static COUNTER: AtomicU64 = AtomicU64::new(0);
 		let n = COUNTER.fetch_add(1, Ordering::Relaxed);
 		std::env::temp_dir().join(format!(
-			"oakcommon_qtutils_{}_{}_{}.tmp",
+			"oak_core_qtutils_{}_{}_{}.tmp",
 			std::process::id(),
 			tag,
 			n

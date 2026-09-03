@@ -10,7 +10,6 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 oak-core = { path = "../oak-core" }
-oak-common = { path = "../oak-common" }
 # Direct Rust calls (single-lib unification): the decode bridge calls
 # oakcodec's ffi, the node bridge calls oaknode's ffi. Both directions
 # are acyclic (oakcodec → oakcore-rs/oak-ffmpeg-link; oaknode → oakcodec).

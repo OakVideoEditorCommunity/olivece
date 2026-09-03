@@ -110,7 +110,7 @@ impl DisplayTransformNode {
 	fn generate_processor(&mut self, core: &mut NodeCore) {
 		let _ = core;
 		// The C++ wraps the color manager, builds a display transform
-		// (`oakcommon_colortransform_init_display`) for the selected
+		// (`oak_core_colortransform_init_display`) for the selected
 		// display/view, resolves the reference color space and creates
 		// the processor via `oakrender_color_processor_create_transform`,
 		// storing it with OcioBase::set_processor. Without a manager (the

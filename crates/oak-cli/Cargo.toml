@@ -32,9 +32,8 @@ clap = { version = "4", features = ["derive"] }
 # direct Rust call into the oak* rlibs (oaknode for projects/footage,
 # oaktimeline for the track/clip commands, oakrender for the ticket arena,
 # oakcodec for the export formats/codecs, oaktask for the export task,
-# oakcommon/oakcore-rs for the shared value types). No liboakengine dylib,
+# oak_core/oakcore-rs for the shared value types). No liboakengine dylib,
 # no C ABI, no build.rs link step, no host shims.
-oak-common = { path = "../oak-common" }
 oak-core = { path = "../oak-core" }
 oak-node = { path = "../oak-node" }
  oak-timeline = { path = "../oak-timeline" }

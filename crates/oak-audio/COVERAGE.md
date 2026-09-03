@@ -78,8 +78,8 @@
 
 | C++ | Rust 落点 |
 |---|---|
-| `output_buffer_size()` | `config::output_buffer_size`（`oakcommon_config_get_int(nullptr,"AudioOutputBufferSize",0)`） |
-| `device_name(is_output_device)` | `config::device_name`（`oakcommon_config_get` 两阶段；key = "AudioOutput"/"AudioInput"） |
+| `output_buffer_size()` | `config::output_buffer_size`（`oak_core_config_get_int(nullptr,"AudioOutputBufferSize",0)`） |
+| `device_name(is_output_device)` | `config::device_name`（`oak_core_config_get` 两阶段；key = "AudioOutput"/"AudioInput"） |
 
 ## 9. 刻意不迁移（drop）
 

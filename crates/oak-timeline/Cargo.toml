@@ -10,8 +10,7 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 oak-core = { path = "../oak-core" }
- oak-undo = { path = "../oak-undo" }
+oak-undo = { path = "../oak-undo" }
 oak-node = { path = "../oak-node" }
-oak-common = { path = "../oak-common" }
 # Error trait derive for the crate-internal error enum.
 thiserror = "2"

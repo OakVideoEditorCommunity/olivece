@@ -22,7 +22,7 @@
 //! `include/audio/manager.h`). An empty handle reports `OAKAUDIO_E_STATE`.
 //!
 //! Recording goes through the oakcodec encoder C ABI ([`crate::bridge`]);
-//! device/config lookups go through oakcommon.
+//! device/config lookups go through oak_core.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};

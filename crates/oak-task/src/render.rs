@@ -53,22 +53,22 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use oak_common::videoparams::VideoParams;
+use oak_core::videoparams::VideoParams;
 use oak_node::footage::FootageBehavior;
 use oak_node::sequence::SequenceBehavior;
 use oak_node::track::{TrackBehavior, TrackListBehavior, TrackType};
 use oak_render::procpool::{
-	bgra8_to_f32_rgba, DispatcherConfig, ProcessDispatcher, ShmAudioRef, ShmFrameRef,
+    bgra8_to_f32_rgba, DispatcherConfig, ProcessDispatcher, ShmFrameRef,
 };
 use oak_render::ticket::{
-	ticket_kind, AudioTicketParams, MontageClip, MontageEffect, TicketArena, TicketId, TicketPayload,
-	TicketResult, VideoTicketParams,
+    ticket_kind, AudioTicketParams, MontageClip, MontageEffect, TicketArena, TicketId, TicketPayload,
+    TicketResult, VideoTicketParams,
 };
 use oak_render::worker::JobDispatch;
 
 use crate::error::{Error, Result};
 use crate::nodeops::{
-	find_input_footage, pixel_format_from_code, NodeRef, ProjectRef,
+    find_input_footage, pixel_format_from_code, NodeRef, ProjectRef,
 };
 use crate::task::Task;
 use oak_core::{Rational, TimeRange};
@@ -112,9 +112,9 @@ pub struct ForceParams {
 pub trait RenderTaskBehavior {
 	/// Called for each rendered video frame.
 	fn frame_downloaded(
-		&mut self,
-		task: &mut Task,
-		frame: &oak_render::texture::Texture,
+        &mut self,
+        task: &mut Task,
+        frame: &oak_core::texture::Texture,
 	) -> Result<()>;
 	/// Called for each rendered audio buffer.
 	fn audio_downloaded(&mut self, task: &mut Task, samples: &oak_render::ticket::AudioSamples) -> Result<()>;
@@ -1162,7 +1162,7 @@ fn push_finished(id: TicketId, result: TicketResult, dispatch: DispatchPtr) {
 /// are read straight out — their bytes are already f32 RGBA little-endian,
 /// no conversion; BGRA8 slots (the default preview path) convert once with
 /// [`bgra8_to_f32_rgba`].
-fn shm_frame_to_texture(frame: &ShmFrameRef) -> oak_render::texture::Texture {
+fn shm_frame_to_texture(frame: &ShmFrameRef) -> oak_core::texture::Texture {
 	let meta = &frame.meta;
 	let pixels = frame
 		.shm
@@ -1171,17 +1171,17 @@ fn shm_frame_to_texture(frame: &ShmFrameRef) -> oak_render::texture::Texture {
 		.unwrap_or_default();
 	if meta.format == oak_core::PixelFormat::F32 as i32 {
 		// F32 slot: the encoder gets the pipeline samples with no round trip.
-		let mut f = oak_render::texture::Frame::new();
+		let mut f = oak_core::texture::Frame::new();
 		f.width = meta.width;
 		f.height = meta.height;
 		f.format = oak_core::PixelFormat::F32;
 		f.channels = 4;
 		f.timestamp = oak_core::Rational::new(meta.time_num, meta.time_den);
 		f.data = pixels.to_vec();
-		return oak_render::texture::Texture::wrap_frame(f);
+		return oak_core::texture::Texture::wrap_frame(f);
 	}
 	let samples = bgra8_to_f32_rgba(pixels);
-	let mut f = oak_render::texture::Frame::new();
+	let mut f = oak_core::texture::Frame::new();
 	f.width = meta.width;
 	f.height = meta.height;
 	f.format = oak_core::PixelFormat::F32;
@@ -1197,5 +1197,5 @@ fn shm_frame_to_texture(frame: &ShmFrameRef) -> oak_render::texture::Texture {
 			bytes
 		})
 		.collect();
-	oak_render::texture::Texture::wrap_frame(f)
+	oak_core::texture::Texture::wrap_frame(f)
 }

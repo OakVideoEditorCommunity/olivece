@@ -16,6 +16,13 @@
 
 //! Error codes, mirroring `include/render/error.h` verbatim; project-wide
 //! -MMCCCC scheme (module registry in include/common/error.h), pass-through untranslated.
+//!
+//! With the oak-common/oak-core merge the render value/GPU types moved into
+//! `oak-core`, so this crate no longer carries its own error enum:
+//! [`Error`]/[`Result`] are re-exported from [`oak_core::error`] (identical
+//! variant shape and messages). The `OAKRENDER_*` codes below remain as the
+//! module's public-code contract; `Error::code()` reports the unified
+//! `OAKCORE_*` values.
 
 /// Success.
 pub const OAKRENDER_OK: i32 = 0;
@@ -30,41 +37,7 @@ pub const OAKRENDER_E_NOT_FOUND: i32 = -70004;
 /// Allocation failed.
 pub const OAKRENDER_E_NOMEM: i32 = -70005;
 
-/// Crate-internal result type.
-pub type Result<T> = std::result::Result<T, Error>;
-
-/// Crate-internal error.
-#[derive(Clone, Debug, thiserror::Error)]
-pub enum Error {
-	/// Null handle or invalid argument.
-	#[error("render: invalid argument")]
-	Invalid,
-	/// Wrong state.
-	#[error("render: invalid state")]
-	State,
-	/// Operation failed (context string is log-only).
-	#[error("render: operation failed: {0}")]
-	Failed(String),
-	/// Not found.
-	#[error("render: not found")]
-	NotFound,
-	/// Out of memory.
-	#[error("render: out of memory")]
-	NoMem,
-}
-
-impl Error {
-	/// Map to the public error code.
-	pub fn code(&self) -> i32 {
-		match self {
-			Error::Invalid => OAKRENDER_E_INVALID,
-			Error::State => OAKRENDER_E_STATE,
-			Error::Failed(_) => OAKRENDER_E_FAILED,
-			Error::NotFound => OAKRENDER_E_NOT_FOUND,
-			Error::NoMem => OAKRENDER_E_NOMEM,
-		}
-	}
-}
+pub use oak_core::error::{Error, Result};
 
 #[cfg(test)]
 mod tests {
@@ -107,15 +80,5 @@ mod tests {
 	#[test]
 	fn source_is_none() {
 		assert!(std::error::Error::source(&Error::Failed("context".into())).is_none());
-	}
-
-	/// The `code()` mapping must be unchanged by the `Error` trait impl.
-	#[test]
-	fn code_mapping_unchanged() {
-		assert_eq!(Error::Invalid.code(), OAKRENDER_E_INVALID);
-		assert_eq!(Error::State.code(), OAKRENDER_E_STATE);
-		assert_eq!(Error::Failed("context".into()).code(), OAKRENDER_E_FAILED);
-		assert_eq!(Error::NotFound.code(), OAKRENDER_E_NOT_FOUND);
-		assert_eq!(Error::NoMem.code(), OAKRENDER_E_NOMEM);
 	}
 }

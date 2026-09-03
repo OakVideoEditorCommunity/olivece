@@ -22,7 +22,7 @@
 //!
 //! ## Single-lib unification
 //!
-//! The C ABI export layer (`ffi.rs`) and the oaknode/oakundo/oakcommon
+//! The C ABI export layer (`ffi.rs`) and the oaknode/oakundo/oak_core
 //! bridge (`bridge/`) were deleted in the single-lib unification: undo
 //! commands are now `oak_undo::undocommand::UndoCommand` values (the
 //! crate's command structs implement `undocommon::Command` and are boxed

@@ -24,7 +24,7 @@
 //! clip handle 即 `&props`）。
 //!
 //! 单库化后 oakrender 的 ffi 已删除：帧访问走
-//! [`oak_render::texture::Texture::to_frame`] 值路径（GPU 纹理经后端
+//! [`oak_core::texture::Texture::to_frame`] 值路径（GPU 纹理经后端
 //! 下载、CPU 纹理克隆），帧释放随值 drop 自动发生（原
 //! `texture_get_frame`/`frame_free` 句柄调用面随桩删除）。
 
@@ -89,7 +89,7 @@ impl ClipInstance {
 			props.set_one(
 				crate::host::PROP_CLIP_COLOURSPACE,
 				crate::property::Value::String(
-					std::ffi::CString::new(oak_render::color::pipeline_working_ofx_name()).unwrap(),
+                    std::ffi::CString::new(oak_core::color::pipeline_working_ofx_name()).unwrap(),
 				),
 			);
 		}
@@ -192,8 +192,8 @@ impl ClipInstance {
 		scale: RenderScale,
 		region: Option<OfxRectD>,
 	) -> crate::error::Result<crate::image::Image> {
-		use crate::render::PIXEL_FORMAT_F32;
 		use crate::error::Error;
+		use crate::render::PIXEL_FORMAT_F32;
 
 		let _ = (time, scale);
 		if region.is_some() {
@@ -333,7 +333,7 @@ impl ClipInstance {
 	/// 输出纹理由 oakrender 侧创建并经 [`Self::set_output_texture`]
 	/// 挂入——本函数取该纹理的 CPU 帧（GPU 纹理经后端下载，写回后
 	/// 对 `Texture::Gpu` 再经
-	/// [`oak_render::backend::GpuContextLike::upload`] 上传），按帧
+	/// [`oak_core::backend::GpuContextLike::upload`] 上传），按帧
 	/// 参数校验 F32 与尺寸后整帧拷贝图像像素（全链路 F32；C++
 	/// pluginrenderer 的 `readback/wrap` 路径第 1 期以 CPU 拷贝表达，
 	/// GL 走 [`crate::render`] 的 `// [P2]`）。未挂输出纹理
@@ -343,8 +343,8 @@ impl ClipInstance {
 		&self,
 		image: &crate::image::Image,
 	) -> crate::error::Result<crate::render::Texture> {
-		use crate::render::{texture_get_frame, PIXEL_FORMAT_F32};
 		use crate::error::Error;
+		use crate::render::{texture_get_frame, PIXEL_FORMAT_F32};
 
 		let texture = self
 			.output_texture
@@ -396,7 +396,7 @@ impl ClipInstance {
 	/// 本 clip 的时间域（clipGetFrameRange）。
 	///
 	/// `// TODO(value-model)`：输入范围经 oakrender 帧的时间基推导
-	/// （time_base）——随 clip 迁移到 `oak_render::texture::Texture`
+	/// （time_base）——随 clip 迁移到 `oak_core::texture::Texture`
 	/// 值模型落地。
 	pub fn frame_range(&self) -> crate::error::Result<OfxRangeD> {
 		let _ = OfxRangeD::default();

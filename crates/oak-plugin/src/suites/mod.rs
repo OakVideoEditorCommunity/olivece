@@ -334,26 +334,26 @@ mod tests {
 		assert!(gl_ctx().is_none());
 		// 最小 GpuContextLike 假实现（无 GPU 适配器需求）。
 		struct FakeGpu;
-		impl oak_render::backend::GpuContextLike for FakeGpu {
-			fn kind(&self) -> oak_render::backend::BackendKind {
-				oak_render::backend::BackendKind::Cpu
+		impl oak_core::backend::GpuContextLike for FakeGpu {
+			fn kind(&self) -> oak_core::backend::BackendKind {
+				oak_core::backend::BackendKind::Cpu
 			}
 			fn destroy_texture(&self, _token: u64) {}
 			fn upload(
 				&self,
 				_token: u64,
-				_frame: &oak_render::texture::Frame,
+				_frame: &oak_core::texture::Frame,
 			) -> oak_render::error::Result<()> {
 				Ok(())
 			}
-			fn download(&self, _token: u64) -> oak_render::error::Result<oak_render::texture::Frame> {
-				Ok(oak_render::texture::Frame::new())
+			fn download(&self, _token: u64) -> oak_render::error::Result<oak_core::texture::Frame> {
+				Ok(oak_core::texture::Frame::new())
 			}
 			fn blit(
-				&self,
-				_src: u64,
-				_dst: u64,
-				_processor: Option<&oak_render::color::ColorProcessor>,
+                &self,
+                _src: u64,
+                _dst: u64,
+                _processor: Option<&oak_core::color::ColorProcessor>,
 			) -> oak_render::error::Result<()> {
 				Ok(())
 			}
@@ -369,7 +369,7 @@ mod tests {
 		let got = gl_ctx().unwrap();
 		assert_eq!(
 			got.renderer.kind(),
-			oak_render::backend::BackendKind::Cpu
+			oak_core::backend::BackendKind::Cpu
 		);
 		assert!(got.output_texture.is_dummy());
 		assert_eq!(got.gl_pixel_depth, "OfxBitDepthFloat");

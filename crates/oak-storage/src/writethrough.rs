@@ -336,7 +336,7 @@ fn record_error(key: usize, message: &str) {
 /// are `Backend = "sqlite"` and `SqlitePath = <system data dir>/library.db`
 /// (used once storage is enabled without an explicit path).
 pub fn storage_enabled() -> bool {
-	let store = oak_common::configstore::ConfigStore::instance();
+	let store = oak_core::configstore::ConfigStore::instance();
 	match store.get(Some("Storage"), "Backend") {
 		Ok(b) => b == "sqlite" || b == "database" || b == "pg",
 		Err(_) => false,
@@ -345,7 +345,7 @@ pub fn storage_enabled() -> bool {
 
 /// The configured SQLite library path (empty value = the default).
 fn configured_sqlite_path() -> Option<String> {
-	let store = oak_common::configstore::ConfigStore::instance();
+	let store = oak_core::configstore::ConfigStore::instance();
 	match store.get(Some("Storage"), "SqlitePath") {
 		Ok(p) if !p.trim().is_empty() => Some(p.trim().to_string()),
 		_ => None,
@@ -355,7 +355,7 @@ fn configured_sqlite_path() -> Option<String> {
 /// The configured PostgreSQL connection string (`Storage/PgUrl`; empty
 /// value = not configured).
 fn configured_pg_url() -> Option<String> {
-	let store = oak_common::configstore::ConfigStore::instance();
+	let store = oak_core::configstore::ConfigStore::instance();
 	match store.get(Some("Storage"), "PgUrl") {
 		Ok(u) if !u.trim().is_empty() => Some(u.trim().to_string()),
 		_ => None,
@@ -380,7 +380,7 @@ fn pg_library_uri() -> Option<String> {
 /// (`FileFunctions::get_configuration_location`: macOS Application
 /// Support / XDG config, honoring `OAK_CONFIG_DIR` and portable mode).
 pub fn default_library_path() -> String {
-	let dir = oak_common::filefunctions::FileFunctions::new()
+	let dir = oak_core::filefunctions::FileFunctions::new()
 		.get_configuration_location()
 		.unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
 	format!("{}/library.db", dir)
@@ -390,7 +390,7 @@ pub fn default_library_path() -> String {
 /// cannot be made absolute, or the PG url is missing). Shared with the
 /// facade's library-manager exports.
 pub fn library_uri() -> Option<String> {
-	let store = oak_common::configstore::ConfigStore::instance();
+	let store = oak_core::configstore::ConfigStore::instance();
 	if store.get(Some("Storage"), "Backend").ok().as_deref() == Some("pg") {
 		return pg_library_uri();
 	}
@@ -449,7 +449,7 @@ fn snapshot_loop() {
 /// seconds (default 600), with ≤ 0 treated as "every wake" and a 100 ms
 /// floor so the thread stays responsive to bind/stop signals.
 fn snapshot_tick() -> Duration {
-	let secs = oak_common::configstore::ConfigStore::instance()
+	let secs = oak_core::configstore::ConfigStore::instance()
 		.get_int(Some("Storage"), "SnapshotIntervalSec", 600);
 	if secs <= 0 {
 		Duration::from_millis(100)

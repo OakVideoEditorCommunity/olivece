@@ -10,7 +10,6 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 oak-core = { path = "../oak-core" }
-oak-common = { path = "../oak-common" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # Timestamp columns in the database schema (plan M13 §1: TIMESTAMP NOT

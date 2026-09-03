@@ -83,7 +83,7 @@ proxy：照 `oakengine/proxy.h` 模板（get_or_start/state/cancel）。
 
 | 现状 | 处理 |
 |---|---|
-| codec → render/ 11 | videoparams/subtitleparams/colortransform 已随 M3.5 下沉 oakcommon；剩 renderer.h(2)、framemanager.h(1) → framemanager 是 codec 内部缓存编排，**随 codec 一起走**（从 render/ 移入 oakcodec/src，纯文件移动，它本来就主要服务 codec） |
+| codec → render/ 11 | videoparams/subtitleparams/colortransform 已随 M3.5 下沉 oak_core；剩 renderer.h(2)、framemanager.h(1) → framemanager 是 codec 内部缓存编排，**随 codec 一起走**（从 render/ 移入 oakcodec/src，纯文件移动，它本来就主要服务 codec） |
 | codec → task/ 5（taskmanager/conform/proxy 编排） | proxy/conform 对 TaskManager 的引用改为 01 §4 回调注册（`oakcodec_set_task_submit_cb`），Task 对象创建上移 oaktask（M8），oakcodec 只调回调 |
 | codec → node/ 3 | 经 oaknode C ABI（M3 已就位） |
 

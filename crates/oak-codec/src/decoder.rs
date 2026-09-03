@@ -26,7 +26,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use oak_common::cancelatom::CancelAtom;
+use oak_core::cancelatom::CancelAtom;
 use oak_core::{Rational, TimeRange};
 
 use crate::footagedescription::FootageDescription;
@@ -113,7 +113,7 @@ pub enum RenderMode {
 
 /// "Don't force a color range" sentinel for
 /// [`RetrieveVideoParams::force_range`] (the actual ranges are the
-/// `OAKCOMMON_COLOR_RANGE_*` values).
+/// `oak_core_COLOR_RANGE_*` values).
 pub const K_COLOR_RANGE_DEFAULT: i32 = -1;
 
 /// `Decoder::RetrieveVideoParams` — what a video retrieve call needs.

@@ -48,7 +48,7 @@ use oak_node::factory::{DynNodeConstructor, DynamicNodeMeta};
 use oak_node::input::{flags as input_flags, Input};
 use oak_node::node::{Category, NodeBehavior, NodeCore};
 use oak_node::nodes::plugin::{
-	PluginInstanceHandle, PluginNode, SOURCE_CLIP, TEXTURE_INPUT,
+    PluginInstanceHandle, PluginNode, SOURCE_CLIP, TEXTURE_INPUT,
 };
 use oak_node::value::{NodeValue, ValueType};
 
@@ -832,10 +832,10 @@ fn set_text_param(inst: &Instance, key: &str, text: &str) {
 /// executor 槽实现：JobSpec::Plugin → render_driver::render_frame。
 fn execute_plugin_job(
 	req: &oak_render::eval::PluginJobRequest<'_>,
-) -> oak_render::error::Result<oak_render::texture::Texture> {
-	use oak_render::error::Error;
+) -> oak_render::error::Result<oak_core::texture::Texture> {
+    use oak_render::error::Error;
 
-	let oak_render::eval::JobSpec::Plugin {
+    let oak_render::eval::JobSpec::Plugin {
 		instance,
 		time,
 		effect_input_id,
@@ -880,7 +880,7 @@ fn execute_plugin_job(
 	)?;
 	let job = crate::render_driver::RenderJob {
 		time: *time,
-		dst: oak_render::texture::Texture::wrap_frame(dst_frame),
+		dst: oak_core::texture::Texture::wrap_frame(dst_frame),
 		src: Some(req.src.clone()),
 		effect_input_id: effect_input_id.clone(),
 		inputs: inputs.clone(),
@@ -962,9 +962,9 @@ fn shared_plugin_instance(identifier: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+    use super::*;
 
-	/// Records what the mock plugin entry saw, so the push-button test can
+    /// Records what the mock plugin entry saw, so the push-button test can
 	/// assert the kOfxActionInstanceChanged routing and its inArgs.
 	static PUSH_ENTRY_CALLS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
@@ -1174,10 +1174,10 @@ mod tests {
 		};
 		let out = execute_plugin_job(&oak_render::eval::PluginJobRequest {
 			spec: &spec,
-			src: oak_render::texture::Texture::wrap_frame(frame),
+			src: oak_core::texture::Texture::wrap_frame(frame),
 		})
 		.expect("the GL-capable render succeeds (no MissingHostFeature purple)");
-		let oak_render::texture::Texture::Cpu(out_frame) = &out else {
+		let oak_core::texture::Texture::Cpu(out_frame) = &out else {
 			panic!("a CPU frame comes back");
 		};
 		let mut px = [0f32; 4];
@@ -1191,14 +1191,14 @@ mod tests {
 
 	/// 构造一个只含 push-button 参数的最小实例（直接登记进注册表）。
 	fn instance_with_push_button() -> u64 {
-		use std::ffi::{c_char, c_void};
-		use std::sync::atomic::AtomicU32;
-		use crate::descriptor::EffectDescriptor;
-		use crate::handle::RefBox;
-		use crate::host::Plugin;
-		use crate::param::{ParamDef, ParamInstance, ParamSetInstance};
+        use crate::descriptor::EffectDescriptor;
+        use crate::handle::RefBox;
+        use crate::host::Plugin;
+        use crate::param::{ParamDef, ParamInstance, ParamSetInstance};
+        use std::ffi::{c_char, c_void};
+        use std::sync::atomic::AtomicU32;
 
-		unsafe extern "C" fn dummy_entry(
+        unsafe extern "C" fn dummy_entry(
 			action: *const c_char,
 			_: *const c_void,
 			in_args: *mut c_void,
@@ -1289,14 +1289,14 @@ mod tests {
 	/// 构造一个带 parametric 参数（维度 2、自定义 range、双维 UI 颜色
 	/// 已配置）与一个 String 参数的实例（直接登记进注册表）。
 	fn instance_with_parametric() -> u64 {
-		use std::ffi::{c_char, c_void};
-		use std::sync::atomic::AtomicU32;
-		use crate::descriptor::EffectDescriptor;
-		use crate::handle::RefBox;
-		use crate::host::Plugin;
-		use crate::param::{ParamDef, ParamInstance, ParamSetInstance};
+        use crate::descriptor::EffectDescriptor;
+        use crate::handle::RefBox;
+        use crate::host::Plugin;
+        use crate::param::{ParamDef, ParamInstance, ParamSetInstance};
+        use std::ffi::{c_char, c_void};
+        use std::sync::atomic::AtomicU32;
 
-		unsafe extern "C" fn dummy_entry(
+        unsafe extern "C" fn dummy_entry(
 			_: *const c_char,
 			_: *const c_void,
 			_: *mut c_void,

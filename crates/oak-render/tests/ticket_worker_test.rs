@@ -27,13 +27,13 @@ use std::time::Duration;
 use oak_core::{Rational, TimeRange};
 
 use oak_render::error::Error;
-use oak_render::frame::VideoParamsPod;
-use oak_render::texture::{Frame, Texture};
+use oak_core::frame::VideoParamsPod;
+use oak_core::texture::{Frame, Texture};
 use oak_render::ticket::{TicketArena, TicketId, VideoTicketParams};
 use oak_render::worker::{GraphSnapshotStore, InlineDispatcher, JobDispatch};
 
 /// Unwrap a video ticket payload for assertions.
-fn res_video(res: &oak_render::ticket::TicketPayload) -> &oak_render::texture::Texture {
+fn res_video(res: &oak_render::ticket::TicketPayload) -> &oak_core::texture::Texture {
 	match res {
 		oak_render::ticket::TicketPayload::Video(t) => t,
 		_ => panic!("expected a video payload"),

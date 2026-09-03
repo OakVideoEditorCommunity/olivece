@@ -297,9 +297,9 @@ mod tests {
 	use super::*;
 	use std::sync::atomic::{AtomicU32, Ordering};
 
-	use crate::frame::VideoParamsPod;
-	use crate::texture::{Frame, Texture};
 	use crate::worker::{InlineDispatcher, JobDispatch};
+	use oak_core::frame::VideoParamsPod;
+	use oak_core::texture::{Frame, Texture};
 
 	fn frame_producer() -> crate::ticket::Producer {
 		Arc::new(|_, _| {

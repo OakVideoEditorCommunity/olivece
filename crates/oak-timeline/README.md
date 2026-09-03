@@ -45,7 +45,7 @@ internal Rust types.
    rule (no cross-module C++ member calls), timeline commands touch the
    node graph exclusively through the oaknode C ABI
    (`bridge::node`), undo through the oakundo C ABI (`bridge::undo`),
-   and XML/config through the oakcommon C ABI (`bridge::common`). The
+   and XML/config through the oak_core C ABI (`bridge::common`). The
    C++ internal helpers `oakundo_capi::make_command_handle` /
    `oaknode_c_api::to_native` are **not** replicated in Rust — their
    role is subsumed by vtable commands and by value handles treated as

@@ -140,29 +140,29 @@ impl Project {
 
 	/// The pipeline working colorspace (project property; ACEScg when the
 	/// setting is absent).
-	pub fn working_color_space(&self) -> oak_common::colormath::WorkingColorSpace {
-		oak_common::colormath::WorkingColorSpace::from_setting(
+	pub fn working_color_space(&self) -> oak_core::colormath::WorkingColorSpace {
+		oak_core::colormath::WorkingColorSpace::from_setting(
 			self.settings.get(SETTING_WORKING_COLOR_SPACE).map(String::as_str).unwrap_or(""),
 		)
 	}
 
 	/// The output/delivery colorspace (project property; sRGB when the
 	/// settings are absent).
-	pub fn output_color_spec(&self) -> oak_common::colormath::OutputColorSpec {
-		oak_common::colormath::OutputColorSpec::from_settings(
+	pub fn output_color_spec(&self) -> oak_core::colormath::OutputColorSpec {
+		oak_core::colormath::OutputColorSpec::from_settings(
 			self.settings.get(SETTING_OUTPUT_GAMUT).map(String::as_str).unwrap_or(""),
 			self.settings.get(SETTING_OUTPUT_TRANSFER).map(String::as_str).unwrap_or(""),
 		)
 	}
 
 	/// Set the pipeline working colorspace property.
-	pub fn set_working_color_space(&mut self, space: oak_common::colormath::WorkingColorSpace) {
+	pub fn set_working_color_space(&mut self, space: oak_core::colormath::WorkingColorSpace) {
 		self.settings
 			.insert(SETTING_WORKING_COLOR_SPACE.to_string(), space.as_setting().to_string());
 	}
 
 	/// Set the output/delivery colorspace properties.
-	pub fn set_output_color_spec(&mut self, spec: oak_common::colormath::OutputColorSpec) {
+	pub fn set_output_color_spec(&mut self, spec: oak_core::colormath::OutputColorSpec) {
 		self.settings
 			.insert(SETTING_OUTPUT_GAMUT.to_string(), spec.gamut.as_setting().to_string());
 		self.settings
@@ -357,8 +357,8 @@ impl Project {
 			_ => {}
 		}
 		// Default location: the shared disk-cache directory (single-lib:
-		// lives in oakcommon, used by oaknode and oakrender alike).
-		oak_common::filefunctions::default_disk_cache_path()
+		// lives in oak_core, used by oaknode and oakrender alike).
+		oak_core::filefunctions::default_disk_cache_path()
 	}
 
 	/// Copy all settings from `src` into `self` (C++

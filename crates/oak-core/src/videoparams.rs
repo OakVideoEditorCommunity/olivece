@@ -545,7 +545,7 @@ impl VideoParams {
 
 	/// Load parameters from an XML fragment.
 	pub fn load_xml(&mut self, xml: &str) -> Result<()> {
-		// Mirrors oakcommon_videoparams_load_xml + VideoParams::load():
+		// Mirrors oak_core_videoparams_load_xml + VideoParams::load():
 		// parse, fail on error, position on the root element, then consume
 		// its children.
 		let events = parse_xml(xml).ok_or_else(|| Error::Failed("XML parse error".to_string()))?;
@@ -613,7 +613,7 @@ impl VideoParams {
 
 	/// Save parameters to an XML fragment.
 	pub fn save_xml(&self) -> Result<String> {
-		// Mirrors oakcommon_videoparams_save_xml: a `<videoparams>` root with
+		// Mirrors oak_core_videoparams_save_xml: a `<videoparams>` root with
 		// the exact child order of VideoParams::save(). The writer emits no
 		// whitespace; each child is `<name>text</name>`.
 		let mut out = String::new();
@@ -2289,14 +2289,14 @@ mod tests {
 			(7, 3),
 			(100, 10),
 		] {
-			let r = oak_core::Rational::new(n as i64, d as i64);
+			let r = crate::Rational::new(n as i64, d as i64);
 			assert_eq!(
 				make_rational(n, d),
 				(r.numerator() as i32, r.denominator() as i32)
 			);
 		}
 		for s in ["1/2", "7", "4/2", "junk", "a/b", "1/2/3", "-6/3"] {
-			let r = oak_core::Rational::from_string(s);
+			let r = crate::Rational::from_string(s);
 			assert_eq!(
 				rational_from_string(s),
 				(r.numerator() as i32, r.denominator() as i32),
@@ -2320,9 +2320,9 @@ mod tests {
 			1,
 		);
 		vp.set_start_time(11);
-		let tb = oak_core::Rational::new(1001, 30000);
+		let tb = crate::Rational::new(1001, 30000);
 		for (n, d) in [(1i32, 1i32), (1, 2), (24000, 1001), (-3, 1), (0, 1)] {
-			let expected = tb.time_to_timestamp(oak_core::Rational::new(n as i64, d as i64)) + 11;
+			let expected = tb.time_to_timestamp(crate::Rational::new(n as i64, d as i64)) + 11;
 			assert_eq!(vp.time_in_timebase_units(n, d), Some(expected));
 		}
 	}

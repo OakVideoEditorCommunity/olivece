@@ -299,8 +299,8 @@ impl GraphSnapshotStore {
 			"oakrender-snapshots-{}-{:x}",
 			std::process::id(),
 			{
-				use std::sync::atomic::{AtomicU64, Ordering};
-				static SEQ: AtomicU64 = AtomicU64::new(0);
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static SEQ: AtomicU64 = AtomicU64::new(0);
 				SEQ.fetch_add(1, Ordering::Relaxed)
 			}
 		));
@@ -463,13 +463,13 @@ impl Default for GraphSnapshotStore {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use std::sync::mpsc;
-	use std::time::Duration;
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
-	use crate::texture::Texture;
+    use oak_core::texture::Texture;
 
-	fn job(tag: u64, tx: mpsc::Sender<u64>, gate: Option<Arc<AtomicBool>>) -> Job {
+    fn job(tag: u64, tx: mpsc::Sender<u64>, gate: Option<Arc<AtomicBool>>) -> Job {
 		let produce: Producer = Arc::new(move |_, _| {
 			if let Some(g) = &gate {
 				if g.load(Ordering::Acquire) {
@@ -685,7 +685,7 @@ mod tests {
 		// rewrite the file (the dedup the resync exists to bypass)...
 		{
 			let mut guard = project.lock().unwrap_or_else(|e| e.into_inner());
-			guard.set_working_color_space(oak_common::colormath::WorkingColorSpace::SrgbLegacy);
+			guard.set_working_color_space(oak_core::colormath::WorkingColorSpace::SrgbLegacy);
 		}
 		let p2 = store.acquire(&project, 1).unwrap();
 		assert_eq!(p1, p2, "same (uuid, revision) key reuses the file");

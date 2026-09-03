@@ -42,8 +42,8 @@ use std::sync::Arc;
 use oak_core::{PixelFormat, Rational};
 use oak_plugin::host::Host;
 use oak_plugin::render::{Renderer, Texture};
-use oak_render::backend::{BackendKind, GpuContextLike};
-use oak_render::texture::Frame;
+use oak_core::backend::{BackendKind, GpuContextLike};
+use oak_core::texture::Frame;
 
 const GL_PLUGIN_ID: &str = "org.oak.test-plugin.gl";
 
@@ -67,7 +67,7 @@ impl GpuContextLike for FakeGlRenderer {
 		&self,
 		_src: u64,
 		_dst: u64,
-		_processor: Option<&oak_render::color::ColorProcessor>,
+		_processor: Option<&oak_core::color::ColorProcessor>,
 	) -> oak_render::error::Result<()> {
 		Ok(())
 	}

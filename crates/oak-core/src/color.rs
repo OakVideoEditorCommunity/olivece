@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
-use oak_core::PixelFormat;
+use crate::PixelFormat;
 
 use crate::error::{Error, Result};
 use crate::texture::Frame;
@@ -199,7 +199,7 @@ impl ColorProcessor {
 	/// starts from an OCIO named space (sRGB and friends); P3/BT.2020
 	/// targets have no named space in the builtin configs, so the caller
 	/// linearizes and gamut-maps to XYZ itself
-	/// (`oak_common::colormath::output_spec_to_xyz_d65`) and this chain only
+	/// (`crate::colormath::output_spec_to_xyz_d65`) and this chain only
 	/// needs the ICC half: it runs the existing builder with the config's
 	/// `cie_xyz_d65_interchange` role as the source space (XYZ → linear
 	/// Rec.709, whose inverse the builder's leg 2 immediately undoes — a
@@ -427,27 +427,27 @@ fn bytemuck_f32_slice(data: &mut [u8]) -> Option<&mut [f32]> {
 /// project-properties commit). Render and export paths read it — a single
 /// project is open at a time, so a process global is the same shape as the
 /// OCIO default config above.
-static PIPELINE_COLOR: LazyLock<Mutex<(oak_common::colormath::WorkingColorSpace, oak_common::colormath::OutputColorSpec)>> =
+static PIPELINE_COLOR: LazyLock<Mutex<(crate::colormath::WorkingColorSpace, crate::colormath::OutputColorSpec)>> =
 	LazyLock::new(|| Mutex::new((
-		oak_common::colormath::WorkingColorSpace::default(),
-		oak_common::colormath::OutputColorSpec::default(),
+		crate::colormath::WorkingColorSpace::default(),
+		crate::colormath::OutputColorSpec::default(),
 	)));
 
 /// Set the pipeline color settings (working space + output spec).
 pub fn set_pipeline_color_settings(
-	working: oak_common::colormath::WorkingColorSpace,
-	output: oak_common::colormath::OutputColorSpec,
+	working: crate::colormath::WorkingColorSpace,
+	output: crate::colormath::OutputColorSpec,
 ) {
 	*PIPELINE_COLOR.lock().unwrap_or_else(|e| e.into_inner()) = (working, output);
 }
 
 /// The pipeline working colorspace.
-pub fn pipeline_working_space() -> oak_common::colormath::WorkingColorSpace {
+pub fn pipeline_working_space() -> crate::colormath::WorkingColorSpace {
 	PIPELINE_COLOR.lock().unwrap_or_else(|e| e.into_inner()).0
 }
 
 /// The pipeline output/delivery spec.
-pub fn pipeline_output_spec() -> oak_common::colormath::OutputColorSpec {
+pub fn pipeline_output_spec() -> crate::colormath::OutputColorSpec {
 	PIPELINE_COLOR.lock().unwrap_or_else(|e| e.into_inner()).1
 }
 
@@ -457,8 +457,8 @@ pub fn pipeline_output_spec() -> oak_common::colormath::OutputColorSpec {
 /// sRGB in the legacy pass-through mode).
 pub fn pipeline_working_ofx_name() -> &'static str {
 	match pipeline_working_space() {
-		oak_common::colormath::WorkingColorSpace::AcesCg => "ACEScg",
-		oak_common::colormath::WorkingColorSpace::SrgbLegacy => "sRGB",
+		crate::colormath::WorkingColorSpace::AcesCg => "ACEScg",
+		crate::colormath::WorkingColorSpace::SrgbLegacy => "sRGB",
 	}
 }
 
@@ -804,7 +804,7 @@ mod tests {
 			f.format = PixelFormat::U8;
 			assert_eq!(
 				valid.convert_frame(&mut f).unwrap_err().code(),
-				crate::error::OAKRENDER_E_INVALID
+				crate::error::OAKCORE_E_INVALID
 			);
 		}
 	}
@@ -967,7 +967,7 @@ mod tests {
 
 	/// The non-sRGB project output gamut display path: content converted to
 	/// CIE XYZ (D65, unit luminance) by
-	/// `oak_common::colormath::output_spec_to_xyz_d65` must flow through the
+	/// `crate::colormath::output_spec_to_xyz_d65` must flow through the
 	/// display ICC. Builds by running the classic builder with the config's
 	/// `cie_xyz_d65_interchange` role as the source space — the feasibility
 	/// question this test answers is whether OCIO accepts the role name as a
@@ -1005,10 +1005,10 @@ mod tests {
 		// the same encoded values — legs 1+2 (XYZ→lin709→XYZ) are the inverse
 		// round trip of the classic chain's lin709→XYZ leg, so both must land
 		// on the same device values.
-		let spec = oak_common::colormath::OutputColorSpec::default();
+		let spec = crate::colormath::OutputColorSpec::default();
 		let encoded = [0.5f32, 0.5, 0.5, 1.0];
 		let mut xyz_in = encoded;
-		oak_common::colormath::output_spec_to_xyz_d65(&mut xyz_in, spec);
+		crate::colormath::output_spec_to_xyz_d65(&mut xyz_in, spec);
 		let mut via_xyz = xyz_in;
 		let _ = p.convert_f32_rgba(&mut via_xyz, 1);
 		let srgb = ColorProcessor::create_display_icc("sRGB Encoded Rec.709 (sRGB)", icc)
@@ -1034,17 +1034,19 @@ mod tests {
 	/// The exact chain the viewers use (BGRA8, display-class ICC from
 	/// `OAK_DISPLAY_ICC`): a mid-grey frame must NOT collapse to black —
 	/// the viewer-black-screen regression guard. Skipped without the env
-	/// var (point it at the display profile under investigation).
+	/// var (point it at the display profile under investigation); an empty
+	/// value is treated as unset, same as `displayicc::env_override_icc`.
 	#[test]
 	fn display_icc_bgra8_never_outputs_black() {
 		let _lock = config_lock();
 		if set_up_default_config().is_err() {
 			return;
 		}
-		let Ok(icc) = std::env::var("OAK_DISPLAY_ICC") else {
-			eprintln!("OAK_DISPLAY_ICC unset; skipping");
+		let icc = std::env::var("OAK_DISPLAY_ICC").unwrap_or_default();
+		if icc.is_empty() {
+			eprintln!("OAK_DISPLAY_ICC unset or empty; skipping");
 			return;
-		};
+		}
 		let p = ColorProcessor::create_display_icc_bgra8("sRGB Encoded Rec.709 (sRGB)", &icc)
 			.expect("handle always returned");
 		assert!(p.is_valid(), "BGRA8 ICC processor builds from {icc}");

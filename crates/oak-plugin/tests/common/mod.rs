@@ -20,7 +20,7 @@
 //! 运行时装配成 oak-test-plugin.ofx.bundle）：filter 上下文、
 //! Double 参数 gain、双 clip（Source/Output）。插件未构建时相关
 //! 用例经 [`skip`] 提前返回。
-//! 单库化后像素路径经 oakrender 值模型（`oak_render::texture::Texture`）
+//! 单库化后像素路径经 oakrender 值模型（`oak_core::texture::Texture`）
 //! 驱动；渲染 goldens 待该迁移落地。
 
 use std::path::PathBuf;

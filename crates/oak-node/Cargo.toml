@@ -10,7 +10,6 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 oak-core = { path = "../oak-core" }
-oak-common = { path = "../oak-common" }
  oak-undo = { path = "../oak-undo" }
 oak-codec = { path = "../oak-codec" }
 thiserror = "2"

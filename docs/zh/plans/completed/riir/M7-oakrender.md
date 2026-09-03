@@ -179,7 +179,7 @@ oakengine_ipc_* 悬置符号。
 
 ### 实际依赖与链接形态
 
-- Oak 内部：oaknode、oakcommon、oakundo、olivecore、ffmpeg_bridge
+- Oak 内部：oaknode、oak_core、oakundo、olivecore、ffmpeg_bridge
   （真实 target，`add_subdirectory` 引入）。
 - 第三方：OpenColorIO、OpenImageIO、Imath/OpenEXR（头）、OpenGL/
   CoreVideo/Metal/QuartzCore framework、GTest（仅测试）。
@@ -209,10 +209,10 @@ oakengine_ipc_* 悬置符号。
     共 **56** 个，**0 个悬置**」：25 个由 liboakrender 解析
     （PlaybackCache/FrameHashCache/DiskManager/RenderManager/
     ColorProcessor/PreviewAutoCacher/LUTLibrary 等），其余 31 个由
-    oakcommon（VideoParams/XmlStream*/SubtitleParams/QtUtils）、
+    oak_core（VideoParams/XmlStream*/SubtitleParams/QtUtils）、
     oakundo（UndoCommand/UndoStack/MultiUndoCommand vtable）解析。
 - 公共头位于 `include/render/`（非 §1 的 `include/oakrender/`），
-  函数前缀 `oakrender_`，与 oaknode/oakcommon 的既有契约一致
+  函数前缀 `oakrender_`，与 oaknode/oak_core 的既有契约一致
   （§1 目标形态中的 `oakrender/include/oakrender/` 未采用）。
 - C API 命名照 R7-A §A.2 的 display.h 重写版改前缀
   `oakrender_display_*`/`oakrender_codec_frame_*`；`OakCodecFrame`

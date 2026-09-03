@@ -4,7 +4,7 @@
 
 CancelableObject只在render和task处有🚰，移入对应模块。
 
-## 从 oakcommon（src/common）移除的类（2026-08-05）
+## 从 oak_core（src/common）移除的类（2026-08-05）
 
 判据：不严重依赖 common 其他类，且只有一个非 common 模块使用它
 （tests/gtest 不计入使用方）。以下类已从 `src/common/` 移除，
@@ -12,7 +12,7 @@ CancelableObject只在render和task处有🚰，移入对应模块。
 
 | 类 | 唯一使用方 | 应放到 |
 |---|---|---|
-| `Html`（html.h/.cpp） | engine/node | oaknode（M3）。注意它依赖 common 的 xmlutils，迁移时需连同 XML 辅助或改为调用 oakcommon C API |
+| `Html`（html.h/.cpp） | engine/node | oaknode（M3）。注意它依赖 common 的 xmlutils，迁移时需连同 XML 辅助或改为调用 oak_core C API |
 | `JobTime`（jobtime.h/.cpp） | engine/render | oakrender（M7） |
 | `OTIOUtils`（otioutils.h） | engine/task | oaktask（M8） |
 | `PlaybackAudioClock`（playbackaudioclock.h） | engine/audio | oakaudio（M6） |
@@ -27,15 +27,15 @@ CancelableObject只在render和task处有🚰，移入对应模块。
 
 另：`power.h`、`memorypool.h`、`threadsafemap.h` 当前没有任何
 common 模块外的使用方（零用户），不满足移除判据，暂保留在
-oakcommon；后续若确认无用途可直接删除。
+oak_core；后续若确认无用途可直接删除。
 
-## oakcommon 去Qt化的删除与语义变更（2026-08-05）
+## oak_core 去Qt化的删除与语义变更（2026-08-05）
 
 去Qt化过程中以下函数被删除或语义变化，迁移调用方时需注意：
 
 - `CommandLineParser::print_help()`：不再自动读取
   `QCoreApplication::applicationName()/applicationVersion()`，需先调
-  `set_app_info()`（C API：`oakcommon_commandlineparser_set_app_info`），
+  `set_app_info()`（C API：`oak_core_commandlineparser_set_app_info`），
   否则打印默认 `"oak"` + 空版本。
 - `FileFunctions::get_unique_file_identifier`：哈希由 SHA-1 改为
   FNV-1a 64-bit，旧缓存 key 全部失效（需一次重建）。
@@ -51,7 +51,7 @@ oakcommon；后续若确认无用途可直接删除。
   `olive::XmlStreamReader/Writer` 替代（不支持 XML 命名空间）。
 - `OIIOUtils::frame_to_buffer/buffer_to_frame`：未进 C API，C++ 侧签名
   拍平为 `(const void *data, int64_t linesize_bytes, OIIO::ImageBuf *)`，
-  engine/codec/frame.cpp 迁移时传成员即可。`OakCommonPixelFormat` 枚举
+  engine/codec/frame.cpp 迁移时传成员即可。`oak_corePixelFormat` 枚举
   目前定义在 include/common/ocioutils.h，oiioutils 复用，后续可抽成
   独立的 include/common/pixelformat.h。
 - `MemoryPool`：删除 QTimer 每 5 秒自动回收空 arena，改为公有
@@ -67,7 +67,7 @@ oakcommon；后续若确认无用途可直接删除。
   `create_horizontal/vertical_line`、`set_combo_box_data`、
   `word_wrap_string`、`flip_control_and_shift_modifiers`、
   `get_formatted_date_time`、`to_q_color`、`core::qHash`、
-  `Q_DECLARE_METATYPE` 宏组）未迁入 oakcommon，app 层继续用 Qt 版。
+  `Q_DECLARE_METATYPE` 宏组）未迁入 oak_core，app 层继续用 Qt 版。
   `ptr_to_value/value_to_ptr` 载体由 QVariant 改为 `uintptr_t`，
   迁移时调用点需同步改（renderprocessor.cpp、rendermanager.cpp、
   previewautocacher.cpp、src/capi/worker.cpp）。`get_parent_of_type`
@@ -283,7 +283,7 @@ ColorManager）去Qt化过程中的删除与语义变化，迁移调用方时需
 - oaknode↔oaktimeline 运行期互相解析（add_default_nodes →
   TimelineAddTrackCommand），双方 dylib dynamic_lookup，测试二进制
   必须同时链两个库（各 standalone 驱动已接线）。
-- oakcommon xml C API 新增 get_native 借用访问器（C++ only），
+- oak_core xml C API 新增 get_native 借用访问器（C++ only），
   oaktimeline 的 load/save 经它取回 XmlStreamReader/Writer。
 
 ## oakplugin 去Qt化的删除与语义变更（2026-08-05）
@@ -348,8 +348,8 @@ ColorManager）去Qt化过程中的删除与语义变化，迁移调用方时需
   OAK_TIMELINE_WAVEFORMS_*，值与 olive::Timeline 枚举保持兼容）。
 - tracklist.h/block.h 里 timelinecommon.h 的死引用删除；
   src/node/transition/timeline/ 四个 stub 头删除。
-- oakcommon xml C API 新增 oakcommon_xml_reader_wrap_native/
-  oakcommon_xml_writer_wrap_native（C++ only 借用包装），
+- oak_core xml C API 新增 oak_core_xml_reader_wrap_native/
+  oak_core_xml_writer_wrap_native（C++ only 借用包装），
   XmlReaderState/XmlWriterState 支持 owning/borrowed 双模式。
 - liboaknode 对 liboaktimeline 的 C++ 符号引用降为 0（nm 验证）。
 
@@ -404,7 +404,7 @@ Rust 重写驱动（RIIR 后调用方只能走 C ABI，接线自动发生且被�
 
 - 已切：oaknode→oaktimeline（81431d180）、oaknode→oakrender
   （5a564f30c，缓存体系/色彩/单例全部 C ABI 化）。
-- olive::Variant 从 oaknode 下沉到 oakcommon（src/common/src/
+- olive::Variant 从 oaknode 下沉到 oak_core（src/common/src/
   variant.{h,cpp}）——它本是跨模块值类型。
 - 冻结时点的残留（nm 可查）：
   - render→node 41 个 C++ 符号：ProjectCopier 深拷贝族、
@@ -415,15 +415,15 @@ Rust 重写驱动（RIIR 后调用方只能走 C ABI，接线自动发生且被�
     oaknode_project_deep_copy/sync_copy，traverser 改 hook 制）。
   - node/render→plugin 的 OFX C++ 符号：随 M11（DeepSeek 实现中）
     落地消解。
-  - 各模块→oakcommon 的 XmlStreamReader/FileFunctions/VideoParams
-    C++ 调用：随 oakcommon Rust 化消解。
+  - 各模块→oak_core 的 XmlStreamReader/FileFunctions/VideoParams
+    C++ 调用：随 oak_core Rust 化消解。
   - 文档化例外：Texture 的 Variant 载荷（Rust 侧不存在此问题）、
     UndoCommand 跨模块继承、oakgl2/oakvulkan 后端插件接口。
 - ④（隐藏 C++ API）同步搁置：模块 Rust 化后 C++ 符号自然消失。
 
-## oakcommon Rust 测试：ffmpeg_bridge 符号依赖（2026-08-08）
+## oak_core Rust 测试：ffmpeg_bridge 符号依赖（2026-08-08）
 
-`oakcommon_ffmpegutils_get_compatible_bridge_pixel_format` 在非测试构建
+`oak_core_ffmpegutils_get_compatible_bridge_pixel_format` 在非测试构建
 中会经 `find_best_pix_fmt_of_list` 引用 ffmpeg_bridge 的
 `fb_find_best_pix_fmt_of_list` 符号。集成测试二进制不链接 libffmpeg_bridge，
 实验证实直接调用该 FFI 导出会在链接期报 `_fb_find_best_pix_fmt_of_list`
@@ -441,7 +441,7 @@ test-stubs 约定一致）：
   （成功路径 + null out-param 的 E_INVALID 路径），需带
   `--features test-stubs` 运行；不带 flag 时该文件整体为空（cfg 门控）。
 
-## oakcommon Rust：ocioutils/oiioutils 吸收 oakoci（2026-08-08 接手笔记）
+## oak_core Rust：ocioutils/oiioutils 吸收 oakoci（2026-08-08 接手笔记）
 
 ### 基线
 

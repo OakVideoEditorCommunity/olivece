@@ -155,13 +155,13 @@ pub struct CompiledEffect {
 	/// The translation result (uniform layout + texture bindings).
 	pub translated: TranslatedShader,
 	/// The compiled pipeline in the context cache.
-	pub program: std::sync::Arc<crate::backend::ShaderProgram>,
+	pub program: std::sync::Arc<oak_core::backend::ShaderProgram>,
 }
 
 /// Translate `glsl` and compile the pipeline on `ctx`. `key` is the
 /// pipeline cache key (the effect type id plus any shader-variant id).
 pub fn compile_effect(
-	ctx: &crate::backend::GpuContext,
+	ctx: &oak_core::backend::GpuContext,
 	key: &str,
 	glsl: &str,
 	filtering: bool,
@@ -193,7 +193,7 @@ pub fn compile_effect(
 ///   `params`: `resolution_in` (the frame size), `ove_iteration`,
 ///   `ove_mvpmat` (identity).
 pub fn run_effect(
-	ctx: &crate::backend::GpuContext,
+	ctx: &oak_core::backend::GpuContext,
 	effect: &CompiledEffect,
 	params: &oak_node::value::NodeValueRow,
 	inputs: &[(String, u64)],
@@ -780,14 +780,14 @@ void main() { frag_color = texture(tex_in, ove_texcoord); }
 
 	// ---- GPU runner tests (skipped without an adapter) -------------------
 
-	fn gpu() -> Option<std::sync::Arc<crate::backend::GpuContext>> {
-		crate::backend::GpuContext::create(crate::backend::BackendKind::Auto)
+	fn gpu() -> Option<std::sync::Arc<oak_core::backend::GpuContext>> {
+		oak_core::backend::GpuContext::create(oak_core::backend::BackendKind::Auto)
 	}
 
-	fn f32_frame(w: i32, h: i32, fill: impl Fn(usize) -> [f32; 4]) -> crate::texture::Frame {
-		use crate::texture::Frame;
+	fn f32_frame(w: i32, h: i32, fill: impl Fn(usize) -> [f32; 4]) -> oak_core::texture::Frame {
+		use oak_core::texture::Frame;
 		let mut frame = Frame::new();
-		let mut pod = crate::frame::VideoParamsPod::default();
+		let mut pod = oak_core::frame::VideoParamsPod::default();
 		pod.width = w;
 		pod.height = h;
 		pod.format = oak_core::PixelFormat::F32 as i32;
@@ -803,12 +803,89 @@ void main() { frag_color = texture(tex_in, ove_texcoord); }
 		frame
 	}
 
-	fn pixel(out: &crate::texture::Frame, x: usize) -> [f32; 4] {
+	fn pixel(out: &oak_core::texture::Frame, x: usize) -> [f32; 4] {
 		let mut rgba = [0.0f32; 4];
 		for (c, v) in rgba.iter_mut().enumerate() {
 			*v = f32::from_le_bytes(out.data[(x * 4 + c) * 4..(x * 4 + c) * 4 + 4].try_into().unwrap());
 		}
 		rgba
+	}
+
+	/// End-to-end effect pass: a translated node shader (gain multiply)
+	/// runs through `compile_shader_pass`/`run_shader_pass` and the
+	/// readback matches the expected pixels exactly. (Moved from
+	/// oak-core's backend tests — the GLSL→WGSL translation and uniform
+	/// packing live in this module.)
+	#[test]
+	fn gpu_effect_pass_runs_translated_shader() {
+		use oak_core::frame::VideoParamsPod;
+		use oak_core::texture::Frame;
+
+		let Some(ctx) = gpu() else {
+			eprintln!("no adapter; skipping effect pass");
+			return;
+		};
+		let glsl = r#"
+uniform sampler2D tex_in;
+uniform float gain_in;
+
+in vec2 ove_texcoord;
+out vec4 frag_color;
+
+void main() {
+    frag_color = texture(tex_in, ove_texcoord) * gain_in;
+}
+"#;
+		let translated = translate(glsl).unwrap();
+		let program = ctx
+			.compile_shader_pass(
+				"test-gain",
+				&translated.wgsl,
+				translated.textures.len() as u32,
+				!translated.uniforms.is_empty(),
+				false,
+			)
+			.unwrap();
+
+		let mut row = oak_node::value::NodeValueRow::new();
+		row.insert("gain_in".into(), oak_node::value::NodeValue::Float(0.5));
+		let uniforms = pack_uniforms(&translated, &row);
+
+		let w = 4;
+		let h = 2;
+		let src = ctx.create_texture(w, h).unwrap();
+		let dst = ctx.create_texture(w, h).unwrap();
+		let mut frame = Frame::new();
+		let mut pod = VideoParamsPod::default();
+		pod.width = w;
+		pod.height = h;
+		frame.set_video_params(pod);
+		frame.allocate();
+		// Distinct values per pixel (F32 RGBA): 0.2/0.4/0.6/1.0 shifted
+		// per pixel, so a UV mixup would be visible.
+		for px in 0..(w * h) as usize {
+			for c in 0..4 {
+				let v = 0.2 + 0.1 * (px + c) as f32;
+				frame.data[(px * 4 + c) * 4..(px * 4 + c) * 4 + 4]
+					.copy_from_slice(&v.to_le_bytes());
+			}
+		}
+		ctx.upload(src, &frame).unwrap();
+		ctx.run_shader_pass(&program, &uniforms, &[src], dst).unwrap();
+		let out = ctx.download(dst).unwrap();
+		for px in 0..(w * h) as usize {
+			for c in 0..4 {
+				let at = (px * 4 + c) * 4;
+				let got = f32::from_le_bytes(out.data[at..at + 4].try_into().unwrap());
+				let want = (0.2 + 0.1 * (px + c) as f32) * 0.5;
+				assert!(
+					(got - want).abs() < 1e-6,
+					"px {px} ch {c}: got {got}, want {want}"
+				);
+			}
+		}
+		ctx.destroy_texture(src);
+		ctx.destroy_texture(dst);
 	}
 
 	/// The real opacity shader through the full runner: pixels are

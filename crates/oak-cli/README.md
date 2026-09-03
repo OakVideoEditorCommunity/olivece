@@ -20,7 +20,7 @@ cargo test                 # unit + integration tests
 
 The crate is **self-contained** (M14 R2): it links the oak* module rlibs
 directly (`oaknode`, `oaktimeline`, `oakcodec`, `oakrender`, `oaktask`,
-`oakcommon`) — no `liboakengine` dylib, no C ABI, no build.rs link step.
+`oak_core`) — no `liboakengine` dylib, no C ABI, no build.rs link step.
 `cargo test -p oak-cli` stands alone.
 
 ## Subcommands

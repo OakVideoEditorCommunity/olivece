@@ -42,13 +42,13 @@ use std::time::Duration;
 use crate::oakui::component::menu::{self, Menu, MenuBar, MenuBarEntry, MenuBarEvent, MenuItem};
 use crate::oakui::component::text_input::install_text_input_bindings;
 use gpui::dock::{
-	DockArea, DockEvent, DockLayout, DropTarget, DropZone, NodePath, PanelHandle, PanelId,
-	PanelRegistry,
+    DockArea, DockEvent, DockLayout, DropTarget, DropZone, NodePath, PanelHandle, PanelId,
+    PanelRegistry,
 };
 use gpui::timeline::{ClipData, ClipId, Frame, FrameRange, TimelineEvent, TimelineView, TrackData};
 use gpui::{
-	colors::DefaultColors, div, prelude::*, px, size, App, AsyncWindowContext, Bounds, Context,
-	Entity, PathPromptOptions, Render, Window, WindowBounds, WindowOptions,
+    colors::DefaultColors, div, prelude::*, px, size, App, AsyncWindowContext, Bounds, Context,
+    Entity, PathPromptOptions, Render, Window, WindowBounds, WindowOptions,
 };
 use gpui_widgets::audio_meter::{AudioLevelMeter, MeterOrientation};
 use gpui_widgets::dialog::progress::{progress_dialog, ProgressContent};
@@ -58,7 +58,7 @@ use gpui_widgets::viewer::PlaybackClock;
 
 use crate::actions::{ActionId, TimelineToolExt, Tool};
 use crate::dialogs::{
-	DropSequenceChoice, ExportDialogContent, PreferencesDialogContent, SequenceFormatSeed,
+    DropSequenceChoice, ExportDialogContent, PreferencesDialogContent, SequenceFormatSeed,
 };
 use crate::oakui::{AppEngine, ExportSession, MockEngine, Monitor, RealEngine};
 use crate::panels::commands as panel_commands;
@@ -78,9 +78,9 @@ use crate::panels::timeline::{FootageDropNeedsSequence, TimelinePanel};
 // registry is the single source; these keep the test call sites readable).
 #[cfg(test)]
 pub(crate) mod menu_ids {
-	use crate::actions::ActionId;
+    use crate::actions::ActionId;
 
-	pub const NEW_PROJECT: usize = ActionId::NewProject.menu_id();
+    pub const NEW_PROJECT: usize = ActionId::NewProject.menu_id();
 	pub const OPEN_PROJECT: usize = ActionId::OpenProject.menu_id();
 	pub const EXPORT_PROJECT: usize = ActionId::SaveProject.menu_id();
 	pub const CLOSE: usize = ActionId::CloseProject.menu_id();
@@ -1035,8 +1035,8 @@ impl<E: AppEngine> OakApp<E> {
 	/// preferences, tools, transport fallbacks — and the placeholder
 	/// `println!` for the actions not wired yet.
 	fn handle_global_action(&mut self, action: ActionId, cx: &mut Context<Self>) {
-		use crate::actions::ActionId as A;
-		match action {
+        use crate::actions::ActionId as A;
+        match action {
 			// --- File ------------------------------------------------------
 			A::NewProject => self.open_new_project(cx),
 			A::OpenProject => self.open_file_dialog(FileAction::Open, cx),
@@ -1746,8 +1746,8 @@ impl<E: AppEngine> OakApp<E> {
 	/// close the dialog on success; the mutating actions reload the list;
 	/// failures land in the dialog's status line.
 	fn on_manager_event(&mut self, event: &crate::manager::ManagerEvent, cx: &mut Context<Self>) {
-		use crate::manager::ManagerEvent as E;
-		match event {
+        use crate::manager::ManagerEvent as E;
+        match event {
 			E::Create => {
 				let name = crate::i18n::tr("manager.new.default_name").to_string();
 				let result = self
@@ -3392,7 +3392,7 @@ impl MenuState {
 			loop_playback: false,
 			show_all: false,
 			full_screen: false,
-			use_proxy_media: oak_common::configstore::ConfigStore::instance().get_bool(
+			use_proxy_media: oak_core::configstore::ConfigStore::instance().get_bool(
 				None,
 				"UseProxyMedia",
 				1,
@@ -3420,10 +3420,10 @@ fn menu_item(action: ActionId) -> MenuItem {
 /// the menu bar after a language switch repaints it in the new language;
 /// `state` drives the dynamic checkmarks (theme, tool, snapping, loop, …).
 fn make_menus(state: MenuState) -> Vec<MenuBarEntry> {
-	use crate::actions::ActionId as A;
-	use crate::i18n::tr;
+    use crate::actions::ActionId as A;
+    use crate::i18n::tr;
 
-	let theme_submenu = Menu::new(vec![
+    let theme_submenu = Menu::new(vec![
 		menu_item(A::ThemeDark).with_checked(state.dark),
 		menu_item(A::ThemeLight).with_checked(!state.dark),
 	]);
@@ -3754,9 +3754,9 @@ fn run_with<E: AppEngine>(args: AppArgs) {
 		// choice through the process environment. Read by gpui_wgpu as
 		// OAK_DISPLAY_BIT_DEPTH ("8" opts into the 8-bit pair; anything
 		// else requests 10-bit).
-		let bit_depth = oak_render::backend::DisplayBitDepth::from_config_string(
+		let bit_depth = oak_core::backend::DisplayBitDepth::from_config_string(
 			&crate::oakui::real::config_get_string(
-				oak_render::backend::CONFIG_KEY_DISPLAY_BIT_DEPTH,
+                oak_core::backend::CONFIG_KEY_DISPLAY_BIT_DEPTH,
 			),
 		);
 		// SAFETY: single-threaded startup, before any window exists.
@@ -3830,14 +3830,14 @@ fn run_with<E: AppEngine>(args: AppArgs) {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::oakui::EngineGateway as _;
-	use gpui::timeline::TimelineDataSource as _;
-	use gpui::{
-		px, size, AnyWindowHandle, ExternalPaths, FileDropEvent, TestAppContext, VisualTestContext,
-	};
+    use super::*;
+    use crate::oakui::EngineGateway as _;
+    use gpui::timeline::TimelineDataSource as _;
+    use gpui::{
+        px, size, AnyWindowHandle, ExternalPaths, FileDropEvent, TestAppContext, VisualTestContext,
+    };
 
-	/// The 视图/View menu carries a 语言/Language submenu whose items are
+    /// The 视图/View menu carries a 语言/Language submenu whose items are
 	/// labeled in their own language and whose checkmark follows the active
 	/// language — and the whole menu bar flips language with `i18n`.
 	#[test]

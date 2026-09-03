@@ -36,7 +36,7 @@
 | 序 | 模块 | 内容（engine/ 下目录） | 主要切割点 |
 |---|---|---|---|
 | M0 | oakcore | `core/`（已完成，不动） | — |
-| M1 | oakcommon | `common/`（41 文件工具集）+ `config/` | common→render/node/undo/codec/plugin 的 12 次反向 include（清单见 M1 §3） |
+| M1 | oak_core | `common/`（41 文件工具集）+ `config/` | common→render/node/undo/codec/plugin 的 12 次反向 include（清单见 M1 §3） |
 | M2 | oakundo | `undo/`（undocommand/undostack） | undo→node/project.h 1 处（M2 §3） |
 | M3 | oaknode | `node/`（图、工厂、keyframe、nodeundo、traverser） | node→render 47、node→codec 8、node→timeline 5、node→audio 4、node→undo 4（M3 §3，最大的活） |
 | M3a | **oakstorage** | `node/project/serializer` 落盘路径 + `task/project/{load,save,loadotio,saveotio}` 文件 IO（**工程持久化单列**，后端可插拔：当前 XML 文件，未来数据库） | storage→node（序列化建图取图，经 oaknode C ABI）；手册 M10 |
@@ -52,15 +52,15 @@
 
 **M3.5（伴随 M3 的类型下沉）**：`render/videoparams.h`、
 `render/subtitleparams.h`、`render/colortransform.h` 是纯数据类型，
-codec/node 都重度引用——下沉到 **oakcommon**（或独立 oakmedia 目录，
-执行时二选一，默认并 oakcommon），切断 codec→render 的大头。
+codec/node 都重度引用——下沉到 **oak_core**（或独立 oakmedia 目录，
+执行时二选一，默认并 oak_core），切断 codec→render 的大头。
 
 ## 3. 依赖环处理总表
 
 | 环 | 数据 | 处理 |
 |---|---|---|
 | node ↔ render | 47/38 | M3 时 node 侧 47 次引用经 oakrender **尚未存在**——因此 M3 拆分时 node→render 的引用先经"前向 C ABI"处理：把 node 用到的 render 类（ColorProcessor/RenderManager/footagejob/pluginjob/videoparams）的 C API 定义在 **oaknode 手册里但由 M7 实现**？**否**——正确顺序见 §4 说明 |
-| node ↔ timeline | 5/32 | node→timeline 5 次（timelinecommon×2、marker/workarea/timelineundogeneral 各1）：枚举/常量头下沉 oakcommon，其余经 M4 反向 C ABI |
+| node ↔ timeline | 5/32 | node→timeline 5 次（timelinecommon×2、marker/workarea/timelineundogeneral 各1）：枚举/常量头下沉 oak_core，其余经 M4 反向 C ABI |
 | node ↔ codec | 8/3 | node→codec 8（decoder/frame/encoder/proxymanager）：M5 反向 C ABI |
 | node ↔ audio | 4/4 | M6 反向 C ABI |
 | render ↔ codec | 9/11 | M3.5 类型下沉后剩 ~3（renderer.h/framemanager.h），M5 时处理 |

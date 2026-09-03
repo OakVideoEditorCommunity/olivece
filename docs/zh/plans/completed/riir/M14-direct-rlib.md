@@ -9,7 +9,7 @@
 ## 0. 形态决策（2026-08，已定）
 
 - **A 方案（用户拍板）**：app / oak-cli / oak-worker 只依赖
-  oakcommon / oakundo / oaknode / oaktimeline / oakcodec / oakaudio /
+  oak_core / oakundo / oaknode / oaktimeline / oakcodec / oakaudio /
   oakrender / oaktask / oakplugin / oakstorage 的 rlib；不链接
   liboakengine（连 rlib 形态都不用）。
 - **oakengine 保留为纯 cdylib**：只给 OFX 插件和未来的外部消费者

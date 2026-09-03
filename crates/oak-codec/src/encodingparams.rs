@@ -269,10 +269,10 @@ impl EncodingParams {
 		}
 	}
 
-	/// Load from a compact XML preset string (oakcommon C++ XmlStreamReader).
+	/// Load from a compact XML preset string (oak_core C++ XmlStreamReader).
 	///
 	/// # CPP-PARITY
-	/// `EncodingParams::load` — uses oakcommon's C++ `XmlStreamReader`
+	/// `EncodingParams::load` — uses oak_core's C++ `XmlStreamReader`
 	/// (`src/common/src/xmlutils.h`), a C++-to-C++ coupling the bridge
 	/// cannot cover (NOTES.md §7). Preserves the load_v1 bug of not
 	/// assigning `custom_range`.
@@ -524,7 +524,7 @@ impl EncodingParams {
 // ---------------------------------------------------------------------------
 // Minimal XML helpers for the round-trip `load`/`save_to_string`.
 //
-// CPP-PARITY: the C++ `load`/`save_to_string` go through oakcommon's
+// CPP-PARITY: the C++ `load`/`save_to_string` go through oak_core's
 // `XmlStreamReader`/`XmlStreamWriter` (a C++-to-C++ coupling the Rust bridge
 // cannot cover, NOTES.md §7). Rather than returning `Err`, this port keeps a
 // minimal but faithful round-trip for the fields representable without the

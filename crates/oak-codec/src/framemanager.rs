@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use oak_common::videoparams::VideoParams;
+use oak_core::videoparams::VideoParams;
 use crate::frame::Frame;
 
 /// `olive::FrameManager`: singleton frame pool with background GC.
@@ -148,7 +148,7 @@ fn frame_matches(frame: &Frame, params: &VideoParams) -> bool {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use oak_common::ocioutils::PixelFormat as OakPixelFormat;
+	use oak_core::ocioutils::PixelFormat as OakPixelFormat;
 
 	fn test_params(w: i32, h: i32) -> VideoParams {
 		VideoParams::new_basic(w, h, OakPixelFormat::from_code(0), 4, 1, 1, 0, 1)

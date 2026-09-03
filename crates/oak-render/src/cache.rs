@@ -261,7 +261,7 @@ pub struct PlaybackCache {
 impl PlaybackCache {
 	/// New cache for `owner` (C++ `PlaybackCache(parent)`).
 	pub fn new(kind: CacheKind, owner: OwnerIdentity) -> Self {
-		let disk_dir = crate::commonutil::default_disk_cache_path();
+		let disk_dir = oak_core::commonutil::default_disk_cache_path();
 		Self {
 			kind,
 			owner,

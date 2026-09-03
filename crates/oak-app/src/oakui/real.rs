@@ -44,7 +44,7 @@
 //!   listener and cancel atom.
 //! * **Config** — the preferences (renderer backend, language, theme,
 //!   cache dir, proxy policy, snapshot interval, default transition,
-//!   audio devices) round-trip through the oakcommon config store; the
+//!   audio devices) round-trip through the oak_core config store; the
 //!   audio device selection additionally applies live through oakaudio's
 //!   manager.
 //! * **Storage** — the write-through library binds every opened project
@@ -66,12 +66,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use gpui::effect_stack::{
-	EffectCardKind, EffectData, EffectId, EffectStackDataSource, EffectStackEvent,
+    EffectCardKind, EffectData, EffectId, EffectStackDataSource, EffectStackEvent,
 };
 use gpui::node_graph::{NodeGraphDataSource, NodeGraphEvent};
 use gpui::timeline::{
-	ClipData, ClipId, Frame, FrameRange, FrameRate, Marker, TimelineDataSource, TimelineEvent,
-	TrackData, TrackHeaderEvent, TrackKind, TrimEdge,
+    ClipData, ClipId, Frame, FrameRange, FrameRate, Marker, TimelineDataSource, TimelineEvent,
+    TrackData, TrackHeaderEvent, TrackKind, TrimEdge,
 };
 use gpui::{prelude::*, px, App, Context, Entity, Hsla, Pixels, RenderImage, SharedString};
 use gpui_widgets::audio_meter::AudioMeterDataSource;
@@ -86,8 +86,8 @@ use oak_timeline::handle::CHandle;
 use oak_timeline::util::NodeRef;
 
 use super::engine::{
-	AppEngine, EngineGateway, ExportSession, LibraryProject, Monitor, MulticamState, Project,
-	ScopeData, Sequence, SequenceParameters, VideoFormat, WizardFootage, WizardSyncOffset,
+    AppEngine, EngineGateway, ExportSession, LibraryProject, Monitor, MulticamState, Project,
+    ScopeData, Sequence, SequenceParameters, VideoFormat, WizardFootage, WizardSyncOffset,
 };
 use super::frames::{bgra_bytes_to_render_image, f32_rgba_to_bgra_image, synthetic_frame_samples};
 use super::graphops::{self, ProjectRef};
@@ -714,10 +714,10 @@ fn rendered_to_owned_image(rendered: &super::renderops::RenderedFrame) -> Option
 /// The app-side output node for F32 frames (working colorspace → the
 /// project's output colorspace); pass-through in the legacy working space.
 fn apply_output_node_f32(samples: &mut [f32]) {
-	oak_common::colormath::working_to_display_target(
-		samples,
-		oak_render::color::pipeline_working_space(),
-		oak_render::color::pipeline_output_spec(),
+	oak_core::colormath::working_to_display_target(
+        samples,
+        oak_core::color::pipeline_working_space(),
+        oak_core::color::pipeline_output_spec(),
 	);
 }
 
@@ -2378,8 +2378,8 @@ impl RealEngine {
 	/// mapped onto the widget's badge enum; folders and footage without
 	/// proxy state get none.
 	fn proxy_badge_of(&self, id: u64) -> Option<gpui_widgets::project_explorer::ProxyBadge> {
-		use gpui_widgets::project_explorer::ProxyBadge;
-		let project = self.project.as_ref()?;
+        use gpui_widgets::project_explorer::ProxyBadge;
+        let project = self.project.as_ref()?;
 		let node = graphops::id_of(id)?;
 		let guard = graphops::lock(project);
 		let f = graphops::footage_behavior(&guard.graph, node)?;
@@ -2547,7 +2547,7 @@ impl RealEngine {
 	fn proxy_cache_path() -> String {
 		let configured = config_get_string(CONFIG_KEY_DISK_CACHE_PATH);
 		if configured.trim().is_empty() {
-			oak_common::filefunctions::default_disk_cache_path()
+			oak_core::filefunctions::default_disk_cache_path()
 		} else {
 			configured
 		}
@@ -2706,8 +2706,8 @@ impl RealEngine {
 		f: &oak_node::footage::FootageBehavior,
 		node: NodeId,
 	) -> super::engine::ProxyMediaState {
-		use super::engine::ProxyMediaState;
-		if self.proxy_runs.iter().any(|run| run.footage == node) {
+        use super::engine::ProxyMediaState;
+        if self.proxy_runs.iter().any(|run| run.footage == node) {
 			return ProxyMediaState::Generating;
 		}
 		if f.proxy.is_empty() {
@@ -2733,9 +2733,9 @@ impl RealEngine {
 	/// every clip is re-placed so its source head lines up with the
 	/// reference's at the anchor (one multi-undo).
 	fn sync_clips_by_source_time_internal(&mut self, clips: &[ClipId]) {
-		use oak_audio::synchronizer::{place_by_source_time, SourceClip};
+        use oak_audio::synchronizer::{place_by_source_time, SourceClip};
 
-		let Some(project) = self.project.clone() else {
+        let Some(project) = self.project.clone() else {
 			return;
 		};
 
@@ -2857,12 +2857,12 @@ impl RealEngine {
 	/// offset triggers a rate search whose winner also rescales the clip
 	/// speed (one multi-undo).
 	fn sync_clips_by_waveform_internal(&mut self, clips: &[ClipId], allow_speed: bool) {
-		use oak_audio::synchronizer::place_by_waveform_offset;
-		use oak_audio::waveformsync::{
-			estimate_envelope_offset_valid, estimate_stretch_and_offset,
-		};
+        use oak_audio::synchronizer::place_by_waveform_offset;
+        use oak_audio::waveformsync::{
+            estimate_envelope_offset_valid, estimate_stretch_and_offset,
+        };
 
-		let Some(cache) = self.waveform_cache() else {
+        let Some(cache) = self.waveform_cache() else {
 			return;
 		};
 		let Some(project) = self.project.clone() else {
@@ -3157,7 +3157,7 @@ impl RealEngine {
 		// the render workers pick them up at graph-load time.
 		{
 			let guard = graphops::lock(&project);
-			oak_render::color::set_pipeline_color_settings(
+			oak_core::color::set_pipeline_color_settings(
 				guard.working_color_space(),
 				guard.output_color_spec(),
 			);
@@ -3263,12 +3263,12 @@ impl RealEngine {
 				.cloned()
 		});
 		let applied = match stored.as_deref() {
-			None => oak_render::color::set_up_default_config(),
-			Some(path) => oak_render::color::set_up_default_config_from(Some(path)),
+			None => oak_core::color::set_up_default_config(),
+			Some(path) => oak_core::color::set_up_default_config_from(Some(path)),
 		};
 		if let Err(e) = applied {
 			println!("[real engine] project OCIO config apply failed: {e}");
-			let _ = oak_render::color::set_up_default_config();
+			let _ = oak_core::color::set_up_default_config();
 		}
 		super::displaycolor::invalidate();
 	}
@@ -5422,7 +5422,7 @@ impl AppEngine for RealEngine {
 	}
 
 	fn set_use_proxy_media(&mut self, enabled: bool, cx: &mut Context<Self>) {
-		oak_common::configstore::ConfigStore::instance().set(
+		oak_core::configstore::ConfigStore::instance().set(
 			None,
 			CONFIG_KEY_USE_PROXY,
 			if enabled { "true" } else { "false" },
@@ -5436,7 +5436,7 @@ impl AppEngine for RealEngine {
 	/// Resolution ▸` menu): the preview geometry changes, so every cached
 	/// and in-flight preview frame is stale.
 	fn set_playback_divider(&mut self, divider: i64, cx: &mut Context<Self>) {
-		oak_common::configstore::ConfigStore::instance().set(
+		oak_core::configstore::ConfigStore::instance().set(
 			None,
 			"PlaybackDivider",
 			&divider.clamp(1, 8).to_string(),
@@ -5471,9 +5471,9 @@ impl AppEngine for RealEngine {
 		// refuses an invalid config the same way). Applying is the
 		// process-wide color config reload plus a full frame invalidation.
 		if trimmed.is_empty() {
-			oak_render::color::set_up_default_config().map_err(|e| e.to_string())?;
+			oak_core::color::set_up_default_config().map_err(|e| e.to_string())?;
 		} else {
-			oak_render::color::set_up_default_config_from(Some(&trimmed))
+			oak_core::color::set_up_default_config_from(Some(&trimmed))
 				.map_err(|e| e.to_string())?;
 		}
 		{
@@ -5531,9 +5531,9 @@ impl AppEngine for RealEngine {
 	fn project_color_settings(&self) -> (String, String, String) {
 		let Some(project) = self.project_ref() else {
 			return (
-				oak_common::colormath::WorkingColorSpace::default().as_setting().to_string(),
-				oak_common::colormath::OutputGamut::default().as_setting().to_string(),
-				oak_common::colormath::OutputTransfer::default().as_setting().to_string(),
+                oak_core::colormath::WorkingColorSpace::default().as_setting().to_string(),
+                oak_core::colormath::OutputGamut::default().as_setting().to_string(),
+                oak_core::colormath::OutputTransfer::default().as_setting().to_string(),
 			);
 		};
 		let guard = graphops::lock(project);
@@ -5547,16 +5547,16 @@ impl AppEngine for RealEngine {
 		};
 		(
 			get(
-				oak_node::project::SETTING_WORKING_COLOR_SPACE,
-				oak_common::colormath::WorkingColorSpace::default().as_setting(),
+                oak_node::project::SETTING_WORKING_COLOR_SPACE,
+                oak_core::colormath::WorkingColorSpace::default().as_setting(),
 			),
 			get(
-				oak_node::project::SETTING_OUTPUT_GAMUT,
-				oak_common::colormath::OutputGamut::default().as_setting(),
+                oak_node::project::SETTING_OUTPUT_GAMUT,
+                oak_core::colormath::OutputGamut::default().as_setting(),
 			),
 			get(
-				oak_node::project::SETTING_OUTPUT_TRANSFER,
-				oak_common::colormath::OutputTransfer::default().as_setting(),
+                oak_node::project::SETTING_OUTPUT_TRANSFER,
+                oak_core::colormath::OutputTransfer::default().as_setting(),
 			),
 		)
 	}
@@ -5572,8 +5572,8 @@ impl AppEngine for RealEngine {
 			return;
 		};
 		// Normalize through the parsers so only canonical values persist.
-		let working = oak_common::colormath::WorkingColorSpace::from_setting(&working);
-		let spec = oak_common::colormath::OutputColorSpec::from_settings(&gamut, &transfer);
+		let working = oak_core::colormath::WorkingColorSpace::from_setting(&working);
+		let spec = oak_core::colormath::OutputColorSpec::from_settings(&gamut, &transfer);
 		{
 			let mut guard = graphops::lock(&project);
 			guard.settings.insert(
@@ -5592,7 +5592,7 @@ impl AppEngine for RealEngine {
 		}
 		// The app-side transforms read the process global; the workers pick
 		// the new settings up with the next graph upload.
-		oak_render::color::set_pipeline_color_settings(working, spec);
+		oak_core::color::set_pipeline_color_settings(working, spec);
 		// The workers derive their pipeline colors from the uploaded project
 		// snapshot; a settings change alone does not bump the undo-stack
 		// revision (the manager dedups re-uploads on it), so push an explicit
@@ -7124,7 +7124,7 @@ pub fn encoding_formats() -> Vec<(i32, String, String)> {
 pub const EXPORT_FORMAT_MP4: i32 = 2;
 
 // ---------------------------------------------------------------------------
-// Config (preferences) — the oakcommon config store directly
+// Config (preferences) — the oak_core config store directly
 // ---------------------------------------------------------------------------
 
 /// The config key selecting the renderer backend (worker `create_renderer`
@@ -7134,7 +7134,7 @@ pub const CONFIG_KEY_RENDERER_BACKEND: &str = "GraphicsBackend";
 /// defaults to dark when the key is absent).
 pub const CONFIG_KEY_THEME: &str = "Theme";
 /// The config key overriding the disk cache directory (empty = the
-/// platform default `<config dir>/mediacache`; honored by oakcommon's
+/// platform default `<config dir>/mediacache`; honored by oak_core's
 /// `default_disk_cache_path`, so oakrender/oaknode caches follow it).
 pub const CONFIG_KEY_DISK_CACHE_PATH: &str = "DiskCachePath";
 /// The config key toggling proxy media use (`UseProxyMedia`, bool).
@@ -7169,8 +7169,8 @@ pub const DEFAULT_SNAPSHOT_INTERVAL_SEC: i64 = 600;
 pub const DEFAULT_TRANSITION_SEC: &str = "0.5";
 
 /// The process-wide config store.
-fn config_store() -> &'static oak_common::configstore::ConfigStore {
-	oak_common::configstore::ConfigStore::instance()
+fn config_store() -> &'static oak_core::configstore::ConfigStore {
+	oak_core::configstore::ConfigStore::instance()
 }
 
 /// Loads the persisted configuration from disk (once at startup, before
@@ -7358,11 +7358,11 @@ pub fn library_list() -> Result<Vec<LibraryProject>, String> {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use std::sync::mpsc as std_mpsc;
-	use std::time::Duration;
+    use super::*;
+    use std::sync::mpsc as std_mpsc;
+    use std::time::Duration;
 
-	/// Serializes the media/FFmpeg-heavy tests (the codec library is not
+    /// Serializes the media/FFmpeg-heavy tests (the codec library is not
 	/// thread-safe against concurrent decode sessions) and shares the
 	/// process-global undo stack with the other app test modules.
 	fn media_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -7740,11 +7740,11 @@ mod tests {
 	fn process_backend_preview_path_is_zero_copy() {
 		let _media = media_lock();
 		let _worker = WorkerBinGuard::set();
-		use oak_render::manager::{RenderBackendChoice, RenderManager};
-		use oak_render::procpool::{
-			main_heap_frame_copies, reset_main_heap_frame_copies, DispatcherConfig,
-		};
-		RenderManager::shutdown();
+        use oak_render::manager::{RenderBackendChoice, RenderManager};
+        use oak_render::procpool::{
+            main_heap_frame_copies, reset_main_heap_frame_copies, DispatcherConfig,
+        };
+        RenderManager::shutdown();
 		let config = DispatcherConfig {
 			worker_bin: Some(
 				std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

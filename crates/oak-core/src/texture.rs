@@ -16,9 +16,9 @@
 
 //! Textures and CPU frames.
 
+use crate::Rational;
+use crate::PixelFormat;
 use std::sync::Arc;
-
-use oak_core::{PixelFormat, Rational};
 
 use crate::backend::{BackendKind, GpuContextLike};
 use crate::error::Result;

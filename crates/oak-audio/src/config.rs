@@ -15,12 +15,12 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! The `audio_config` namespace from `src/audio/src/configbridge.*`:
-//! audio-specific configuration read through the oakcommon C ABI.
+//! audio-specific configuration read through the oak_core C ABI.
 
 use std::error::Error;
 use std::ffi::CString;
 use std::str::FromStr;
-use oak_common::configstore::*;
+use oak_core::configstore::*;
 /// PortAudio output buffer size in frames; 0 = let PortAudio choose.
 ///
 /// `// CPP-PARITY: src/audio/src/configbridge.cpp:30`
@@ -44,7 +44,7 @@ pub fn device_name(is_output_device: bool) -> Result<String, Box<dyn Error>> {
 	let store = ConfigStore::instance();
 	let size = i32::from_str(store.get(None, key)?.as_str())?;
 	if size <= 1 {
-		// Absent (OAKCOMMON_E_NOT_FOUND) or empty
+		// Absent (oak_core_E_NOT_FOUND) or empty
 		return Err(Box::new(crate::error::Error::NotFound));
 	}
 	let mut buf = vec![0u8; size as usize];

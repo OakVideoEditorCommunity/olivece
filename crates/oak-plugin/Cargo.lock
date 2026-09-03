@@ -756,7 +756,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "oakcommon"
+name = "oak_core"
 version = "0.1.0"
 dependencies = [
  "image",
@@ -775,7 +775,7 @@ name = "oaknode"
 version = "0.1.0"
 dependencies = [
  "oakcodec",
- "oakcommon",
+ "oak_core",
  "oakcore-rs",
  "oakundo",
 ]
@@ -795,7 +795,7 @@ dependencies = [
 name = "oakrender"
 version = "0.1.0"
 dependencies = [
- "oakcommon",
+ "oak_core",
  "oakcore-rs",
  "ocio-rs",
  "wgpu",

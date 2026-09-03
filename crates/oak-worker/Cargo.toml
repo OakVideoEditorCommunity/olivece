@@ -43,7 +43,6 @@ libc = "0.2"
 oak-core = { path = "../oak-core" }
 oak-node = { path = "../oak-node" }
 oak-plugin = { path = "../oak-plugin" }
-oak-common = { path = "../oak-common" }
 
 # M14 R2 / M15 S1: oak-worker is a PURE module-crate consumer — the
 # worker runtime (src/worker.rs) lives in this binary and calls the oak*

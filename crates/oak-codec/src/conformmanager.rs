@@ -22,7 +22,7 @@
 //! `Unavailable`. Deterministic per-channel filenames derive from the
 //! source + target audio params.
 
-use oak_common::filefunctions::FileFunctions;
+use oak_core::filefunctions::FileFunctions;
 use std::path::Path;
 
 /// Conform state of one audio stream.
@@ -184,7 +184,7 @@ fn conform_filenames(
 	out
 }
 
-/// `oakcommon_filefunctions_get_unique_file_identifier` wrapper.
+/// `oak_core_filefunctions_get_unique_file_identifier` wrapper.
 fn unique_file_identifier(filename: &str) -> String {
 	FileFunctions::new()
 		.get_unique_file_identifier(filename)

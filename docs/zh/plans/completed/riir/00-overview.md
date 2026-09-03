@@ -18,7 +18,7 @@
 
 ```
 oakcore（已有，不动）
-oakcommon ─ oakundo ─ oaknode ─ oaktimeline ─ oakcodec ─ oakrender ─ oaktask ─ oakplugin
+oak_core ─ oakundo ─ oaknode ─ oaktimeline ─ oakcodec ─ oakrender ─ oaktask ─ oakplugin
                           │                                             │
                           └────────────── oakstorage（工程持久化，      ┘
                                            后端可插拔：文件→数据库）

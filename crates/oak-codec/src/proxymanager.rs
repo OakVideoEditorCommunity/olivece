@@ -19,12 +19,12 @@
 //! Mirrors `src/codec/src/proxymanager.h`. Stateless (NOTES.md): actual
 //! transcodes are delegated to the global task submit callback
 //! ([`crate::task`]); with no registrar, `get_or_start` reports the proxy
-//! as missing. `proxy_params_from_config` reads the oakcommon config store
+//! as missing. `proxy_params_from_config` reads the oak_core config store
 //! with the compiled-in defaults as fallback (1280x720 / divider 1 / crf 23
 //! / "mp4" / "veryfast" / audio included).
 
-use oak_common::configstore::ConfigStore;
-use oak_common::filefunctions::FileFunctions;
+use oak_core::configstore::ConfigStore;
+use oak_core::filefunctions::FileFunctions;
 use std::path::Path;
 
 /// Proxy state of a proxy file on disk.
@@ -127,13 +127,13 @@ impl ProxyManager {
 		ProxyParams::default()
 	}
 
-	/// Proxy parameters read from the oakcommon config, with the compiled-in
+	/// Proxy parameters read from the oak_core config, with the compiled-in
 	/// defaults as fallback.
 	///
 	/// # CPP-PARITY
 	/// `src/codec/src/proxymanager.h` `proxy_params_from_config` — reads
 	/// ProxyWidth/ProxyHeight/ProxyDivider/ProxyCRF/ProxyPreset/
-	/// ProxyIncludeAudio via `oakcommon_config_*`.
+	/// ProxyIncludeAudio via `oak_core_config_*`.
 	pub fn proxy_params_from_config() -> ProxyParams {
 		let mut p = ProxyParams::default();
 		p.width = config_get_int("ProxyWidth", p.width);
@@ -387,17 +387,17 @@ fn cstr_slice(a: &[u8; 32]) -> &str {
 	std::str::from_utf8(&a[..end]).unwrap_or("")
 }
 
-/// `oakcommon_config_get_int` wrapper (null group).
+/// `oak_core_config_get_int` wrapper (null group).
 fn config_get_int(key: &str, default: i32) -> i32 {
 	ConfigStore::instance().get_int(None, key, default)
 }
 
-/// `oakcommon_config_get_bool` wrapper (null group).
+/// `oak_core_config_get_bool` wrapper (null group).
 fn config_get_bool(key: &str, default: i32) -> i32 {
 	ConfigStore::instance().get_bool(None, key, default)
 }
 
-/// `oakcommon_config_get` string read; `None` when the stored value is
+/// `oak_core_config_get` string read; `None` when the stored value is
 /// empty or absent.
 fn config_get_str(key: &str) -> Option<String> {
 	match ConfigStore::instance().get(None, key) {
@@ -406,14 +406,14 @@ fn config_get_str(key: &str) -> Option<String> {
 	}
 }
 
-/// `oakcommon_filefunctions_get_unique_file_identifier` wrapper.
+/// `oak_core_filefunctions_get_unique_file_identifier` wrapper.
 fn unique_file_identifier(filename: &str) -> String {
 	FileFunctions::new()
 		.get_unique_file_identifier(filename)
 		.unwrap_or_default()
 }
 
-/// `oakcommon_filefunctions_get_application_path` read.
+/// `oak_core_filefunctions_get_application_path` read.
 fn application_path() -> String {
 	FileFunctions::new()
 		.get_application_path()

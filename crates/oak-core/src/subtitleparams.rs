@@ -1155,14 +1155,14 @@ mod tests {
 			(7, 3),
 			(i32::MAX, 1),
 		] {
-			let r = oak_core::Rational::new(n as i64, d as i64);
+			let r = crate::Rational::new(n as i64, d as i64);
 			assert_eq!(
 				rational_reduce(n, d),
 				(r.numerator() as i32, r.denominator() as i32)
 			);
 		}
 		for s in ["1/2", "7", "4/2", "junk", "a/b", "1/2/3", ""] {
-			let r = oak_core::Rational::from_string(s);
+			let r = crate::Rational::from_string(s);
 			assert_eq!(
 				rational_from_string(s),
 				(r.numerator() as i32, r.denominator() as i32),

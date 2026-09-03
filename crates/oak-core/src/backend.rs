@@ -37,17 +37,17 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use oak_core::PixelFormat;
+use crate::PixelFormat;
 
-use crate::error::{Error, Result};
 use crate::frame::VideoParamsPod;
 use crate::texture::{Frame, Texture};
+use crate::error::{Error, Result};
 
 /// Backend selection preference (mapped onto wgpu backends).
 ///
 /// The choice is user-visible: the settings panel exposes a renderer
 /// dropdown (Auto/Metal/Vulkan/OpenGL/CPU) persisted through the
-/// oakcommon config C ABI under the "GraphicsBackend" key
+/// oak_core config C ABI under the "GraphicsBackend" key
 /// (C++ parity: `RenderManager::backend_from_string` config round-trip).
 /// "auto" resolves Metal → Vulkan → GL → CPU at runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,7 +91,7 @@ impl BackendKind {
 		}
 	}
 
-	/// Read the user's persisted choice through the oakcommon config C ABI
+	/// Read the user's persisted choice through the oak_core config C ABI
 	/// ("GraphicsBackend"). `OAK_RENDER_BACKEND` overrides the config
 	/// (tests / headless environments).
 	pub fn from_user_config() -> BackendKind {
@@ -179,7 +179,7 @@ impl DisplayBitDepth {
 		}
 	}
 
-	/// Read the user's persisted choice through the oakcommon config C ABI
+	/// Read the user's persisted choice through the oak_core config C ABI
 	/// ("DisplayBitDepth").
 	pub fn from_user_config() -> DisplayBitDepth {
 		let configured =
@@ -238,10 +238,10 @@ pub trait GpuContextLike: Send + Sync {
 	fn download(&self, token: u64) -> Result<Frame>;
 	/// Blit texture → texture (plain copy; color-managed deferred).
 	fn blit(
-		&self,
-		src: u64,
-		dst: u64,
-		processor: Option<&crate::color::ColorProcessor>,
+        &self,
+        src: u64,
+        dst: u64,
+        processor: Option<&crate::color::ColorProcessor>,
 	) -> Result<()>;
 }
 
@@ -531,10 +531,10 @@ impl GpuContext {
 	/// of this pass (see README §4), so a `Some` processor returns
 	/// `Error::Failed` and the plain-copy WGSL pipeline is used for `None`.
 	pub fn blit(
-		&self,
-		src: u64,
-		dst: u64,
-		processor: Option<&crate::color::ColorProcessor>,
+        &self,
+        src: u64,
+        dst: u64,
+        processor: Option<&crate::color::ColorProcessor>,
 	) -> Result<()> {
 		if processor.is_some() {
 			return Err(Error::Failed(
@@ -830,7 +830,7 @@ impl GpuContext {
 
 	/// Run one effect pass: fragment-shade `dst` from `textures[0]` (the
 	/// main input) plus any extra input textures, with `uniforms` as the
-	/// packed std140 block (see [`crate::shaderfx::pack_uniforms`]).
+	/// packed std140 block (see `oak_render::shaderfx::pack_uniforms`).
 	pub fn run_shader_pass(
 		&self,
 		program: &ShaderProgram,
@@ -1000,10 +1000,10 @@ impl GpuContextLike for GpuContext {
 	}
 
 	fn blit(
-		&self,
-		src: u64,
-		dst: u64,
-		processor: Option<&crate::color::ColorProcessor>,
+        &self,
+        src: u64,
+        dst: u64,
+        processor: Option<&crate::color::ColorProcessor>,
 	) -> Result<()> {
 		self.blit(src, dst, processor)
 	}
@@ -1049,11 +1049,11 @@ fn pollster_block_on<F: std::future::Future>(future: F) -> F::Output {
 // Minimal futures executor (wgpu brings futures-core transitively; a tiny
 // block_on is enough for the immediately-ready adapter/device futures).
 mod futures_executor {
-	use std::future::Future;
-	use std::pin::pin;
-	use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
-	fn noop_raw_waker() -> RawWaker {
+    fn noop_raw_waker() -> RawWaker {
 		fn no_op(_: *const ()) {}
 		fn clone(_: *const ()) -> RawWaker {
 			noop_raw_waker()
@@ -1250,10 +1250,10 @@ impl DisplayRenderer {
 	/// GPU path: plain-copy WGSL blit; a color processor on the GPU path is
 	/// deferred (`Error::Failed`, see [`GpuContext::blit`]).
 	pub fn blit_color_managed(
-		&self,
-		src: Option<&Texture>,
-		dst: &mut Texture,
-		processor: Option<&crate::color::ColorProcessor>,
+        &self,
+        src: Option<&Texture>,
+        dst: &mut Texture,
+        processor: Option<&crate::color::ColorProcessor>,
 	) -> Result<()> {
 		match (src, dst) {
 			(
@@ -1342,9 +1342,9 @@ pub fn frame_from_pixels_for_upload(
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+    use super::*;
 
-	#[test]
+    #[test]
 	fn backend_string_roundtrip() {
 		for (s, kind) in [
 			("auto", BackendKind::Auto),
@@ -1496,78 +1496,6 @@ mod tests {
 		ctx.destroy_texture(dst);
 	}
 
-	/// End-to-end effect pass: a translated node shader (gain multiply)
-	/// runs through `compile_shader_pass`/`run_shader_pass` and the
-	/// readback matches the expected pixels exactly.
-	#[test]
-	fn gpu_effect_pass_runs_translated_shader() {
-		let Some(ctx) = any_gpu() else {
-			eprintln!("no adapter; skipping effect pass");
-			return;
-		};
-		let glsl = r#"
-uniform sampler2D tex_in;
-uniform float gain_in;
-
-in vec2 ove_texcoord;
-out vec4 frag_color;
-
-void main() {
-    frag_color = texture(tex_in, ove_texcoord) * gain_in;
-}
-"#;
-		let translated = crate::shaderfx::translate(glsl).unwrap();
-		let program = ctx
-			.compile_shader_pass(
-				"test-gain",
-				&translated.wgsl,
-				translated.textures.len() as u32,
-				!translated.uniforms.is_empty(),
-				false,
-			)
-			.unwrap();
-
-		let mut row = oak_node::value::NodeValueRow::new();
-		row.insert("gain_in".into(), oak_node::value::NodeValue::Float(0.5));
-		let uniforms = crate::shaderfx::pack_uniforms(&translated, &row);
-
-		let w = 4;
-		let h = 2;
-		let src = ctx.create_texture(w, h).unwrap();
-		let dst = ctx.create_texture(w, h).unwrap();
-		let mut frame = Frame::new();
-		let mut pod = VideoParamsPod::default();
-		pod.width = w;
-		pod.height = h;
-		frame.set_video_params(pod);
-		frame.allocate();
-		// Distinct values per pixel (F32 RGBA): 0.2/0.4/0.6/1.0 shifted
-		// per pixel, so a UV mixup would be visible.
-		for px in 0..(w * h) as usize {
-			for c in 0..4 {
-				let v = 0.2 + 0.1 * (px + c) as f32;
-				frame.data[(px * 4 + c) * 4..(px * 4 + c) * 4 + 4]
-					.copy_from_slice(&v.to_le_bytes());
-			}
-		}
-		ctx.upload(src, &frame).unwrap();
-		ctx.run_shader_pass(&program, &uniforms, &[src], dst).unwrap();
-		let out = ctx.download(dst).unwrap();
-		for px in 0..(w * h) as usize {
-			for c in 0..4 {
-				let at = (px * 4 + c) * 4;
-				let got = f32::from_le_bytes(out.data[at..at + 4].try_into().unwrap());
-				let want = (0.2 + 0.1 * (px + c) as f32) * 0.5;
-				assert!(
-					(got - want).abs() < 1e-6,
-					"px {px} ch {c}: got {got}, want {want}"
-				);
-			}
-		}
-		ctx.destroy_texture(src);
-		ctx.destroy_texture(dst);
-	}
-
 	#[test]
 	fn gpu_missing_texture_errors() {
 		let Some(ctx) = any_gpu() else {
@@ -1669,9 +1597,9 @@ void main() {
 		assert_eq!(df.data[4], 0x22);
 		// Pass-through processor is a no-op.
 		r.blit_color_managed(
-			Some(&src),
-			&mut dst,
-			Some(&crate::color::ColorProcessor::pass_through()),
+            Some(&src),
+            &mut dst,
+            Some(&crate::color::ColorProcessor::pass_through()),
 		)
 		.unwrap();
 		// Size mismatch rejected.

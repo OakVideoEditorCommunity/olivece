@@ -123,9 +123,9 @@ impl SequenceBehavior {
 
 	/// Apply the default video/audio parameters (C++
 	/// `ViewerOutput::set_default_parameters()`; the config lookups read
-	/// the oakcommon config store directly).
+	/// the oak_core config store directly).
 	pub fn set_default_parameters(&mut self) {
-		let config = oak_common::configstore::ConfigStore::instance();
+		let config = oak_core::configstore::ConfigStore::instance();
 		let width = config.get_int(None, "DefaultSequenceWidth", 1920);
 		let height = config.get_int(None, "DefaultSequenceHeight", 1080);
 		let sample_rate = config.get_int(None, "DefaultSequenceAudioFrequency", 48000);

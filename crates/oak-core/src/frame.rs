@@ -20,7 +20,8 @@
 //! The C ABI frame functions (`oakrender_codec_frame_*`) marshal this
 //! type; the FFI layer stores [`Frame`] values in `OakCodecFrame` handles.
 
-use oak_core::{PixelFormat, Rational};
+use crate::PixelFormat;
+use crate::Rational;
 
 /// Mirror of the `oakrender_video_params` POD (include/render/renderer.h,
 /// field order and semantics verbatim). Stored inside [`crate::texture::Frame`]
@@ -75,7 +76,7 @@ impl Default for VideoParamsPod {
 
 impl VideoParamsPod {
 	/// The default render size used when a ticket carries no force size and
-	/// the output node's video params cannot be queried (oakcommon bridge
+	/// the output node's video params cannot be queried (oak_core bridge
 	/// pending).
 	pub const DEFAULT_WIDTH: i32 = 1920;
 	/// See [`VideoParamsPod::DEFAULT_WIDTH`].
@@ -116,9 +117,10 @@ impl VideoParamsPod {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+    use crate::PixelFormat;
+use super::*;
 
-	#[test]
+    #[test]
 	fn pod_defaults() {
 		let p = VideoParamsPod::default();
 		assert_eq!(p.format, PixelFormat::F32 as i32);

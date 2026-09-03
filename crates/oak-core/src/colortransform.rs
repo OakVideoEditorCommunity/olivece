@@ -22,7 +22,7 @@
 //! as a refcounted handle ([`OakColorTransform`] in `crate::ffi`); this
 //! module owns the plain-data description behind the handle.
 //!
-//! The C++-only functions `oakcommon_colortransform_init_from_native` /
+//! The C++-only functions `oak_core_colortransform_init_from_native` /
 //! `get_native` take or return `olive::ColorTransform` and cannot be
 //! expressed from Rust; they are served by the C++ adapter layer, not here.
 

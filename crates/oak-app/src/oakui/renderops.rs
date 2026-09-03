@@ -29,12 +29,12 @@
 use std::sync::mpsc;
 
 use gpui::RenderImage;
+use oak_core::texture::Texture;
 use oak_core::{PixelFormat, Rational, TimeRange};
 use oak_node::id::NodeId;
 use oak_node::track::TrackType;
 use oak_render::manager::RenderManager;
 use oak_render::procpool::ShmFrameRef;
-use oak_render::texture::Texture;
 use oak_render::ticket::{AudioTicketParams, MontageClip, TicketPayload, VideoTicketParams};
 
 use super::engine::{ExportEvent, ExportSession};
@@ -84,7 +84,7 @@ pub fn ensure_render_manager() -> bool {
 /// `UseProxyMedia` config switch (C++ `Tools > Use Proxy Media`; the
 /// export path never consults it — exports always decode the original).
 pub fn use_proxy_media() -> bool {
-	oak_common::configstore::ConfigStore::instance().get_bool(None, "UseProxyMedia", 1) != 0
+	oak_core::configstore::ConfigStore::instance().get_bool(None, "UseProxyMedia", 1) != 0
 }
 
 /// The preview media of a footage node with the three-level proxy switch
@@ -606,10 +606,10 @@ impl RenderedFrame {
 /// the project's output colorspace, in place on tightly packed samples.
 /// Pass-through in the legacy sRGB working space.
 fn apply_output_node_f32(samples: &mut [f32]) {
-	oak_common::colormath::working_to_display_target(
-		samples,
-		oak_render::color::pipeline_working_space(),
-		oak_render::color::pipeline_output_spec(),
+	oak_core::colormath::working_to_display_target(
+        samples,
+        oak_core::color::pipeline_working_space(),
+        oak_core::color::pipeline_output_spec(),
 	);
 }
 
@@ -1437,9 +1437,9 @@ mod tests {
 		// pixels; disabling restores them), not the color pipeline. Pin the
 		// legacy sRGB pass-through so the pixel-value assertions hold
 		// regardless of the ACEScg default.
-		oak_render::color::set_pipeline_color_settings(
-			oak_common::colormath::WorkingColorSpace::SrgbLegacy,
-			oak_common::colormath::OutputColorSpec::default(),
+		oak_core::color::set_pipeline_color_settings(
+            oak_core::colormath::WorkingColorSpace::SrgbLegacy,
+            oak_core::colormath::OutputColorSpec::default(),
 		);
 		oak_undo::global::clear().unwrap();
 		let media =
@@ -1697,7 +1697,7 @@ mod tests {
 		let gdata;
 		let goff;
 		{
-			let oak_render::texture::Texture::Cpu(ref gf) = &graph_frame else {
+			let oak_core::texture::Texture::Cpu(ref gf) = &graph_frame else {
 				panic!("graph render produced a non-CPU frame");
 			};
 			grow = gf.linesize_bytes();
@@ -1805,7 +1805,7 @@ mod tests {
 					oak_core::PixelFormat::F32,
 				)
 				.expect("graph render");
-				let oak_render::texture::Texture::Cpu(ref gf) = texture else {
+				let oak_core::texture::Texture::Cpu(ref gf) = texture else {
 					panic!("non-CPU frame");
 				};
 				let stride = gf.linesize_bytes();
@@ -2103,7 +2103,7 @@ mod tests {
 		// Force the global proxy switch on and restore it afterwards (the
 		// config store is process-global; the serialization lock held
 		// above is the same one the other app test modules use).
-		let store = oak_common::configstore::ConfigStore::instance();
+		let store = oak_core::configstore::ConfigStore::instance();
 		let old = store.get(None, "UseProxyMedia").unwrap_or_default();
 		store.set_bool(None, "UseProxyMedia", 1);
 

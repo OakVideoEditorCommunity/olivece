@@ -4158,9 +4158,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.33"
+version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 dependencies = [
  "serde_core",
  "value-bag",
@@ -4732,7 +4732,6 @@ dependencies = [
  "log",
  "oak-audio",
  "oak-codec",
- "oak-common",
  "oak-core",
  "oak-node",
  "oak-plugin",
@@ -4753,7 +4752,6 @@ dependencies = [
  "cpal",
  "ffmpeg-next",
  "oak-codec",
- "oak-common",
  "oak-core",
  "oak-ffmpeg-link",
  "thiserror 2.0.20",
@@ -4765,7 +4763,6 @@ version = "0.5.0"
 dependencies = [
  "clap",
  "oak-codec",
- "oak-common",
  "oak-core",
  "oak-node",
  "oak-render",
@@ -4778,28 +4775,23 @@ name = "oak-codec"
 version = "0.5.0"
 dependencies = [
  "ffmpeg-next",
- "oak-common",
  "oak-core",
  "oak-ffmpeg-link",
  "thiserror 2.0.20",
 ]
 
 [[package]]
-name = "oak-common"
+name = "oak-core"
 version = "0.5.0"
 dependencies = [
  "image",
  "log",
- "oak-core",
  "ocio-rs",
  "quick-xml 0.41.0",
  "thiserror 2.0.20",
  "toml 0.8.23",
+ "wgpu 25.0.2",
 ]
-
-[[package]]
-name = "oak-core"
-version = "0.5.0"
 
 [[package]]
 name = "oak-ffmpeg-link"
@@ -4810,7 +4802,6 @@ name = "oak-node"
 version = "0.5.0"
 dependencies = [
  "oak-codec",
- "oak-common",
  "oak-core",
  "oak-undo",
  "thiserror 2.0.20",
@@ -4846,7 +4837,6 @@ dependencies = [
  "libc",
  "naga 25.0.1",
  "oak-codec",
- "oak-common",
  "oak-core",
  "oak-node",
  "ocio-rs",
@@ -4861,7 +4851,6 @@ name = "oak-storage"
 version = "0.5.0"
 dependencies = [
  "chrono",
- "oak-common",
  "oak-core",
  "oak-node",
  "oak-otio",
@@ -4878,7 +4867,6 @@ name = "oak-task"
 version = "0.5.0"
 dependencies = [
  "oak-codec",
- "oak-common",
  "oak-core",
  "oak-node",
  "oak-otio",
@@ -4891,7 +4879,6 @@ dependencies = [
 name = "oak-timeline"
 version = "0.5.0"
 dependencies = [
- "oak-common",
  "oak-core",
  "oak-node",
  "oak-undo",
@@ -4911,7 +4898,6 @@ version = "0.5.0"
 dependencies = [
  "libc",
  "oak-codec",
- "oak-common",
  "oak-core",
  "oak-node",
  "oak-plugin",
@@ -7566,7 +7552,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand 2.5.0",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

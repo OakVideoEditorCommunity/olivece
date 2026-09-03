@@ -14,7 +14,7 @@
 
 行 = 消费方，列 = 提供方；单元格 = 消费的接口族（详见各提供方手册）。
 
-| 消费 ↓ \ 提供 → | oakcommon | oakundo | oaknode | oaktimeline | oakcodec | oakaudio | oakrender | oakstorage | oaktask | oakplugin | oakcore |
+| 消费 ↓ \ 提供 → | oak_core | oakundo | oaknode | oaktimeline | oakcodec | oakaudio | oakrender | oakstorage | oaktask | oakplugin | oakcore |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | **facade**（src/capi） | 工具/类型 | undo 全族 | node/project/footage/serializer(clipboard) 族 | timeline 全族 | decoder/frame/proxy 族 | audio 全族 | renderer/playback/preview 族 | open/save/probe 族 | task/manager 全族 | plugin 全族 | rational/timecode |
 | **oaktask** | 工具 | command 句柄 | footage/project/sequence/folder 族 | — | conform/proxy 族 | — | 导出用 render 族 | **load/save/otio 委托** | — | — | — |
@@ -26,16 +26,16 @@
 | **oaknode** | 枚举/常量/工具 | undocommand.h（4 处） | — | marker/workarea（2 处，M4 反向） | decoder/frame/proxy（8 处，M5 反向） | audio 参数（4 处，M6 反向） | colorprocessor/rendermanager/job（M7 反向，02 §4 裁决 A） | — | — | — | rational/bezier |
 | **oakundo** | 工具 | — | — | — | — | — | — | — | — | — | — |
 | **oakstorage** | 工具 | — | **project/root/序列化建图取图** | — | — | — | — | — | — | — | — |
-| **oakcommon** | — | — | — | — | — | — | — | — | — | — | — |
+| **oak_core** | — | — | — | — | — | — | — | — | — | — | — |
 
 （空格 = 无依赖。"N 处"数据来自 02 的 include 扫描。oakcore 与
 ffmpeg_bridge 为现成独立库，不参与拆分顺序。）
 
 ## 2. 逐模块接口契约
 
-### 2.1 oakcommon（M1）— 纯下沉，无业务对象
+### 2.1 oak_core（M1）— 纯下沉，无业务对象
 
-- **提供**：`include/oakcommon/types.h` 的全模块共用 POD（时间戳/区间/
+- **提供**：`include/oak_core/types.h` 的全模块共用 POD（时间戳/区间/
   枚举常量，含 M3.5 下沉的 `OakVideoParams`/`OakSubtitleParams`/
   `OakColorTransform`）；工具函数（全 `_s` 静态式，无句柄）。
 - **消费**：无（叶子）。
@@ -47,7 +47,7 @@ ffmpeg_bridge 为现成独立库，不参与拆分顺序。）
   （redo/undo 行为）经 **回调函数指针** 实现
   （`oakundo_command_create(name, redo, undo, free_fn, userdata)`），
   即铁律 §0.4 的手工虚表；消费侧**不构造 C++ 子类**。
-- **消费**：oakcommon。
+- **消费**：oak_core。
 - **边界数据**：命令句柄（owned）。无事件——push/undo/redo 的调用方
   知道栈索引变化，通知由调用方（facade 适配层）发出（见 §3）。
 
@@ -57,7 +57,7 @@ ffmpeg_bridge 为现成独立库，不参与拆分顺序。）
   Project/Folder/Sequence/Track/TrackList/Block/Footage/ColorManager`
   句柄族。逐族清单见 M3 §2。无订阅接口——所有修改经命令函数完成，
   调用方知道影响（§3）。
-- **消费**：oakcommon、oakundo；对 render/codec/audio/timeline 的引用按
+- **消费**：oak_core、oakundo；对 render/codec/audio/timeline 的引用按
   02 §3/§4 的反向切割表在各模块就位后改经其 C ABI。
 - **边界数据**：节点句柄（borrowed 为主，工程拥有节点）、
   `oak_node_value` POD、id 字符串（buf/size）。
@@ -67,7 +67,7 @@ ffmpeg_bridge 为现成独立库，不参与拆分顺序。）
 - **提供**：marker/workarea/timeline 编辑原语句柄族（`OakTimelineMarker`
   等），timeline 专用 undo 命令**经 oakundo 的回调式命令**注册，不自带
   命令子类。
-- **消费**：oaknode（32 处，全部经句柄族）、oakundo、oakcommon。
+- **消费**：oaknode（32 处，全部经句柄族）、oakundo、oak_core。
 
 ### 2.5 oakcodec（M5）
 
@@ -75,7 +75,7 @@ ffmpeg_bridge 为现成独立库，不参与拆分顺序。）
   帧以 `OakCodecFrame *` 不透明句柄跨边界（owned，配对 free），
   像素数据经 `oakcodec_frame_data(frame, plane, &linesize)` 取出指针
   （borrowed，生命周期随 frame）。
-- **消费**：oakcommon、oaknode（footage 流信息）、oakcore、ffmpeg_bridge。
+- **消费**：oak_core、oaknode（footage 流信息）、oakcore、ffmpeg_bridge。
 
 ### 2.6 oakaudio（M6）
 
@@ -89,7 +89,7 @@ ffmpeg_bridge 为现成独立库，不参与拆分顺序。）
   渲染结果帧为 owned 句柄；渲染 ticket 是**异步命令**（后台线程），
   进度/完成回调是它的返回通道——这是 §3 允许回调的唯一情形
   （线程语义按 riir.md §6.2 钉死）。
-- **消费**：oaknode、oakcodec、oakcommon、oakundo（1 处）、oakbackend
+- **消费**：oaknode、oakcodec、oak_core、oakundo（1 处）、oakbackend
   （GPU 插件，经 `renderbackend_c.h` 手工虚表——现有先例）。
 
 ### 2.8 oaktask（M8）— 编排者
@@ -114,7 +114,7 @@ ffmpeg_bridge 为现成独立库，不参与拆分顺序。）
   静态函数。**URI 寻址**：`file://…/*.ove` 走内建 ove-xml 后端；未来
   `oakdb://` 走数据库后端——替换数据库 = 新增一个后端实现并注册，
   消费侧零改动。
-- **消费**：oaknode（反序列化建图 / 序列化取图）、oakcommon。
+- **消费**：oaknode（反序列化建图 / 序列化取图）、oak_core。
 - **边界数据**：工程句柄（owned）、XML 字节流（buf/size）、后端表。
   无事件——open/save 是同步命令，成败与结果全在返回值里，调用方
   （oaktask/facade）知道影响，由它发通知（§3）。

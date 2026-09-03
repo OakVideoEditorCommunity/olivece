@@ -20,10 +20,20 @@
 //! ([`crate::traverser::RenderHooks::resolve`]).
 //! `// CPP-PARITY: app/render/job/footagejob.h, shaderjob.h`.
 
+use oak_core::color::ColorProcessor;
 use oak_core::Rational;
-
 use crate::id::NodeId;
+use crate::nodes::plugin::PluginJobPayload;
 use crate::value::NodeValueRow;
+
+/// Job types
+
+pub enum Job{
+	FootageJob(FootageJobPayload),
+	ShaderJob(ShaderJobPayload),
+	PluginJob(PluginJobPayload),
+	ColorTransformJob
+}
 
 /// C++ `FootageJob` payload: the decode request a footage node emits at
 /// its output instead of a texture. The render hooks decode it at the
@@ -65,6 +75,11 @@ pub struct ShaderJobPayload {
 	/// The texture the iterative passes feed back into (C++ `ShaderJob::
 	/// iterative_input`; empty = the effect input).
 	pub iterative_input: String,
+}
+
+pub struct ColorTransformJobPayload{
+	pub color_processor: ColorProcessor,
+
 }
 
 impl Default for FootageJobPayload {

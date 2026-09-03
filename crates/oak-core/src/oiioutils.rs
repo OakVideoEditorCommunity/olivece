@@ -32,7 +32,7 @@
 use crate::error::{Error, Result};
 use crate::ocioutils::PixelFormat;
 use image::{ExtendedColorType, ImageBuffer, Rgb, Rgba};
-use oak_core::Rational;
+use crate::Rational;
 
 /// OIIO base type codes, matching `OIIO::TypeDesc::BASETYPE`.
 ///
@@ -104,7 +104,7 @@ impl OIIOUtils {
 	/// known-but-unmappable types (INT8/INT16/INT32/UINT32/INT64/UINT64/
 	/// STRING/PTR/DOUBLE/LASTBASE) print to stderr in C++ and return
 	/// `invalid`; here they all fall to `Ok(PixelFormat::Invalid)`. The
-	/// `base_type < 0` error mirrors the `oakcommon_oiioutils_get_format_from_oiio_basetype`
+	/// `base_type < 0` error mirrors the `oak_core_oiioutils_get_format_from_oiio_basetype`
 	/// c_api guard; the `>= LASTBASE` upper-bound guard is likewise a c_api
 	/// concern and is not replicated in the domain function.
 	pub fn get_format_from_oiio_basetype(&self, base_type: i32) -> Result<PixelFormat> {
@@ -514,7 +514,7 @@ mod tests {
 	}
 
 	fn temp_tiff_path(name: &str) -> (std::path::PathBuf, String) {
-		let dir = std::env::temp_dir().join("oakcommon-oiioutils");
+		let dir = std::env::temp_dir().join("oak_core-oiioutils");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join(name);
 		let path_str = path.to_str().unwrap().to_string();
@@ -598,7 +598,7 @@ mod tests {
 
 	#[test]
 	fn image_f32_read_missing_file_errors() {
-		let err = read_image_f32("/nonexistent/oakcommon-oiioutils.tif").unwrap_err();
+		let err = read_image_f32("/nonexistent/oak_core-oiioutils.tif").unwrap_err();
 		assert!(matches!(err, Error::Failed(_)));
 	}
 }

@@ -219,7 +219,7 @@ pub(crate) fn uuid_of(project: &Arc<Mutex<Project>>) -> String {
 /// Read a config value for the duration of a test (the config store is
 /// process-global, so restore it afterwards).
 pub(crate) fn with_config(group: &str, key: &str, value: i32, f: impl FnOnce()) {
-	let store = oak_common::configstore::ConfigStore::instance();
+	let store = oak_core::configstore::ConfigStore::instance();
 	let before = store.get_int(Some(group), key, 0);
 	store.set_int(Some(group), key, value);
 	f();

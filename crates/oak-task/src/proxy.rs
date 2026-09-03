@@ -353,7 +353,7 @@ impl ProxyTask {
 
 	/// 配置的代理转码并发上限（[1, 16]）。
 	pub fn proxy_max_concurrent() -> i32 {
-		oak_common::configstore::ConfigStore::instance()
+		oak_core::configstore::ConfigStore::instance()
 			.get_int(None, Self::CONFIG_KEY_PROXY_MAX_CONCURRENT, 1)
 			.clamp(1, 16)
 	}
@@ -411,7 +411,7 @@ impl TaskBehavior for ProxyTask {
 		// unification: the old two-stage C ABI getter is gone; an empty
 		// string means "not found"). The `FFmpegPath` config takes
 		// precedence when set (C++ `OAK_CONFIG("FFmpegPath")`).
-		let configured = oak_common::configstore::ConfigStore::instance()
+		let configured = oak_core::configstore::ConfigStore::instance()
 			.get(None, "FFmpegPath")
 			.unwrap_or_default();
 		let ffmpeg_path = ProxyManager::find_ffmpeg(&configured);

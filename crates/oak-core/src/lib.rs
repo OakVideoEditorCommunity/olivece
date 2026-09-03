@@ -21,12 +21,58 @@
 
 #![warn(missing_docs)]
 
+pub mod cancelatom;
+pub mod colormath;
+pub mod colortransform;
+pub mod commandlineparser;
+pub mod commonutil;
+pub mod configstore;
+pub mod debug;
+pub mod displayicc;
+pub mod error;
+pub mod ffmpegutils;
+pub mod filefunctions;
+pub mod miscutils;
+pub mod ocioutils;
+pub mod oiioutils;
+pub mod qtutils;
+pub mod subtitleparams;
+pub mod videoparams;
+pub mod xmlutils;
+
+/// Test-only helpers shared across unit-test modules.
+///
+/// Several domain test modules (e.g. `configstore`, `filefunctions`) mutate
+/// process-global state — notably the `OAK_CONFIG_DIR` environment variable
+/// and shared temp paths — while exercising configuration-location logic.
+/// Rust runs tests in parallel, so all such tests must serialize on a single
+/// process-wide lock to avoid racing each other across module boundaries.
+#[cfg(test)]
+#[doc(hidden)]
+pub mod test_support {
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Process-wide lock guarding tests that mutate global config/env state.
+    ///
+    /// Hold this for the duration of any test (or helper) that sets/removes
+    /// `OAK_CONFIG_DIR` or touches the shared configuration temp path.
+    pub fn env_lock() -> &'static Mutex<()> {
+        &ENV_LOCK
+    }
+}
+
 mod rational;
 mod samplefmt;
 mod timerange;
 
 /// Shared ABI value-handle type (see [`handle::CHandle`]).
 pub mod handle;
+pub mod color;
+pub mod texture;
+pub mod frame;
+pub mod backend;
 
 pub use handle::CHandle;
 pub use rational::Rational;

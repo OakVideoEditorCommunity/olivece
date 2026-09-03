@@ -5,7 +5,7 @@
 > 与 `engine/task/project/{load,save,loadotio,saveotio}` 的**文件 IO 部分**。
 > **不含**剪贴板序列化（copy/paste 的节点图 XML 留在 oaknode 的
 > serializer 族，见 M3）。
-> 依赖：oaknode（project/root/序列化建图取图）、oakcommon。
+> 依赖：oaknode（project/root/序列化建图取图）、oak_core。
 > 被依赖：oaktask（load/save 任务委托）、facade。
 > 拆分顺序：M3a（oaknode 之后、oakserialize 同批）。
 >

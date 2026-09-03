@@ -21,7 +21,7 @@
 //! shared lifecycle lives here; the per-task work is supplied through
 //! [`TaskBehavior`] (a trait object, per architectural decision #1 in
 //! README.md). Cancellation rides on a shared
-//! `oak_common::cancelatom::CancelAtom` (single-lib unification: the old
+//! `oak_core::cancelatom::CancelAtom` (single-lib unification: the old
 //! oakrender cancelatom C ABI is gone).
 //!
 //! CPP-PARITY: src/task/src/task.h
@@ -39,7 +39,7 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use oak_common::cancelatom::CancelAtom;
+use oak_core::cancelatom::CancelAtom;
 
 use crate::error::{Error, Result};
 

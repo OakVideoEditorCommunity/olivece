@@ -772,15 +772,15 @@ mod tests {
 	use oak_codec::footagedescription::{FootageDescription, StreamEntry};
 
 	fn video_entry(stream_index: i32, duration: i64) -> StreamEntry {
-		let mut vp = oak_common::videoparams::VideoParams::new_basic(
-			1920,
-			1080,
-			oak_common::ocioutils::PixelFormat::F32,
-			4,
-			1,
-			1,
-			0,
-			1,
+		let mut vp = oak_core::videoparams::VideoParams::new_basic(
+            1920,
+            1080,
+            oak_core::ocioutils::PixelFormat::F32,
+            4,
+            1,
+            1,
+            0,
+            1,
 		);
 		vp.set_stream_index(stream_index);
 		vp.set_frame_rate(30000, 1001);
@@ -826,7 +826,7 @@ mod tests {
 		assert_eq!(v.width, 1920);
 		assert_eq!(v.height, 1080);
 		assert_eq!(v.frame_rate, oak_core::Rational::new(30000, 1001));
-		assert_eq!(v.pixel_format, oak_common::ocioutils::PixelFormat::F32.code());
+		assert_eq!(v.pixel_format, oak_core::ocioutils::PixelFormat::F32.code());
 		// 300000 ticks at 1/30000 = 10 seconds.
 		assert_eq!(video.duration, oak_core::Rational::new(10, 1));
 	}
@@ -835,7 +835,7 @@ mod tests {
 	fn conversion_skips_subtitles_and_unusable_durations() {
 		let mut desc = FootageDescription::new("ffmpeg");
 		desc.push_stream(video_entry(0, i64::MIN)); // AV_NOPTS_VALUE
-		desc.push_stream(StreamEntry::Subtitle(oak_common::subtitleparams::SubtitleParams::new()));
+		desc.push_stream(StreamEntry::Subtitle(oak_core::subtitleparams::SubtitleParams::new()));
 
 		let streams = streams_from_description(&desc);
 		assert_eq!(streams.len(), 1, "the subtitle stream is skipped");

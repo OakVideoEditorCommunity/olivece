@@ -25,7 +25,7 @@
 //! directly (M14 R3: project open/save through the oaknode serializer,
 //! timeline edits through the oaktimeline edit commands on the oakundo
 //! global stack, the oakrender ticket arena for the viewers, the oaktask
-//! export path, the oakcommon config store, and the oakstorage
+//! export path, the oak_core config store, and the oakstorage
 //! write-through library — no `liboakengine` dylib, no C ABI).
 //!
 //! # Layout

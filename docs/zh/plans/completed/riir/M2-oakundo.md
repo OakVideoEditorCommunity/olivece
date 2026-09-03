@@ -132,21 +132,21 @@ ctest --test-dir build-oakundo --output-on-failure
 
 ### 实际依赖
 
-- Oak 内部：仅 oakcommon 的头文件宏（`define.h` 的
+- Oak 内部：仅 oak_core 的头文件宏（`define.h` 的
   `DISABLE_COPY_MOVE`），纯头文件，按 include 路径引用
-  （`${OAK_REPO_ROOT}/src/common/src`），**不链接** oakcommon；
+  （`${OAK_REPO_ROOT}/src/common/src`），**不链接** oak_core；
   不依赖 olivecore/ffmpeg_bridge。
 - 第三方：GTest（仅测试）。无 Qt。
 
 ### 与计划的主要差异
 
-- 接口未按 §2 冻结清单逐条实现，而是对齐 oakcommon 的既有契约：
+- 接口未按 §2 冻结清单逐条实现，而是对齐 oak_core 的既有契约：
   C ABI 头放在仓库根 `include/undo/`，命名 `oakundo_<族>_<动词>`；
   查询类函数返回 int 错误码 + out 参数（计划中的
   `int64_t oakundo_undostack_count(...)` 直接返回值形式改为
   `int ...(OakUndoStack *, int64_t *out)`）；字符串两段式 buffer 约定。
 - 句柄族名：`OakUndoCommand`/`OakUndoStack`；init/free 语义与
-  oakcommon 一致（init 失败返回 NULL 且内部 try/catch 兜底，
+  oak_core 一致（init 失败返回 NULL 且内部 try/catch 兜底，
   free(NULL) 为 no-op）。
 - §2.2 的 `OakUndoObjectParent`（QObject 挂载点）、
   `oakundo_undostack_update_actions`、`oakundo_undostack_undo_action/

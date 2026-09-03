@@ -27,9 +27,9 @@ mod common;
 
 use oak_core::{PixelFormat, Rational};
 
-use oak_render::backend::{BackendKind, DisplayRenderer, GpuContext};
-use oak_render::frame::VideoParamsPod;
-use oak_render::texture::{Frame, Texture};
+use oak_core::backend::{BackendKind, DisplayRenderer, GpuContext};
+use oak_core::frame::VideoParamsPod;
+use oak_core::texture::{Frame, Texture};
 
 /// A frame rendered through the CPU backend is F32 RGBA (not u8) and
 /// preserves out-of-[0,1] HDR values without clamping.
@@ -64,11 +64,11 @@ fn cpu_path_stays_f32_unclamped() {
 /// (CPU path; the GPU color-managed path is documented-deferred).
 #[test]
 fn blit_applies_ocio_in_float() {
-	let _ = oak_render::color::set_up_default_config();
-	let processor = oak_render::color::ColorProcessor::create(
+	let _ = oak_core::color::set_up_default_config();
+	let processor = oak_core::color::ColorProcessor::create(
 		"ACEScg",
 		"sRGB Encoded Rec.709 (sRGB)",
-		oak_render::color::Direction::Normal,
+		oak_core::color::Direction::Normal,
 	)
 	.expect("handle always returned");
 	if !processor.is_valid() {
@@ -118,7 +118,7 @@ fn blit_applies_ocio_in_float() {
 		.blit_color_managed(
 			Some(&src),
 			&mut dst,
-			Some(&oak_render::color::ColorProcessor::pass_through()),
+			Some(&oak_core::color::ColorProcessor::pass_through()),
 		)
 		.unwrap();
 }

@@ -47,8 +47,8 @@ functions) — frozen, implemented verbatim by `src/ffi.rs`.
    oakcodec encoder C ABI (`bridge::codec`) and waveform extraction
    decodes through the oakcodec decoder C ABI — exactly as the C++
    does. No direct ffmpeg_bridge use in the record path.
-7. **Config via oakcommon.** Device names and the output buffer size
-   read through `bridge::common` (`oakcommon_config_*`), preserving the
+7. **Config via oak_core.** Device names and the output buffer size
+   read through `bridge::common` (`oak_core_config_*`), preserving the
    `audio_config` namespace semantics as a `config.rs` free-function
    module.
 

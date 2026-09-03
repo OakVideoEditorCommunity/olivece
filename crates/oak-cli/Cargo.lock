@@ -879,7 +879,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "oakcommon"
+name = "oak_core"
 version = "0.1.0"
 dependencies = [
  "image",
@@ -900,7 +900,7 @@ dependencies = [
  "libc",
  "oakaudio",
  "oakcodec",
- "oakcommon",
+ "oak_core",
  "oakcore-rs",
  "oaknode",
  "oakplugin",

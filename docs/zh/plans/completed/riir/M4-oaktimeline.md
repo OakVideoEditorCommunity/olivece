@@ -61,11 +61,11 @@ OAKTL_API int oaktimeline_workarea_set_range_undoable(
 OAKTL_API int oaktimeline_workarea_set_enabled_undoable(
 	OakTimelineWorkarea *w, int enabled, OakUndoCommand *command);
 OAKTL_API void oaktimeline_workarea_reset(int64_t *in_ts, int64_t *out_ts);
-/* load/save 经 oakcommon_xml 句柄在 oaknode 序列化路径调用 */
+/* load/save 经 oak_core_xml 句柄在 oaknode 序列化路径调用 */
 OAKTL_API int oaktimeline_workarea_load(OakTimelineWorkarea *w,
-	OakCommonXmlReader *r);
+	oak_coreXmlReader *r);
 OAKTL_API int oaktimeline_workarea_save(const OakTimelineWorkarea *w,
-	OakCommonXmlWriter *x);
+	oak_coreXmlWriter *x);
 ```
 
 ### 2.3 `oaktimeline/edit.h`（timeline undo 命令族的语义入口）
@@ -120,7 +120,7 @@ OAKTL_API int64_t oaktimeline_nearest_block_ts(OakNodeTrack *track,
 - 构建测试：`cmake -S src/timeline/standalone -B build-oaktimeline &&
   cmake --build build-oaktimeline -j && ctest --test-dir
   build-oaktimeline`——117/117（本模块 21 用例 + oaknode 回归 96）。
-  全量回归：oakcommon 193、oaknode 96、oakrender 42、oakcodec 18、
+  全量回归：oak_core 193、oaknode 96、oakrender 42、oakcodec 18、
   oakaudio 36 全绿。
 - C API 与 §2 冻结表的差异：marker/workarea 的增删改统一为
   `_command` 工厂形态（返回 OakUndoCommand，调用方 redo/push），

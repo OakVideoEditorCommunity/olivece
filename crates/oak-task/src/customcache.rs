@@ -24,7 +24,7 @@
 
 use std::sync::{Arc, Condvar, Mutex};
 
-use oak_common::cancelatom::CancelAtom;
+use oak_core::cancelatom::CancelAtom;
 
 use crate::error::{Error, Result};
 use crate::task::{Task, TaskBehavior};

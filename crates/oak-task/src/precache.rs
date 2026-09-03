@@ -32,7 +32,7 @@
 //!
 //! CPP-PARITY: src/task/src/precache/precachetask.h
 
-use oak_common::videoparams::VideoParams;
+use oak_core::videoparams::VideoParams;
 
 use crate::error::Result;
 use crate::nodeops::{self, NodeRef};
@@ -114,7 +114,7 @@ impl TaskBehavior for PreCacheTask {
 }
 
 impl RenderTaskBehavior for PreCacheTask {
-	fn frame_downloaded(&mut self, task: &mut Task, frame: &oak_render::texture::Texture) -> Result<()> {
+	fn frame_downloaded(&mut self, task: &mut Task, frame: &oak_core::texture::Texture) -> Result<()> {
 		// Do nothing: pre-cache just fills the frame cache (the direct
 		// ticket arena records the render through the ticket's cache
 		// identity; see the module docs).

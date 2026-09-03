@@ -61,9 +61,9 @@ project.h、timeline.h 的对应函数就是模板，参数命名前缀换
 
 | 现状（次数） | 处理 |
 |---|---|
-| node → render/ 47（colorprocessor 8、videoparams 5、footagejob 4、rendermanager 3、pluginjob 3 等） | videoparams/colortransform 随 M3.5 下沉 oakcommon；其余 **M7 时**改经 oakrender C ABI（02 §4 裁决 A：M3 暂不断链，禁止新增） |
+| node → render/ 47（colorprocessor 8、videoparams 5、footagejob 4、rendermanager 3、pluginjob 3 等） | videoparams/colortransform 随 M3.5 下沉 oak_core；其余 **M7 时**改经 oakrender C ABI（02 §4 裁决 A：M3 暂不断链，禁止新增） |
 | node → codec/ 8（decoder 4、frame 2、encoder 1、proxymanager 1） | M5 时改经 oakcodec C ABI（M5 手册已含 frame/decoder 家族） |
-| node → timeline/ 5（timelinecommon 2、marker 1、workarea 1、timelineundogeneral 1） | timelinecommon 的枚举/常量下沉 oakcommon/types.h；marker/workarea 引用（均在 node/project/ 序列化路径）M4 时改经 oaktimeline C ABI |
+| node → timeline/ 5（timelinecommon 2、marker 1、workarea 1、timelineundogeneral 1） | timelinecommon 的枚举/常量下沉 oak_core/types.h；marker/workarea 引用（均在 node/project/ 序列化路径）M4 时改经 oaktimeline C ABI |
 | node → audio/ 4 | M6 时改经 oakaudio C ABI |
 | node → undo/ 4（undocommand.h） | M2 后改 include oakundo 公共头 + 适配类 |
 
@@ -117,15 +117,15 @@ driver 照 src/common/standalone 模式：EXPAT/OpenColorIO/OpenImageIO
 用 Homebrew 的 config 包（`find_package(... CONFIG)`）并映射到
 `${OCIO_LIBRARIES}` 等变量；`add_subdirectory` 引入真实 in-repo
 target（core→olivecore、ffmpeg_bridge、src/undo→oakundo、
-src/common→oakcommon，各自 BUILD_TESTS 关闭），不再链接预构建
+src/common→oak_core，各自 BUILD_TESTS 关闭），不再链接预构建
 dylib；禁用 OpenTimelineIO（`/opt/otio` 的 `@loader_path` 问题，
 oaknode 不需要）。
 
 ### 实际依赖
 
-- Oak 内部：oakcommon（XML/Current/工具）、oakundo（UndoCommand/
+- Oak 内部：oak_core（XML/Current/工具）、oakundo（UndoCommand/
   UndoStack）、olivecore（`olive::core::Rational/Color/Bezier` 等
-  C ABI 包装，真实符号）、ffmpeg_bridge（经 oakcommon 间接）。
+  C ABI 包装，真实符号）、ffmpeg_bridge（经 oak_core 间接）。
 - 第三方：EXPAT、OpenColorIO、OpenImageIO、Imath（头）、FFmpeg
   （经 ffmpeg_bridge 间接）、GTest（仅测试）。
 - **transition stub 机制**（裁决 A）：对尚未拆分的
@@ -133,7 +133,7 @@ oaknode 不需要）。
   头文件由 `src/node/transition/` 的过渡 stub/转发头提供（engine 头
   仍是 Qt 版），符号经 `-undefined dynamic_lookup`（macOS）留到
   运行时解析。测试进程启动时必须能解析这些符号：oaknode-gtest
-  链接真实 target（olivecore/oakcommon/oakundo + OCIO/OIIO/Imath
+  链接真实 target（olivecore/oak_core/oakundo + OCIO/OIIO/Imath
   dylib）并 `-Wl,-force_load` 预构建的
   `build/third_party/openfx/HostSupport/libOfxHost.a`（OFX 符号与
   typeinfo，否则二进制启动即崩，PRE_TEST 发现模式也会挂；路径用
@@ -145,7 +145,7 @@ oaknode 不需要）。
 
 ### 与冻结 C API 的主要差异
 
-- 函数族命名与约定照 oakcommon/oakundo 既有契约：`oaknode_<族>_<动词>`，
+- 函数族命名与约定照 oak_core/oakundo 既有契约：`oaknode_<族>_<动词>`，
   int 错误码 + out 参数，字符串两段式 buffer；undoable 变体成对
   （`_undoable` 后缀，部分经 `OakUndoCommand *` 尾参）。
 - §2 冻结表中**跳过/未实现**的函数族：

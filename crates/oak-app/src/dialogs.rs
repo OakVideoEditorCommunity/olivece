@@ -21,7 +21,7 @@
 //! Each view owns its widgets and emits nothing itself — the host
 //! (`crate::app::OakApp`) reads the state (format / path) when a dialog
 //! button is clicked, and the preferences view writes its choices straight
-//! into the oakcommon config store on selection. Theme/language changes
+//! into the oak_core config store on selection. Theme/language changes
 //! additionally emit a [`PreferencesEvent`] so the host can re-apply the
 //! shell chrome immediately.
 
@@ -36,28 +36,28 @@ use gpui::colors::DefaultColors;
 use gpui::prelude::*;
 use gpui::timeline::FrameRate;
 use gpui::{
-	div, px, App, ClickEvent, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
-	InteractiveElement, Keystroke, PathPromptOptions, Render, SharedString, Window,
+    div, px, App, ClickEvent, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, Keystroke, PathPromptOptions, Render, SharedString, Window,
 };
 use gpui_elements::editable_text::{EditableTextState, StringStorage, TextChanged};
 
 use crate::actions::ActionId;
 use crate::i18n;
 use crate::oakui::real::{
-	audio_input_device, audio_input_devices, audio_output_device, audio_output_devices,
-	config_get_bool, config_get_int, config_get_string, config_set_bool, config_set_int,
-	config_set_string, encoding_formats, proxy_dividers, renderer_backends, set_audio_input_device,
-	set_audio_output_device, set_theme_dark, theme_is_dark, CONFIG_KEY_DEFAULT_TRANSITION_SEC,
-	CONFIG_KEY_DISK_CACHE_PATH, CONFIG_KEY_FFMPEG_PATH, CONFIG_KEY_PG_URL,
-	CONFIG_KEY_PREVIEW_WINDOW, CONFIG_KEY_PROXY_DIVIDER, CONFIG_KEY_RENDERER_BACKEND,
-	CONFIG_KEY_SNAPSHOT_INTERVAL_SEC, CONFIG_KEY_STORAGE_BACKEND, CONFIG_KEY_USE_PROXY,
-	DEFAULT_PREVIEW_WINDOW_FORWARD, DEFAULT_SNAPSHOT_INTERVAL_SEC, DEFAULT_TRANSITION_SEC,
-	EXPORT_FORMAT_MP4,
+    audio_input_device, audio_input_devices, audio_output_device, audio_output_devices,
+    config_get_bool, config_get_int, config_get_string, config_set_bool, config_set_int,
+    config_set_string, encoding_formats, proxy_dividers, renderer_backends, set_audio_input_device,
+    set_audio_output_device, set_theme_dark, theme_is_dark, CONFIG_KEY_DEFAULT_TRANSITION_SEC,
+    CONFIG_KEY_DISK_CACHE_PATH, CONFIG_KEY_FFMPEG_PATH, CONFIG_KEY_PG_URL,
+    CONFIG_KEY_PREVIEW_WINDOW, CONFIG_KEY_PROXY_DIVIDER, CONFIG_KEY_RENDERER_BACKEND,
+    CONFIG_KEY_SNAPSHOT_INTERVAL_SEC, CONFIG_KEY_STORAGE_BACKEND, CONFIG_KEY_USE_PROXY,
+    DEFAULT_PREVIEW_WINDOW_FORWARD, DEFAULT_SNAPSHOT_INTERVAL_SEC, DEFAULT_TRANSITION_SEC,
+    EXPORT_FORMAT_MP4,
 };
 // The `DisplayBitDepth` config key lives with the format mapping it
 // drives (oak-render's backend); the preferences dropdown and the
 // window-layer consumer share the same key.
-use oak_render::backend::CONFIG_KEY_DISPLAY_BIT_DEPTH;
+use oak_core::backend::CONFIG_KEY_DISPLAY_BIT_DEPTH;
 
 // ---------------------------------------------------------------------------
 // Preferences
@@ -373,13 +373,13 @@ impl PreferencesContent {
 		})
 		.detach();
 
-		// --- 色彩 Color: display ICC color management -----------------------
-		// On by default: the viewer frames are transformed through the
-		// display's ICC profile (system profile, or a custom file below).
-		// A mode change re-evaluates the platform display policy and
-		// retags the windows immediately (no restart).
-		use crate::oakui::displaycolor::{CONFIG_KEY_COLOR_MODE, CONFIG_KEY_CUSTOM_ICC};
-		let display_icc = cx.new(|cx| {
+        // --- 色彩 Color: display ICC color management -----------------------
+        // On by default: the viewer frames are transformed through the
+        // display's ICC profile (system profile, or a custom file below).
+        // A mode change re-evaluates the platform display policy and
+        // retags the windows immediately (no restart).
+        use crate::oakui::displaycolor::{CONFIG_KEY_COLOR_MODE, CONFIG_KEY_CUSTOM_ICC};
+        let display_icc = cx.new(|cx| {
 			let mode = config_get_string(CONFIG_KEY_COLOR_MODE);
 			CheckBox::new(
 				13,
@@ -1685,8 +1685,8 @@ fn divider_label(divider: i32) -> String {
 
 /// The display string of a proxy lifecycle state.
 fn proxy_state_label(state: crate::oakui::engine::ProxyMediaState) -> String {
-	use crate::oakui::engine::ProxyMediaState;
-	match state {
+    use crate::oakui::engine::ProxyMediaState;
+    match state {
 		ProxyMediaState::Missing => i18n::tr("proxydialog.state.missing"),
 		ProxyMediaState::Generating => i18n::tr("proxydialog.state.generating"),
 		ProxyMediaState::Ready => i18n::tr("proxydialog.state.ready"),
@@ -1918,20 +1918,20 @@ impl<E: crate::oakui::engine::AppEngine> ProjectPropertiesContent<E> {
 		let (working, gamut, transfer) = engine.read(cx).project_color_settings();
 		working_space.update(cx, |combo, cx| {
 			combo.set_selected(
-				Some(oak_common::colormath::WorkingColorSpace::from_setting(&working) as usize),
-				cx,
+                Some(oak_core::colormath::WorkingColorSpace::from_setting(&working) as usize),
+                cx,
 			)
 		});
 		output_gamut.update(cx, |combo, cx| {
 			combo.set_selected(
-				Some(oak_common::colormath::OutputGamut::from_setting(&gamut) as usize),
-				cx,
+                Some(oak_core::colormath::OutputGamut::from_setting(&gamut) as usize),
+                cx,
 			)
 		});
 		output_transfer.update(cx, |combo, cx| {
 			combo.set_selected(
-				Some(oak_common::colormath::OutputTransfer::from_setting(&transfer) as usize),
-				cx,
+                Some(oak_core::colormath::OutputTransfer::from_setting(&transfer) as usize),
+                cx,
 			)
 		});
 
@@ -2015,8 +2015,8 @@ impl<E: crate::oakui::engine::AppEngine> ProjectPropertiesContent<E> {
 	/// The color pipeline settings currently selected in the combos, as
 	/// the canonical persisted strings.
 	fn color_settings(&self, cx: &App) -> (String, String, String) {
-		use oak_common::colormath::{OutputGamut, OutputTransfer, WorkingColorSpace};
-		let working = self
+        use oak_core::colormath::{OutputGamut, OutputTransfer, WorkingColorSpace};
+        let working = self
 			.working_space
 			.read(cx)
 			.selected()
@@ -4289,8 +4289,8 @@ impl Render for NewProjectContent {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	fn keystroke(key: &str) -> Keystroke {
+    use super::*;
+    fn keystroke(key: &str) -> Keystroke {
 		gpui::Keystroke::parse(key).unwrap()
 	}
 

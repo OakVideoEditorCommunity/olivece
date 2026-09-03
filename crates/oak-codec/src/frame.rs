@@ -16,13 +16,13 @@
 
 //! `olive::Frame` — a CPU pixel buffer plus a [`VideoParams`] value.
 //!
-//! Mirrors `src/codec/src/frame.h`. The params are held as an oakcommon
+//! Mirrors `src/codec/src/frame.h`. The params are held as an oak_core
 //! [`VideoParams`] value (single-lib unification; the former refcounted
-//! oakcommon handle is gone, so copies are plain clones); the pixel data
+//! oak_core handle is gone, so copies are plain clones); the pixel data
 //! itself is a plain `Vec<u8>`. Line-size and pixel-format math lives
 //! here.
 
-use oak_common::videoparams::VideoParams;
+use oak_core::videoparams::VideoParams;
 use oak_core::{PixelFormat, Rational};
 
 /// Number of channels in the internal RGBA pipeline layout
@@ -331,7 +331,7 @@ impl Frame {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use oak_common::ocioutils::PixelFormat as OakPixelFormat;
+	use oak_core::ocioutils::PixelFormat as OakPixelFormat;
 
 	fn frame(w: i32, h: i32) -> Frame {
 		let params = VideoParams::new_basic(w, h, OakPixelFormat::from_code(0), 4, 1, 1, 0, 1);
@@ -422,7 +422,7 @@ mod tests {
 #[cfg(test)]
 mod tests_extra {
 	use super::*;
-	use oak_common::ocioutils::PixelFormat as OakPixelFormat;
+	use oak_core::ocioutils::PixelFormat as OakPixelFormat;
 
 	fn frame(w: i32, h: i32) -> Frame {
 		let params = VideoParams::new_basic(w, h, OakPixelFormat::from_code(0), 4, 1, 1, 0, 1);

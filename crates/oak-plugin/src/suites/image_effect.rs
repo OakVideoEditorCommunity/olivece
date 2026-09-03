@@ -269,7 +269,7 @@ unsafe extern "C" fn clip_get_property_set(clip: *mut c_void, out: *mut *mut c_v
 /// （HS:2003-2049；`getImage` 失败 → Failed）。
 ///
 /// `// TODO(clip)`：fetch_image 待 clip 迁移到
-/// `oak_render::texture::Texture` 值模型（当前帧访问为本地桩）。
+/// `oak_core::texture::Texture` 值模型（当前帧访问为本地桩）。
 unsafe extern "C" fn clip_get_image(
 	clip: *mut c_void,
 	time: c_double,

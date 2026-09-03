@@ -976,7 +976,7 @@ fn serialize_node_xml(p: &Project, id: NodeId) -> Result<String> {
 		.map(|(from, _, input, element)| (from, input, element))
 		.collect();
 	let mut w = XmlWriterBridge::new()
-		.ok_or_else(|| Error::Failed("oakcommon XML writer unavailable".to_string()))?;
+		.ok_or_else(|| Error::Failed("oak_core XML writer unavailable".to_string()))?;
 	w.start_element("node");
 	oak_node::serializer::save_node(&mut w, &entry.core, &*entry.behavior, id, &type_id, &connections)
 		.map_err(|e| Error::Format(e.to_string()))?;
@@ -988,7 +988,7 @@ fn serialize_node_xml(p: &Project, id: NodeId) -> Result<String> {
 /// (sorted keys, exactly like `serializer::save`).
 fn settings_xml_from_map(settings: &HashMap<String, String>) -> String {
 	use oak_node::serializer::{XmlWrite, XmlWriterBridge};
-	let mut w = XmlWriterBridge::new().expect("oakcommon XML writer");
+	let mut w = XmlWriterBridge::new().expect("oak_core XML writer");
 	w.start_element("settings");
 	let mut keys: Vec<&String> = settings.keys().collect();
 	keys.sort();
@@ -1373,7 +1373,7 @@ async fn maybe_snapshot<C: ConnectionTrait>(
 		.one(conn)
 		.await
 		.map_err(db_err)?;
-	let interval = oak_common::configstore::ConfigStore::instance()
+	let interval = oak_core::configstore::ConfigStore::instance()
 		.get_int(Some("Storage"), "SnapshotIntervalSec", 600);
 	let due = match &last {
 		None => true,
@@ -1451,7 +1451,7 @@ async fn prune_snapshots<C: ConnectionTrait>(conn: &C, project_id: i64) -> Resul
 /// reconstructible from the snapshot plus the remaining rows (plan §1:
 /// history beyond the window is forfeit).
 async fn retention_prune<C: ConnectionTrait>(conn: &C, project_id: i64, now: DateTime) -> Result<()> {
-	let days = oak_common::configstore::ConfigStore::instance()
+	let days = oak_core::configstore::ConfigStore::instance()
 		.get_int(Some("Storage"), "JournalRetentionDays", 0);
 	if days <= 0 {
 		return Ok(());

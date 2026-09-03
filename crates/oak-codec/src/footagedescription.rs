@@ -18,13 +18,13 @@
 //!
 //! Mirrors `src/codec/src/footagedescription.h`. A value type describing
 //! the streams a `Decoder::probe()` found in a file. Video and subtitle
-//! streams are stored as oakcommon by-value handles; audio streams as
+//! streams are stored as oak_core by-value handles; audio streams as
 //! `oak_core::TimeRangeList`/raw audio params. The original's
 //! `Track::Type` mapping and XML load/save are intentionally not reproduced
 //! (NOTES.md §4) — use [`FootageDescription::stream_is_video`] etc.
 
-use oak_common::subtitleparams::SubtitleParams;
-use oak_common::videoparams::VideoParams;
+use oak_core::subtitleparams::SubtitleParams;
+use oak_core::videoparams::VideoParams;
 use oak_core::{Rational, TimeRange};
 
 use crate::audioparams::AudioParams;
@@ -214,14 +214,14 @@ mod tests {
 
 	fn video_params(index: i32) -> VideoParams {
 		let mut vp = VideoParams::new_basic(
-			1920,
-			1080,
-			oak_common::ocioutils::PixelFormat::from_code(0),
-			4,
-			1,
-			1,
-			0,
-			1,
+            1920,
+            1080,
+            oak_core::ocioutils::PixelFormat::from_code(0),
+            4,
+            1,
+            1,
+            0,
+            1,
 		);
 		vp.set_stream_index(index);
 		vp

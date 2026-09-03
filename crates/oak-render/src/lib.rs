@@ -21,43 +21,36 @@
 //!
 //! Module map (mirrors `COVERAGE.md`):
 //! - `handle` — refcounted C-handle scaffolding (C++ internalhandles.h)
-//! - `texture`/`frame` — Texture + CPU Frame values (C++ texture.h/frame)
 //! - `cache` — PlaybackCache/FrameHashCache family + disk state
-//! - `color` — ColorProcessor over `ocio-rs` + LUT library
 //! - `ticket` — ticket arena with exactly-once completion
 //! - `worker` — the JobDispatch seam + thread-free inline dispatcher +
 //!   graph snapshot store (the in-process thread pool was deleted in M15 S2)
 //! - `manager` — RenderManager singleton + disk cache
 //! - `autocacher` — PreviewAutoCacher
 //! - `eval` — the evaluation seam (RenderHooks)
-//! - `backend` — wgpu GPU context + display renderer
+//! - `shaderfx` — effect GLSL→WGSL translation + uniform packing
 //! - `copier` — render-side project-copy client (oaknode C ABI)
 //! - `cancelatom` — the cancellation primitive
 //! - `ipc` — render-worker NDJSON protocol + shm frame-slot transport
 //! - `scheduler` — preview frame scheduler (interleaved batch claims)
 //! - `procpool` — process-isolated render backend (M15)
-//! - `bridge` — direct-call C ABI bridges (oakcommon/oaknode/oakcodec)
-//! - `ffi` — the `include/render/*.h` export layer
+//! - `error` — re-exports `oak_core::error` (the backend/color/texture/
+//!   frame value types moved to `oak-core` in the oak-common merge)
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
 pub mod autocacher;
-pub mod backend;
 pub mod cache;
 pub mod cancelatom;
-pub mod color;
-pub mod commonutil;
 pub mod copier;
 pub mod error;
 pub mod eval;
-pub mod frame;
 pub mod handle;
 pub mod ipc;
 pub mod manager;
 pub mod procpool;
 pub mod scheduler;
 pub mod shaderfx;
-pub mod texture;
 pub mod ticket;
 pub mod worker;

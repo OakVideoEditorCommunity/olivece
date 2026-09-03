@@ -27,7 +27,7 @@
 //! replaced by a single [`crate::nodeops::NodeRef`] viewer (the color
 //! manager no longer crosses into the render tickets — the direct ticket
 //! arena performs no color management). Rendered frames arrive as
-//! `oak_render::texture::Texture` values and are converted to
+//! `oak_core::texture::Texture` values and are converted to
 //! `oak_codec::frame::Frame` values for the encoder.
 //!
 //! **Simplifications over the C++**: no temporary-file rename dance (the
@@ -42,8 +42,8 @@ use std::sync::Arc;
 
 use oak_codec::encoder::{create_from_params, Encoder};
 use oak_codec::encodingparams::EncodingParams as CodecEncodingParams;
-use oak_common::videoparams::VideoParams as CommonVideoParams;
-use oak_render::texture::Texture;
+use oak_core::videoparams::VideoParams as CommonVideoParams;
+use oak_core::texture::Texture;
 
 use crate::error::{Error, Result};
 use crate::nodeops::{self, NodeRef};
@@ -232,8 +232,8 @@ impl ExportTask {
 	/// delivery output spec) read off the exported node's project — the
 	/// export renders to the project's delivery target, not to the display.
 	fn delivery_color(&self) -> (
-		oak_common::colormath::WorkingColorSpace,
-		oak_common::colormath::OutputColorSpec,
+        oak_core::colormath::WorkingColorSpace,
+        oak_core::colormath::OutputColorSpec,
 	) {
 		let guard = self
 			.viewer_node
@@ -253,7 +253,7 @@ impl ExportTask {
 			return;
 		}
 		let (working, spec) = self.delivery_color();
-		if working == oak_common::colormath::WorkingColorSpace::SrgbLegacy {
+		if working == oak_core::colormath::WorkingColorSpace::SrgbLegacy {
 			return;
 		}
 		let w = frame.width().max(0) as usize;
@@ -271,7 +271,7 @@ impl ExportTask {
 			if start + row_bytes > data.len() {
 				break;
 			}
-			oak_common::colormath::acescg_to_output_bytes(
+			oak_core::colormath::acescg_to_output_bytes(
 				&mut data[start..start + row_bytes],
 				w,
 				spec,
@@ -290,14 +290,14 @@ impl ExportTask {
 			));
 		};
 		let params = CommonVideoParams::new_basic(
-			frame.width,
-			frame.height,
-			oak_common::ocioutils::PixelFormat::from_code(frame.format as i32),
-			4,
-			1,
-			1,
-			0,
-			1,
+            frame.width,
+            frame.height,
+            oak_core::ocioutils::PixelFormat::from_code(frame.format as i32),
+            4,
+            1,
+            1,
+            0,
+            1,
 		);
 		let mut out = oak_codec::frame::Frame::with_params(params);
 		out.set_timestamp(frame.timestamp);

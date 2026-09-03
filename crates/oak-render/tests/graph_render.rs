@@ -33,7 +33,7 @@ use oak_node::project::Project;
 use oak_node::sequence::SequenceBehavior;
 use oak_node::track::{TrackBehavior, TrackListBehavior};
 
-use oak_render::texture::Texture;
+use oak_core::texture::Texture;
 
 mod common;
 
@@ -49,9 +49,9 @@ fn clip_path(tag: &str) -> std::path::PathBuf {
 /// pixel-value assertions hold regardless of the ACEScg default. All tests
 /// in this binary set the same value, so the shared global is race-free.
 fn pin_legacy_working_space() {
-    oak_render::color::set_pipeline_color_settings(
-        oak_common::colormath::WorkingColorSpace::SrgbLegacy,
-        oak_common::colormath::OutputColorSpec::default(),
+    oak_core::color::set_pipeline_color_settings(
+        oak_core::colormath::WorkingColorSpace::SrgbLegacy,
+        oak_core::colormath::OutputColorSpec::default(),
     );
 }
 
@@ -366,7 +366,7 @@ fn channel(data: &[u8], x: usize, y: usize, c: usize) -> f32 {
 /// when no GPU adapter exists.
 #[test]
 fn shader_job_opacity_halves_pixels() {
-    if oak_render::backend::GpuContext::shared().is_none() {
+    if oak_core::backend::GpuContext::shared().is_none() {
         eprintln!("skipping shader_job_opacity_halves_pixels: no GPU adapter");
         return;
     }
@@ -452,7 +452,7 @@ fn shader_job_opacity_halves_pixels() {
 /// boundary pixel on the right half. Skipped when no GPU adapter exists.
 #[test]
 fn shader_job_blur_smooths_edge() {
-    if oak_render::backend::GpuContext::shared().is_none() {
+    if oak_core::backend::GpuContext::shared().is_none() {
         eprintln!("skipping shader_job_blur_smooths_edge: no GPU adapter");
         return;
     }
@@ -554,11 +554,11 @@ fn shader_job_blur_smooths_edge() {
 /// Skipped when no GPU adapter or OCIO config exists.
 #[test]
 fn chromakey_job_keys_green_with_ociobased_stub() {
-    if oak_render::backend::GpuContext::shared().is_none() {
+    if oak_core::backend::GpuContext::shared().is_none() {
         eprintln!("skipping chromakey_job_keys_green_with_ociobased_stub: no GPU adapter");
         return;
     }
-    if oak_render::color::set_up_default_config().is_err() {
+    if oak_core::color::set_up_default_config().is_err() {
         eprintln!("skipping chromakey_job_keys_green_with_ociobased_stub: no OCIO config");
         return;
     }

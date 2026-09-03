@@ -11,7 +11,6 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 oak-ffmpeg-link = { path = "../oak-ffmpeg-link" }
 oak-core = { path = "../oak-core" }
-oak-common = { path = "../oak-common" }
 oak-codec = { path = "../oak-codec" }
 # Real resample/channel-convert/time-stretch filter graph. The C++
 # ffmpeg_bridge library existed only to absorb FFmpeg API churn; the Rust

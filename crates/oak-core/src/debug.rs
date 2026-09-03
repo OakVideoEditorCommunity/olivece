@@ -21,7 +21,7 @@
 //! Built on the `log` facade crate (crates.io `log`, MIT/Apache-2.0):
 //! filtering is `log::set_max_level` and the stderr sink is a `log::Log`
 //! implementation installed on first use. No hand-rolled filter state.
-//! The printf-style C ABI (`oakcommon_log`) is implemented in
+//! The printf-style C ABI (`oak_core_log`) is implemented in
 //! `crate::ffi` over this module's [`log`] helper.
 
 use std::io::Write;

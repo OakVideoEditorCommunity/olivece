@@ -18,7 +18,7 @@
 //!
 //! Reimplements the C++ task module (`src/task/src`) as direct Rust
 //! (single-lib unification): inheritance → one module per class + trait
-//! objects, cancellation via `oak_common::cancelatom::CancelAtom`, events
+//! objects, cancellation via `oak_core::cancelatom::CancelAtom`, events
 //! as boxed callbacks. All node-graph, timeline and render work goes
 //! through the direct `oaknode` / `oakrender` Rust APIs
 //! ([`nodeops`] holds the graph operations the tasks share).

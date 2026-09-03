@@ -62,12 +62,10 @@ frozen, implemented verbatim by `src/ffi.rs`.
 ```
 src/
   lib.rs        crate doc + module map
-  error.rs      error codes (mirrors include/render/error.h)
+  error.rs      re-exports oak_core::error (the OAKRENDER_* codes stay as
+                the public-code contract)
   handle.rs     refcounted-handle scaffolding (facade entry points only)
-  texture.rs    Texture value type (wraps backend textures / CPU frames)
-  frame.rs      VideoParamsPod + Frame helpers
   cache.rs      PlaybackCache / FrameHashCache family + C++-parity disk state
-  color.rs      ColorProcessor over ocio-rs + default config + LUT library
   manager.rs    RenderManager singleton + lifecycle + disk cache
   ticket.rs     Ticket arena, params, exactly-once completion delivery
   worker.rs     JobDispatch seam + thread-free InlineDispatcher (audio
@@ -84,22 +82,28 @@ src/
                 grow-on-demand segment geometry (S3)
   autocacher.rs PreviewAutoCacher
   eval.rs       RenderHooks impl: the CPU evaluation seam
-  backend.rs    wgpu device/queue/texture management + DisplayRenderer
+  shaderfx.rs   effect GLSL→WGSL translation (naga) + std140 uniform
+                packing + the effect runner
   copier.rs     Render-side project copy client (bridge::node)
   cancelatom.rs the cancellation primitive
-  bridge/       C ABI imports: node.rs, common.rs, codec.rs (dlsym-resolved)
-  ffi.rs        include/render/*.h export layer
 tests/          contract + golden tests (common/ has shared helpers)
 ```
+
+The value/GPU types — `backend.rs` (wgpu device/queue/texture management
++ DisplayRenderer), `color.rs` (ColorProcessor over ocio-rs + default
+config + LUT library), `texture.rs`, `frame.rs` and the `commonutil.rs`
+config helpers — moved to `oak-core` in the oak-common/oak-core merge;
+this crate uses them as `oak_core::*`.
 
 ## Hard rules
 
 1. `CHandle` only appears at the facade boundary: the crate's internal
    calls pass Rust types directly; `handle::make_owned`/`get`/`get_mut`
    are the facade entry points the oakengine stubs call.
-2. No `unsafe` outside `backend.rs` (GPU FFI), `bridge/`, and the M15
-   process-isolation transport (`ipc.rs` / `procpool.rs`: POSIX shm +
-   SPSC rings; every block carries its own SAFETY comment).
+2. No `unsafe` outside `handle.rs`, the evaluation seam (`eval.rs`), and
+   the M15 process-isolation transport (`ipc.rs` / `procpool.rs`: POSIX
+   shm + SPSC rings; every block carries its own SAFETY comment). GPU
+   unsafe lives in `oak-core`'s `backend.rs`.
 3. F32 + ACEScg pipeline invariants are asserted in tests, not in
    comments (see tests/pipeline_test.rs).
 
@@ -118,7 +122,7 @@ tests/          contract + golden tests (common/ has shared helpers)
   `Error::Failed` for a processor; the CPU path applies the processor
   in float. `oakrender_color_processor_create_transform` resolves the
   destination transform against the default config's reference role
-  until the oakcommon color-transform bridge lands.
+  until the oak_core color-transform bridge lands.
 - **Worker process isolation** — landed in M15: `procpool.rs`
   (`ProcessDispatcher`) + `scheduler.rs` + `ipc.rs` drive real
   oak-worker processes (spawn, handshake, batched renders into

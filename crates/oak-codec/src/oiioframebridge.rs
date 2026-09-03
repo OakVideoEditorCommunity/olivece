@@ -18,8 +18,8 @@
 //! frame <-> pixel-buffer conversion.
 //!
 //! Mirrors `src/codec/src/oiioframebridge.{h,cpp}`. These are internal C++
-//! functions that moved into codec from oakcommon (NOTES.md §oakcommon侧修复);
-//! oakcommon keeps its OIIO mapping functions; the frame conversion itself
+//! functions that moved into codec from oak_core (NOTES.md §oak_core侧修复);
+//! oak_core keeps its OIIO mapping functions; the frame conversion itself
 //! lives here.
 //!
 //! The C++ bridge copies pixels through the live OpenImageIO `ImageBuf`
@@ -30,8 +30,8 @@
 //! timestamp and time base alongside the raw pixel rows, so a buffer can be
 //! turned back into an equivalent [`Frame`] without any external state.
 
-use oak_common::ocioutils::PixelFormat as OakPixelFormat;
-use oak_common::videoparams::VideoParams;
+use oak_core::ocioutils::PixelFormat as OakPixelFormat;
+use oak_core::videoparams::VideoParams;
 use crate::frame::Frame;
 use oak_core::Rational;
 use std::ffi::c_int;

@@ -16,7 +16,7 @@ crate-type = ["staticlib", "rlib"]
 # 模块桥改直接 Rust 调用（单库化，见 docs/zh/plans/riir/single-lib.md）；
 # 只允许零依赖起步。确需引入的 crate 必须在 README 登记理由。
 oak-core = { path = "../oak-core" }
- oak-undo = { path = "../oak-undo" }
+oak-undo = { path = "../oak-undo" }
 oak-node = { path = "../oak-node" }
 oak-render = { path = "../oak-render" }
 # Error derive（Display + std::error::Error，见 src/error.rs）；理由已登记 README。

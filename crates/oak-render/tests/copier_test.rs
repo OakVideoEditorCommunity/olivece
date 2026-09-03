@@ -27,8 +27,8 @@ use std::time::Duration;
 use oak_core::{Rational, TimeRange};
 
 use oak_render::error::Error;
-use oak_render::frame::VideoParamsPod;
-use oak_render::texture::{Frame, Texture};
+use oak_core::frame::VideoParamsPod;
+use oak_core::texture::{Frame, Texture};
 use oak_render::ticket::TicketArena;
 use oak_render::worker::{InlineDispatcher, JobDispatch};
 

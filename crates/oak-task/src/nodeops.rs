@@ -29,7 +29,7 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use oak_common::videoparams::VideoParams as CommonVideoParams;
+use oak_core::videoparams::VideoParams as CommonVideoParams;
 use oak_core::Rational;
 use oak_node::block::{BlockCore, ClipBlockBehavior, GapBlockBehavior, TransitionBlockBehavior};
 use oak_node::folder::FolderBehavior;
@@ -288,25 +288,25 @@ impl TrackRange for GraphTrackRange<'_> {
 	}
 }
 
-/// Convert an oaknode video-params value to the oakcommon `VideoParams`
+/// Convert an oaknode video-params value to the oak_core `VideoParams`
 /// value type the task code works with (the C ABI marshalled the same
 /// fields).
 fn common_from_node_video(v: oak_node::value::VideoParams) -> CommonVideoParams {
 	let mut p = CommonVideoParams::new_basic(
-		v.width,
-		v.height,
-		oak_common::ocioutils::PixelFormat::from_code(v.pixel_format),
-		v.channels,
-		1,
-		1,
-		0,
-		1,
+        v.width,
+        v.height,
+        oak_core::ocioutils::PixelFormat::from_code(v.pixel_format),
+        v.channels,
+        1,
+        1,
+        0,
+        1,
 	);
 	p.set_frame_rate(v.frame_rate.numerator() as i32, v.frame_rate.denominator() as i32);
 	p
 }
 
-/// Convert an oakcommon video-params value back to the oaknode value type
+/// Convert an oak_core video-params value back to the oaknode value type
 /// (the fields that survive the C ABI marshalling; `video_type`,
 /// `start_time`/`duration` and color fields have no oaknode counterpart).
 fn node_video_from_common(v: &CommonVideoParams) -> oak_node::value::VideoParams {
@@ -320,7 +320,7 @@ fn node_video_from_common(v: &CommonVideoParams) -> oak_node::value::VideoParams
 	}
 }
 
-/// The sequence's `index`th video parameter stream as the oakcommon value
+/// The sequence's `index`th video parameter stream as the oak_core value
 /// type (`oaknode_sequence_get_video_params`).
 pub fn sequence_video_params(
 	project: &ProjectRef,
@@ -455,7 +455,7 @@ pub fn footage_total_stream_count(project: &ProjectRef, footage: NodeId) -> usiz
 		.unwrap_or(0)
 }
 
-/// The footage's `index`th video parameter stream as the oakcommon value
+/// The footage's `index`th video parameter stream as the oak_core value
 /// type (`oaknode_footage_get_video_params`).
 pub fn footage_video_params(
 	project: &ProjectRef,

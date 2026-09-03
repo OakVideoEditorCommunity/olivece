@@ -16,7 +16,7 @@
 
 //! Project (de)serialization: the C++ `ProjectSerializer` family.
 //!
-//! XML I/O goes through oakcommon's [`XmlReader`]/[`XmlWriter`] (direct
+//! XML I/O goes through oak_core's [`XmlReader`]/[`XmlWriter`] (direct
 //! Rust calls, single-lib unification). The XML shape mirrors
 //! the C++ `Node::save`/`Project::save` writers (`// CPP-PARITY:
 //! src/node/src/node.cpp:node::save`, `// CPP-PARITY:
@@ -32,7 +32,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use oak_common::xmlutils::{XmlReader, XmlWriter};
+use oak_core::xmlutils::{XmlReader, XmlWriter};
 use oak_core::Rational;
 
 use crate::graph::Graph;
@@ -43,7 +43,7 @@ use crate::project::{NodeRef, Project};
 use crate::value::{NodeValue, ValueType};
 
 /// Minimal XML reader surface the serializer needs (implemented over
-/// oakcommon's `xmlutils`).
+/// oak_core's `xmlutils`).
 pub trait XmlRead {
 	/// Advance to the next start element; false at end/close.
 	fn next_start_element(&mut self) -> bool;
@@ -73,17 +73,17 @@ pub trait XmlWrite {
 	fn characters(&mut self, _text: &str) {}
 }
 
-/// Reader over oakcommon's [`XmlReader`].
+/// Reader over oak_core's [`XmlReader`].
 pub struct XmlReaderBridge {
-	/// The oakcommon reader.
+	/// The oak_core reader.
 	reader: XmlReader,
 	/// Current element name (cached).
 	name: String,
 }
 
-/// Writer over oakcommon's [`XmlWriter`].
+/// Writer over oak_core's [`XmlWriter`].
 pub struct XmlWriterBridge {
-	/// The oakcommon writer.
+	/// The oak_core writer.
 	writer: XmlWriter,
 }
 
@@ -277,7 +277,7 @@ pub fn parse_node_ref(text: &str) -> Option<NodeId> {
 pub fn save(project: &Project) -> crate::error::Result<String> {
 	use crate::error::Error;
 	let mut writer = XmlWriterBridge::new().ok_or(Error::Failed(
-		"oakcommon XML writer unavailable".to_string(),
+		"oak_core XML writer unavailable".to_string(),
 	))?;
 
 	writer.start_element("project");
@@ -510,7 +510,7 @@ pub fn load_with_id_map(
 ) -> crate::error::Result<(Arc<Mutex<Project>>, std::collections::HashMap<u64, NodeId>)> {
 	use crate::error::Error;
 	let mut reader = XmlReaderBridge::new(xml).ok_or(Error::Failed(
-		"oakcommon XML reader unavailable".to_string(),
+		"oak_core XML reader unavailable".to_string(),
 	))?;
 
 	// Detect the root element.

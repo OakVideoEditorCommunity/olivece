@@ -52,7 +52,7 @@ headers verbatim:
 - **oaknode**: `bridge/node.rs` — project/footage/folder/sequence/colormanager/
   node handles for the project tasks.
 - **oakundo**: `bridge/undo.rs` — `OakUndoCommand`.
-- **oakcommon / oakcore**: `bridge/common.rs` — `OakVideoParams`,
+- **oak_core / oakcore**: `bridge/common.rs` — `OakVideoParams`,
   `OakColorTransform`, `OakAudioParams`.
 
 ## Deliberately out of scope

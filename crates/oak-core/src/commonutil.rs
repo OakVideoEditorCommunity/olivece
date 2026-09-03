@@ -14,32 +14,31 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! oakcommon helpers (config, file functions) — direct Rust calls into
-//! the oakcommon crate (single-lib unification; the former
-//! `bridge/common.rs`). The configuration-location and disk-cache
-//! helpers delegate to oakcommon's own implementation.
+//! Config / file-function helpers — thin wrappers over this crate's
+//! `configstore` and `filefunctions` (the former `bridge/common.rs`,
+//! moved here from oak-render with the backend/color merge).
 
 use std::sync::Mutex;
 
 /// Read a config string via the domain store
 /// (`ConfigStore::get(group, key)`); `None` when missing or empty.
 pub fn config_get_string(group: Option<&str>, key: &str) -> Option<String> {
-	oak_common::configstore::ConfigStore::instance()
+	crate::configstore::ConfigStore::instance()
 		.get(group, key)
 		.ok()
 		.filter(|s| !s.is_empty())
 }
 
-/// `oakcommon_config_get_int(group, key, default)`.
+/// `oak_core_config_get_int(group, key, default)`.
 pub fn config_get_int(group: Option<&str>, key: &str, default: i32) -> i32 {
-	oak_common::configstore::ConfigStore::instance().get_int(group, key, default)
+	crate::configstore::ConfigStore::instance().get_int(group, key, default)
 }
 
-/// The configuration directory — oakcommon's implementation
+/// The configuration directory — `filefunctions`' implementation
 /// (`FileFunctions::get_configuration_location`, honoring `OAK_CONFIG_DIR`
 /// and the platform fallbacks).
 pub fn configuration_location() -> String {
-	oak_common::filefunctions::FileFunctions::new()
+	crate::filefunctions::FileFunctions::new()
 		.get_configuration_location()
 		.unwrap_or_default()
 }
@@ -51,7 +50,7 @@ pub static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 /// The default disk cache directory (C++ `DiskManager::
 /// get_default_disk_cache_path`): `<configuration_location>/mediacache`.
 pub fn default_disk_cache_path() -> String {
-	oak_common::filefunctions::default_disk_cache_path()
+	crate::filefunctions::default_disk_cache_path()
 }
 
 #[cfg(test)]

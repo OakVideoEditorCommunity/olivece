@@ -44,8 +44,8 @@ frozen, implemented verbatim by `src/ffi.rs`.
 4. **Undo.** Commands are created through the oakundo C ABI
    (`bridge::undo`); the C++ `UndoCommand` subclass hierarchy becomes
    vtable commands whose userdata is a Rust closure.
-5. **Serialization.** XML read/write goes through the oakcommon C ABI
-   (`bridge::common`) until oakcommon itself is rewritten.
+5. **Serialization.** XML read/write goes through the oak_core C ABI
+   (`bridge::common`) until oak_core itself is rewritten.
 6. **Threading.** The C++ code relied on Qt's event thread +
    `called_on_owner_thread()` assertions. Rust replaces this with
    `Mutex<Graph>` interior mutability plus explicit

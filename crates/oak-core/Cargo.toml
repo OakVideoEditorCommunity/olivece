@@ -9,3 +9,17 @@ license = "GPL-3.0-or-later"
 crate-type = ["rlib"]
 
 [dependencies]
+thiserror = "2.0.20"
+ocio-rs = { version = "0.2", features = ["bundled"] }
+# wgpu: portable GPU backend — same major as oak-render's shaderfx/naga
+# generation (25); the moved backend/color/texture/frame code is written
+# against this API.
+wgpu = "25"
+log = "0.4.34"
+# TOML persistence for the application config (configstore.rs).
+toml = "0.8"
+# XML helpers (xmlutils.rs).
+quick-xml = "0.41.0"
+# Pure-Rust image I/O for oiioutils.rs (TIFF only — the only format current
+# callers need).
+image = { version = "0.25", default-features = false, features = ["tiff"] }

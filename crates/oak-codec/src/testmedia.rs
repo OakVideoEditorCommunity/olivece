@@ -37,8 +37,8 @@
 
 use std::path::Path;
 
-use oak_common::ocioutils::PixelFormat as OakPixelFormat;
-use oak_common::videoparams::VideoParams;
+use oak_core::ocioutils::PixelFormat as OakPixelFormat;
+use oak_core::videoparams::VideoParams;
 use oak_core::{PixelFormat, Rational, SampleFormat};
 
 use crate::encodingparams::EncodingParams;

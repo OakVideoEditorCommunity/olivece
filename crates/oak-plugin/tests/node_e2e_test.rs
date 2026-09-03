@@ -34,7 +34,7 @@ use oak_node::node::{NodeBehavior, NodeCore};
 use oak_node::traverser::{EvalRequest, Traverser};
 use oak_node::value::{NodeValue, ValueType};
 use oak_plugin::host::Host;
-use oak_render::texture::Texture;
+use oak_core::texture::Texture;
 
 const PLUGIN_ID: &str = "org.oak.test-plugin";
 const IDENTITY_ID: &str = "org.oak.test-plugin.identity";

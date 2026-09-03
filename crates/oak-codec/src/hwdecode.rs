@@ -106,7 +106,7 @@ pub fn hardware_decoding_enabled() -> bool {
     if let Ok(v) = std::env::var("OAK_HWACCEL") {
         return v != "0";
     }
-    match oak_common::configstore::ConfigStore::instance()
+    match oak_core::configstore::ConfigStore::instance()
         .get(None, CONFIG_KEY_HARDWARE_DECODING)
     {
         Ok(value) => value != "false",

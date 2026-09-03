@@ -32,8 +32,8 @@ use oak_core::{Rational, TimeRange};
 
 use crate::error::{Error, Result};
 use crate::eval;
-use crate::texture::Texture;
 use crate::worker::{JobDispatch, JobSchedule};
+use oak_core::texture::Texture;
 
 /// One effect of a montage clip's effect stack (M14 R3 effect-chain
 /// wiring into the montage render path). The stack is ordered
@@ -135,8 +135,8 @@ impl VideoTicketParams {
 	/// The render size: force_size when set, else the pipeline default.
 	pub fn render_size(&self) -> (i32, i32) {
 		self.force_size.unwrap_or((
-			crate::frame::VideoParamsPod::DEFAULT_WIDTH,
-			crate::frame::VideoParamsPod::DEFAULT_HEIGHT,
+			oak_core::frame::VideoParamsPod::DEFAULT_WIDTH,
+			oak_core::frame::VideoParamsPod::DEFAULT_HEIGHT,
 		))
 	}
 }
@@ -698,9 +698,9 @@ mod tests {
 	use std::sync::mpsc;
 	use std::time::Duration;
 
-	use crate::frame::VideoParamsPod;
-	use crate::texture::Frame;
 	use crate::worker::{InlineDispatcher, JobDispatch};
+	use oak_core::frame::VideoParamsPod;
+	use oak_core::texture::Frame;
 
 	fn small_frame() -> Frame {
 		let mut f = Frame::new();

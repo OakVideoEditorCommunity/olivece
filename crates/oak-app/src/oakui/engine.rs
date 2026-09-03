@@ -829,7 +829,7 @@ pub trait AppEngine:
 	/// The global "Use Proxy Media" switch (the C++ `UseProxyMedia`
 	/// config; preview-only — exports always decode the original media).
 	fn use_proxy_media(&self) -> bool {
-		oak_common::configstore::ConfigStore::instance()
+		oak_core::configstore::ConfigStore::instance()
 			.get_bool(None, "UseProxyMedia", 1)
 			!= 0
 	}
@@ -838,7 +838,7 @@ pub trait AppEngine:
 	/// footage's rendered frames (the C++ toggles the config and
 	/// re-renders; the preview path reads the switch on every montage).
 	fn set_use_proxy_media(&mut self, enabled: bool, cx: &mut Context<Self>) {
-		oak_common::configstore::ConfigStore::instance().set(
+		oak_core::configstore::ConfigStore::instance().set(
 			None,
 			"UseProxyMedia",
 			if enabled { "true" } else { "false" },
@@ -851,7 +851,7 @@ pub trait AppEngine:
 	/// size, 2/4/8 = progressively smaller preview renders for machines
 	/// that cannot keep up. Preview-only; exports always render native.
 	fn playback_divider(&self) -> i64 {
-		oak_common::configstore::ConfigStore::instance()
+		oak_core::configstore::ConfigStore::instance()
 			.get_int(None, "PlaybackDivider", 1)
 			.clamp(1, 8) as i64
 	}
@@ -859,7 +859,7 @@ pub trait AppEngine:
 	/// Sets the playback resolution divider and invalidates the rendered
 	/// frames so the next pull re-renders at the new geometry.
 	fn set_playback_divider(&mut self, divider: i64, cx: &mut Context<Self>) {
-		oak_common::configstore::ConfigStore::instance().set(
+		oak_core::configstore::ConfigStore::instance().set(
 			None,
 			"PlaybackDivider",
 			&divider.clamp(1, 8).to_string(),
@@ -877,7 +877,7 @@ pub trait AppEngine:
 	/// Whether playback stops at the last frame instead of looping (the C++
 	/// viewer `Stop on Last` toggle / `StopOnLastFrame` config).
 	fn stop_on_last(&self) -> bool {
-		oak_common::configstore::ConfigStore::instance()
+		oak_core::configstore::ConfigStore::instance()
 			.get_bool(None, "StopOnLastFrame", 0)
 			!= 0
 	}
@@ -885,7 +885,7 @@ pub trait AppEngine:
 	/// Sets the `StopOnLastFrame` config (the next tick past the end either
 	/// pauses at the last frame or wraps around).
 	fn set_stop_on_last(&mut self, enabled: bool, cx: &mut Context<Self>) {
-		oak_common::configstore::ConfigStore::instance().set(
+		oak_core::configstore::ConfigStore::instance().set(
 			None,
 			"StopOnLastFrame",
 			if enabled { "true" } else { "false" },
@@ -897,14 +897,14 @@ pub trait AppEngine:
 	/// value (`0` automatic / `1` only / `2` both), clamped to the valid
 	/// range.
 	fn waveform_mode(&self) -> i32 {
-		oak_common::configstore::ConfigStore::instance()
+		oak_core::configstore::ConfigStore::instance()
 			.get_int(None, "ViewerWaveformMode", 0)
 			.clamp(0, 2)
 	}
 
 	/// Sets the `ViewerWaveformMode` config value (clamped to `0..=2`).
 	fn set_waveform_mode(&mut self, mode: i32, cx: &mut Context<Self>) {
-		oak_common::configstore::ConfigStore::instance().set(
+		oak_core::configstore::ConfigStore::instance().set(
 			None,
 			"ViewerWaveformMode",
 			&mode.clamp(0, 2).to_string(),
@@ -972,15 +972,15 @@ pub trait AppEngine:
 
 	/// The project's color pipeline settings:
 	/// `(working colorspace, output gamut, output transfer)` as the
-	/// persisted setting strings (see `oak_common::colormath`). The
+	/// persisted setting strings (see `oak_core::colormath`). The
 	/// working colorspace is the pipeline's scene space (ACEScg by
 	/// default, not hard-coded sRGB); the output pair is the delivery
 	/// target for export and presentation.
 	fn project_color_settings(&self) -> (String, String, String) {
 		(
-			oak_common::colormath::WorkingColorSpace::default().as_setting().to_string(),
-			oak_common::colormath::OutputGamut::default().as_setting().to_string(),
-			oak_common::colormath::OutputTransfer::default().as_setting().to_string(),
+            oak_core::colormath::WorkingColorSpace::default().as_setting().to_string(),
+            oak_core::colormath::OutputGamut::default().as_setting().to_string(),
+            oak_core::colormath::OutputTransfer::default().as_setting().to_string(),
 		)
 	}
 

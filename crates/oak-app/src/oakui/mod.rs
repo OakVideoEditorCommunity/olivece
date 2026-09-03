@@ -29,7 +29,7 @@
 //! * [`real`] — [`RealEngine`](real::RealEngine) and
 //!   [`RealClock`](real::RealClock), the real engine. M14 R3: it calls the
 //!   oak* module crates' Rust APIs directly (oaknode / oaktimeline /
-//!   oakundo / oakrender / oaktask / oakcodec / oakaudio / oakcommon /
+//!   oakundo / oakrender / oaktask / oakcodec / oakaudio / oak_core /
 //!   oakstorage — no `liboakengine` dylib, no C ABI) behind the same
 //!   [`EngineGateway`](engine::EngineGateway) seam the mock implements.
 //! * [`graphops`] / [`effectchain`] / [`renderops`] — the app's assembly

@@ -237,7 +237,7 @@ impl TimelineAddTrackCommand {
 	/// New signature (single-lib): `pub fn new(timeline: NodeRef) -> TimelineAddTrackCommand`
 	pub fn new(timeline: NodeRef) -> Self {
 		// NOTE: the C++ reads the `AutoMergeTracks` config via
-		// `oakcommon_config_get_bool`; the module exposes no config
+		// `oak_core_config_get_bool`; the module exposes no config
 		// getter, so the default is hardcoded to `false`.
 		Self::with_automerge(timeline, false)
 	}
@@ -1179,7 +1179,7 @@ impl TimelineAddDefaultTransitionCommand {
 	fn add_transition(&mut self, c: &NodeRef, mode: CreateTransitionMode) {
 		let _ = (c, mode);
 		// NOTE: the C++ builds one child command per transition: it looks up the
-		// default transition id in the config (`oakcommon_config_get`), creates
+		// default transition id in the config (`oak_core_config_get`), creates
 		// the node (`oaknode_factory_create_from_id`), clips the neighbours'
 		// lengths (`BlockResizeCommand`/`BlockResizeWithMediaInCommand`), adds the
 		// node and connects it; the default-transition config key has no Rust

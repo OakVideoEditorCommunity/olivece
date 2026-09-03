@@ -58,7 +58,7 @@ OAKMOD_API <ret>    oakmod_clazz_<func>_s(/* 参数 */);
 3. 多个构造重载用后缀区分：`oakmod_clazz_init`（默认）、
    `oakmod_clazz_init_from_file`、`oakmod_clazz_init_copy` 等。
 4. 命名全小写，模块前缀 `oak<mod>_`（oakundo/oaknode/oaktimeline/
-   oakcodec/oakrender/oaktask/oakaudio/oakplugin/oakcommon/oakstorage）。
+   oakcodec/oakrender/oaktask/oakaudio/oakplugin/oak_core/oakstorage）。
 5. 导出宏 `OAKMOD_API` 照 `oakengine/export.h` 样式
    （`__attribute__((visibility("default")))`），模块编译加
    `-fvisibility=hidden`——每个模块**出生即 visibility 干净**，

@@ -117,7 +117,7 @@ Runtime dependencies (crates.io):
   order.
 - `quick-xml` 0.41 — streaming XML codec for the FCPXML layer
   (`src/fcpxml.rs`). Same major version the other Rust modules use
-  (`crates/oakcommon/Cargo.toml`).
+  (`crates/oak_core/Cargo.toml`).
 - `oakcore-rs` (path: `../../oakcore-rs`) — shared `Rational` value type
   (used by the `Rational::from_double` port and for exact FCPXML
   rational-time conversion); same path dependency the other bindings use.

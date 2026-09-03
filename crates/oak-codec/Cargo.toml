@@ -9,7 +9,6 @@ license = "GPL-3.0-or-later"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-oak-common = { path = "../oak-common" }
 oak-ffmpeg-link = { path = "../oak-ffmpeg-link" }
 oak-core = { path = "../oak-core" }
 # Real media decode/encode. The C++ ffmpeg_bridge library existed only to

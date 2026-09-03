@@ -570,7 +570,7 @@ fn lerp_arr4(a: &[f64; 4], b: &[f64; 4], t: f64) -> [f64; 4] {
 	]
 }
 
-/// Video parameters (plain data; mirrors oakcommon `VideoParams` C++
+/// Video parameters (plain data; mirrors oak_core `VideoParams` C++
 /// fields — the C ABI marshals field-by-field).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct VideoParams {

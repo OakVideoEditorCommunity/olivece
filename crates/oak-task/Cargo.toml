@@ -19,8 +19,7 @@ real-oakrender = []
 
 [dependencies]
 oak-core = { path = "../oak-core" }
- oak-undo = { path = "../oak-undo" }
-oak-common = { path = "../oak-common" }
+oak-undo = { path = "../oak-undo" }
 oak-codec = { path = "../oak-codec" }
 oak-node = { path = "../oak-node" }
 

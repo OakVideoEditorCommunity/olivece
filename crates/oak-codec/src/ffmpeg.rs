@@ -56,10 +56,10 @@ use ffmpeg::software::{resampling, scaling};
 use ffmpeg::{ChannelLayout, Dictionary, Error as FfmpegError, Rational as FfRational};
 use ffmpeg_next as ffmpeg;
 
-use oak_common::cancelatom::CancelAtom;
-use oak_common::colormath::YuvMatrix;
-use oak_common::ocioutils::PixelFormat as OakPixelFormat;
-use oak_common::videoparams::{Interlacing, VideoParams, VideoType};
+use oak_core::cancelatom::CancelAtom;
+use oak_core::colormath::YuvMatrix;
+use oak_core::ocioutils::PixelFormat as OakPixelFormat;
+use oak_core::videoparams::{Interlacing, VideoParams, VideoType};
 use oak_core::{PixelFormat, Rational, SampleFormat, TimeRange};
 
 use crate::audioparams::AudioParams;
@@ -69,10 +69,10 @@ use crate::encodingparams::EncodingParams;
 use crate::footagedescription::{FootageDescription, StreamEntry};
 use crate::frame::Frame;
 
-/// `OAKCOMMON_COLOR_RANGE_FULL`.
-const OAKCOMMON_COLOR_RANGE_FULL: i32 = 1;
-/// `OAKCOMMON_COLOR_RANGE_LIMITED`.
-const OAKCOMMON_COLOR_RANGE_LIMITED: i32 = 0;
+/// `oak_core_COLOR_RANGE_FULL`.
+const oak_core_COLOR_RANGE_FULL: i32 = 1;
+/// `oak_core_COLOR_RANGE_LIMITED`.
+const oak_core_COLOR_RANGE_LIMITED: i32 = 0;
 /// `AVCOL_RANGE_JPEG` (full range; AVCOL_RANGE_MPEG = 1 is limited).
 const AVCOL_RANGE_JPEG: i32 = 2;
 /// swscale colorspace ids (`SWS_CS_*`, libswscale/swscale.h).
@@ -372,9 +372,9 @@ impl Decoder for FFmpegDecoder {
 			params.set_color_primaries(color_meta.color_primaries);
 			params.set_color_transfer(color_meta.color_trc);
 			params.set_color_range(if color_meta.full_range {
-				oak_common::videoparams::ColorRange::Full
+				oak_core::videoparams::ColorRange::Full
 			} else {
-				oak_common::videoparams::ColorRange::Limited
+				oak_core::videoparams::ColorRange::Limited
 			});
 		}
 		Ok(Arc::new(frame))
@@ -1099,9 +1099,9 @@ impl DecoderState {
 		// frame's own metadata (YUVJ sources are full range). The old path
 		// forced MPEG/limited for everything, crushing full-range screen
 		// captures and JPEG-derived footage.
-		let full_range = if force_range == OAKCOMMON_COLOR_RANGE_FULL {
+		let full_range = if force_range == oak_core_COLOR_RANGE_FULL {
 			true
-		} else if force_range == OAKCOMMON_COLOR_RANGE_LIMITED {
+		} else if force_range == oak_core_COLOR_RANGE_LIMITED {
 			false
 		} else {
 			yuvj_full || raw_range == AVCOL_RANGE_JPEG
@@ -1949,7 +1949,7 @@ fn convert_rgba8_to_f32(data: &[u8], w: u32, h: u32, stride: usize) -> Vec<u8> {
 /// colorspace tables and full ranges on both sides, so no matrix and no
 /// range recompression was applied. 10/12-bit sources arrive left-shifted
 /// to 16-bit (code << 6 / code << 4) — exactly the code-value scale
-/// [`oak_common::colormath::yuv444p16_to_rgb_f32`] expects.
+/// [`oak_core::colormath::yuv444p16_to_rgb_f32`] expects.
 fn convert_yuv444p16_to_rgba_f32(
 	out: &ffmpeg::frame::Video,
 	w: u32,
@@ -1958,7 +1958,7 @@ fn convert_yuv444p16_to_rgba_f32(
 	full_range: bool,
 ) -> Vec<u8> {
 	let mut rgba = vec![0.0f32; (w as usize) * (h as usize) * 4];
-	oak_common::colormath::yuv444p16_to_rgb_f32(
+	oak_core::colormath::yuv444p16_to_rgb_f32(
 		out.data(0),
 		out.stride(0),
 		out.data(1),
@@ -2111,9 +2111,9 @@ fn probe_file(filename: &str, cancelled: Option<&CancelAtom>) -> Option<FootageD
 					vp.set_color_primaries((*raw).color_primaries as i32);
 					vp.set_color_transfer((*raw).color_trc as i32);
 					vp.set_color_range(if (*raw).color_range as i32 == AVCOL_RANGE_JPEG {
-						oak_common::videoparams::ColorRange::Full
+						oak_core::videoparams::ColorRange::Full
 					} else {
-						oak_common::videoparams::ColorRange::Limited
+						oak_core::videoparams::ColorRange::Limited
 					});
 				}
 				desc.push_stream(StreamEntry::Video(vp));
@@ -3165,7 +3165,7 @@ mod tests {
 
 	#[test]
 	fn yuv_matrix_mapping_is_strict() {
-		use oak_common::colormath::YuvMatrix;
+		use oak_core::colormath::YuvMatrix;
 		assert_eq!(yuv_matrix_for(AVCOL_SPC_BT709, 1920, 1080), YuvMatrix::Bt709);
 		assert_eq!(yuv_matrix_for(AVCOL_SPC_BT470BG, 640, 480), YuvMatrix::Bt601);
 		assert_eq!(yuv_matrix_for(AVCOL_SPC_SMPTE170M, 1920, 1080), YuvMatrix::Bt601);

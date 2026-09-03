@@ -28,12 +28,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::autocacher::PreviewAutoCacher;
-use crate::backend::BackendKind;
 use crate::error::{Error, Result};
 use crate::eval;
 use crate::procpool::{DispatcherConfig, ProcessDispatcher, ShmAudioRef, ShmFrameRef};
 use crate::ticket::{TicketArena, TicketId};
 use crate::worker::{GraphSnapshotStore, InlineDispatcher, JobDispatch};
+use oak_core::backend::BackendKind;
 
 static MANAGER: Mutex<Option<Arc<RenderManager>>> = Mutex::new(None);
 
@@ -421,10 +421,10 @@ impl RenderManager {
 }
 
 /// The default disk cache directory (C++ `DiskManager::
-/// get_default_disk_cache_path`); shared with oaknode via oakcommon
+/// get_default_disk_cache_path`); shared with oaknode via oak_core
 /// (single-lib unification).
 pub fn disk_cache_path() -> String {
-	oak_common::filefunctions::default_disk_cache_path()
+	oak_core::filefunctions::default_disk_cache_path()
 }
 
 /// Bytes consumed by the default disk cache folder (direct filesystem
@@ -474,10 +474,10 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use std::sync::{Mutex, MutexGuard};
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
 
-	/// Serializes the manager-singleton tests (the singleton is global).
+    /// Serializes the manager-singleton tests (the singleton is global).
 	static MANAGER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 	fn manager_lock() -> MutexGuard<'static, ()> {
@@ -533,7 +533,7 @@ mod tests {
 
 	#[test]
 	fn disk_cache_size_and_clear() {
-		let _guard = crate::commonutil::ENV_TEST_LOCK
+		let _guard = oak_core::commonutil::ENV_TEST_LOCK
 			.lock()
 			.unwrap_or_else(|e| e.into_inner());
 		let dir = std::env::temp_dir().join("oakrender-diskcache-test");
@@ -550,7 +550,7 @@ mod tests {
 
 	#[test]
 	fn disk_cache_size_missing_dir_is_zero() {
-		let _guard = crate::commonutil::ENV_TEST_LOCK
+		let _guard = oak_core::commonutil::ENV_TEST_LOCK
 			.lock()
 			.unwrap_or_else(|e| e.into_inner());
 		let dir = std::env::temp_dir().join("oakrender-diskcache-missing");

@@ -21,7 +21,7 @@
 //!
 //!   - **Backend selection.** [`Renderer::create`] initializes the render
 //!     backend through the oakrender crate's direct Rust API
-//!     ([`oak_render::backend::DisplayRenderer`]), falling back to the
+//!     ([`oak_core::backend::DisplayRenderer`]), falling back to the
 //!     direct OpenGL renderer exactly like the C++ `create_renderer()`
 //!     chain. The headless `"cpu"` backend (M15 S1) skips the renderer
 //!     entirely — the render path is CPU evaluation + decode, driven
@@ -54,18 +54,18 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use oak_core::backend::{BackendKind, DisplayRenderer};
 use oak_core::{PixelFormat, Rational};
-use oak_render::backend::{BackendKind, DisplayRenderer};
 use oak_render::eval;
 use oak_render::ticket::{AudioTicketParams, MontageClip, VideoTicketParams};
 
 use crate::framecache::FrameCache;
 use crate::ipc::{
-	error_message, write_message, AudioTicketSpec, BatchTicketSpec, FrameSlotPool, FrameSlotMeta,
+	error_message, write_message, AudioTicketSpec, BatchTicketSpec, FrameSlotMeta, FrameSlotPool,
 	HandshakeMsg, LoadGraphMsg, PluginProgressMsg, RenderAudioBatchMsg, RenderBatchMsg,
-	RenderFrameMsg, SharedMemoryRegion, ShmMode, TYPE_CANCEL, TYPE_HANDSHAKE, TYPE_LOAD_GRAPH,
+	RenderFrameMsg, SharedMemoryRegion, ShmMode, SLOT_FORMAT_AUDIO_F32, SLOT_FORMAT_BGRA8, TYPE_CANCEL, TYPE_HANDSHAKE, TYPE_LOAD_GRAPH,
 	TYPE_PLUGIN_CANCEL, TYPE_RENDER_AUDIO_BATCH, TYPE_RENDER_BATCH, TYPE_RENDER_FRAME,
-	TYPE_SHUTDOWN, SLOT_FORMAT_AUDIO_F32, SLOT_FORMAT_BGRA8,
+	TYPE_SHUTDOWN,
 };
 use crate::{log_error, PROTOCOL_VERSION};
 
@@ -353,7 +353,7 @@ impl WorkerSession {
 			return true;
 		}
 		log_error("runtime: loading color-manager default config");
-		if let Err(e) = oak_render::color::set_up_default_config() {
+		if let Err(e) = oak_core::color::set_up_default_config() {
 			log_error(&format!(
 				"runtime: color-manager default config failed ({e}); continuing"
 			));
@@ -595,7 +595,7 @@ impl WorkerSession {
 						// The project's color pipeline properties drive this
 						// process's input/output transforms (the oakrender
 						// process global read by eval + the output node).
-						oak_render::color::set_pipeline_color_settings(working, output_spec);
+						oak_core::color::set_pipeline_color_settings(working, output_spec);
 						// A fresh graph snapshot can change what any viewer
 						// identity renders; cached pixels from the previous
 						// graph must not be served (M16 S2 frame cache).
@@ -657,8 +657,8 @@ impl WorkerSession {
 			(render.width, render.height)
 		} else {
 			(
-				oak_render::frame::VideoParamsPod::DEFAULT_WIDTH,
-				oak_render::frame::VideoParamsPod::DEFAULT_HEIGHT,
+				oak_core::frame::VideoParamsPod::DEFAULT_WIDTH,
+				oak_core::frame::VideoParamsPod::DEFAULT_HEIGHT,
 			)
 		};
 		let format = if render.format < 0 {
@@ -1061,12 +1061,12 @@ impl WorkerSession {
 			let guard = project.lock().unwrap_or_else(|e| e.into_inner());
 			(guard.working_color_space(), guard.output_color_spec())
 		};
-		if oak_render::color::pipeline_working_space() == working
-			&& oak_render::color::pipeline_output_spec() == output
+		if oak_core::color::pipeline_working_space() == working
+			&& oak_core::color::pipeline_output_spec() == output
 		{
 			return false;
 		}
-		oak_render::color::set_pipeline_color_settings(working, output);
+		oak_core::color::set_pipeline_color_settings(working, output);
 		true
 	}
 
@@ -1269,7 +1269,7 @@ fn render_f32_into(
 					Some(viewer_id) => {
 						let rendered = eval::render_graph_frame(project, viewer_id, time, (w, h), PixelFormat::F32);
 						match &rendered {
-							Ok(oak_render::texture::Texture::Cpu(frame)) => {
+							Ok(oak_core::texture::Texture::Cpu(frame)) => {
 								let src_stride = frame.linesize_bytes() as usize;
 								let row_bytes = (w as usize) * 16;
 								if frame.data.len() < src_stride * (h as usize)
@@ -1308,7 +1308,7 @@ fn render_f32_into(
 			PixelFormat::F32,
 		)
 		.map_err(|e| format!("footage decode: {e}"))?;
-		let oak_render::texture::Texture::Cpu(frame) = &decoded else {
+		let oak_core::texture::Texture::Cpu(frame) = &decoded else {
 			return Err("decode produced a GPU texture".to_string());
 		};
 		let src_stride = frame.linesize_bytes() as usize;
@@ -1365,13 +1365,13 @@ fn convert_f32_rgba_to_bgra8(src: &[u8], dst: &mut [u8]) {
 /// A no-op in the legacy sRGB working space (content already is
 /// display-referred sRGB).
 fn apply_output_node(bytes: &mut [u8], pixels: usize) {
-	if oak_render::color::pipeline_working_space()
-		== oak_common::colormath::WorkingColorSpace::SrgbLegacy
+	if oak_core::color::pipeline_working_space()
+		== oak_core::colormath::WorkingColorSpace::SrgbLegacy
 	{
 		return;
 	}
-	let spec = oak_render::color::pipeline_output_spec();
-	oak_common::colormath::acescg_to_output_bytes(bytes, pixels, spec);
+	let spec = oak_core::color::pipeline_output_spec();
+	oak_core::colormath::acescg_to_output_bytes(bytes, pixels, spec);
 }
 
 // ---------------------------------------------------------------------------
@@ -1840,10 +1840,10 @@ mod tests {
 
 	#[test]
 	fn load_graph_adopts_pipeline_colors_from_snapshot() {
-		use oak_common::colormath::{OutputColorSpec, WorkingColorSpace};
+		use oak_core::colormath::{OutputColorSpec, WorkingColorSpace};
 		// Reset the process global to something different from the snapshot's
 		// settings so the adopt step is observable.
-		oak_render::color::set_pipeline_color_settings(
+		oak_core::color::set_pipeline_color_settings(
 			WorkingColorSpace::SrgbLegacy,
 			OutputColorSpec::default(),
 		);
@@ -1863,13 +1863,13 @@ mod tests {
 		);
 		assert!(resp.is_none(), "unexpected error: {resp:?}");
 		assert_eq!(
-			oak_render::color::pipeline_working_space(),
-			WorkingColorSpace::AcesCg,
-			"load_graph must adopt the snapshot's working space"
+            oak_core::color::pipeline_working_space(),
+            WorkingColorSpace::AcesCg,
+            "load_graph must adopt the snapshot's working space"
 		);
 		let _ = std::fs::remove_file(&path);
 		// Restore the default global so parallel tests are not disturbed.
-		oak_render::color::set_pipeline_color_settings(
+		oak_core::color::set_pipeline_color_settings(
 			WorkingColorSpace::default(),
 			OutputColorSpec::default(),
 		);
@@ -1877,7 +1877,7 @@ mod tests {
 
 	#[test]
 	fn sync_pipeline_color_from_graph_restores_stale_global() {
-		use oak_common::colormath::{OutputColorSpec, WorkingColorSpace};
+		use oak_core::colormath::{OutputColorSpec, WorkingColorSpace};
 		let project = oak_node::project::Project::new();
 		{
 			let mut guard = project.lock().unwrap_or_else(|e| e.into_inner());
@@ -1897,25 +1897,25 @@ mod tests {
 		// global flips immediately, but the resync (load_graph re-broadcast)
 		// reaches this worker later. A render ticket in that window must not
 		// run under the stale colors.
-		oak_render::color::set_pipeline_color_settings(
-			WorkingColorSpace::SrgbLegacy,
-			oak_render::color::pipeline_output_spec(),
+		oak_core::color::set_pipeline_color_settings(
+            WorkingColorSpace::SrgbLegacy,
+            oak_core::color::pipeline_output_spec(),
 		);
 		assert!(
 			s.sync_pipeline_color_from_graph(),
 			"stale global must be refreshed from the loaded project"
 		);
 		assert_eq!(
-			oak_render::color::pipeline_working_space(),
-			WorkingColorSpace::AcesCg,
-			"sync must restore the snapshot's working space"
+            oak_core::color::pipeline_working_space(),
+            WorkingColorSpace::AcesCg,
+            "sync must restore the snapshot's working space"
 		);
 		assert!(
 			!s.sync_pipeline_color_from_graph(),
 			"no change means no frame-cache invalidation"
 		);
 		let _ = std::fs::remove_file(&path);
-		oak_render::color::set_pipeline_color_settings(
+		oak_core::color::set_pipeline_color_settings(
 			WorkingColorSpace::default(),
 			OutputColorSpec::default(),
 		);
@@ -1929,7 +1929,7 @@ mod tests {
 		// becomes srgb_oetf(0.5) ≈ 0.735. The correct pipeline linearizes
 		// the code (sRGB EOTF) into ACEScg and then encodes for output, so
 		// the mid-gray comes back near 0.5.
-		use oak_common::colormath::{
+		use oak_core::colormath::{
 			acescg_to_output_bytes, decode_to_acescg_bytes, srgb_oetf, OutputColorSpec, OutputGamut,
 			OutputTransfer, SourcePrimaries, SourceTransfer, WorkingColorSpace,
 		};
@@ -1940,7 +1940,7 @@ mod tests {
 
 		// Buggy path: treating the already-encoded code as ACEScg linear.
 		let mut double_encoded = [0.5f32, 0.5, 0.5, 1.0];
-		oak_common::colormath::working_to_display_target(
+		oak_core::colormath::working_to_display_target(
 			&mut double_encoded,
 			WorkingColorSpace::AcesCg,
 			spec,

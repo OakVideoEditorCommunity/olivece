@@ -305,7 +305,7 @@ name = "oakaudio"
 version = "0.1.0"
 dependencies = [
  "oakcodec",
- "oakcommon",
+ "oak_core",
  "oakcore-rs",
 ]
 
@@ -318,7 +318,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "oakcommon"
+name = "oak_core"
 version = "0.1.0"
 dependencies = [
  "image",

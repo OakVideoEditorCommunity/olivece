@@ -2450,7 +2450,7 @@ pub fn remove_node(p: &ProjectRef, node: NodeId) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// A process-wide test lock: the app's tests share the oakundo global
-/// stack, the oakcommon config store and the codec decode sessions, so any
+/// stack, the oak_core config store and the codec decode sessions, so any
 /// test touching them serializes on this lock.
 #[cfg(test)]
 pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {

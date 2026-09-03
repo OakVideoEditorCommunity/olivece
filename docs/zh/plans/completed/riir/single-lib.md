@@ -22,15 +22,15 @@
 ```
 liboakengine（一个 dylib，crate 图是 DAG）
 ├── oakcore-rs   ← 共享 ABI 类型（CHandle + POD），无依赖的叶子
-├── oakcommon    → oakcore-rs
+├── oak_core    → oakcore-rs
 ├── oakundo      → oakcore-rs
-├── oaknode      → oakcore-rs, oakcommon, oakundo, oakcodec
+├── oaknode      → oakcore-rs, oak_core, oakundo, oakcodec
 ├── oaktimeline  → oakcore-rs, oakundo, oaknode
 ├── oakcodec     → oakcore-rs, oakrender          （codec→render 直接调）
-├── oakaudio     → oakcore-rs, oakcommon, oakcodec
-├── oakrender    → oakcore-rs, oakcommon, oaknode  （render→node 直接调）
-├── oaktask      → oakcore-rs, oakcommon, oakundo, oakcodec, oaknode, oakrender
-├── oakplugin    → oakcore-rs, oakcommon, oakundo, oaknode, oakrender（suites 仍 C）
+├── oakaudio     → oakcore-rs, oak_core, oakcodec
+├── oakrender    → oakcore-rs, oak_core, oaknode  （render→node 直接调）
+├── oaktask      → oakcore-rs, oak_core, oakundo, oakcodec, oaknode, oakrender
+├── oakplugin    → oakcore-rs, oak_core, oakundo, oaknode, oakrender（suites 仍 C）
 └── oakengine    → 全部（facade）
 ```
 
@@ -64,7 +64,7 @@ liboakengine（一个 dylib，crate 图是 DAG）
 | oakcodec | extern "C" | common 15657 / render 7262（+test_stubs 27176） | 0 |
 | oakaudio | extern "C" | codec 6683 / common 1665 / ffmpeg 7812 | 0 |
 | oaktimeline | extern "C" | common / node 11742 / undo 2780（+teststubs 52921） | 0 |
-| oakundo / oakcommon | — | 无 bridge | — |
+| oakundo / oak_core | — | 无 bridge | — |
 
 facade `src/engine/rust/src/bridge/`：9 个文件 2466 行、**624 个
 `extern "C"` 导入**（node 348 / common 91 / render 36 / timeline 34 /
@@ -97,8 +97,8 @@ task 33 / audio 31 / codec 24 / undo 22 / plugin 5），由
 
 | 环 | 边 | 处理 |
 |---|---|---|
-| **node ↔ render** | node→render 3 fn + render→node copier | §4.1：render→node 保留直接依赖；node→render 的 3 个函数下沉 oakcommon（实现本就在 oakcommon 侧：`default_disk_cache_path` 已是 render/bridge/common.rs 内的纯 Rust 实现；OCIO config 由 oakcommon `ocioutils::OcioConfig` 提供） |
-| **codec ↔ render** | codec→render cancelatom + render→codec stub | §4.2：cancelatom 下沉 oakcommon（原子取消旗标，纯 Rust）；render→codec 的 stub 检查直接删除（路径必然 Err） |
+| **node ↔ render** | node→render 3 fn + render→node copier | §4.1：render→node 保留直接依赖；node→render 的 3 个函数下沉 oak_core（实现本就在 oak_core 侧：`default_disk_cache_path` 已是 render/bridge/common.rs 内的纯 Rust 实现；OCIO config 由 oak_core `ocioutils::OcioConfig` 提供） |
+| **codec ↔ render** | codec→render cancelatom + render→codec stub | §4.2：cancelatom 下沉 oak_core（原子取消旗标，纯 Rust）；render→codec 的 stub 检查直接删除（路径必然 Err） |
 
 其余方向均无环：node→timeline 0 调用、task→* 单向、plugin→* 单向、
 audio→* 单向、timeline→node/undo 单向。
@@ -155,13 +155,13 @@ layout 相同但 Rust 类型不同的 `CHandle`、POD（`OakVideoParams`、
 | crate | 处理 |
 |---|---|
 | facade `engine/rust/src/bridge/` | §5：`extern "C"` 块 → 直接调用模块 crate `ffi` 的安全包装（同名同签名） |
-| oaknode `bridge/{undo,common,codec}` | 直接调用 oakundo/oakcommon/oakcodec 的 ffi；`bridge/` 删除 |
+| oaknode `bridge/{undo,common,codec}` | 直接调用 oakundo/oak_core/oakcodec 的 ffi；`bridge/` 删除 |
 | oaknode `bridge/{render,timeline,core}` | render/timeline 见 §4（环/死代码）；core → oakcore-rs / 宿主 liboakcore（保持 link-time extern，见 §4.3） |
 | oaktask `bridge/*` | 直接调用各目标 crate ffi；`bridge/` 删除 |
 | oakrender `bridge/node` | 直接调用 oaknode ffi（§4.1） |
-| oakrender `bridge/{codec,common}` | codec → §4.2（stub 删除）；common → 直接调用 oakcommon |
+| oakrender `bridge/{codec,common}` | codec → §4.2（stub 删除）；common → 直接调用 oak_core |
 | oakplugin `bridge/{node,render,undo}` | 直接调用各目标 crate ffi；suites 保持 C |
-| oakcodec `bridge/{common,render}` | common → oakcommon；render → oakrender（cancelatom 移 oakcommon 后改调 oakcommon，见 §4.2） |
+| oakcodec `bridge/{common,render}` | common → oak_core；render → oakrender（cancelatom 移 oak_core 后改调 oak_core，见 §4.2） |
 | oakaudio `bridge/{codec,common,ffmpeg}` | codec/common → 直接调用；ffmpeg → ffmpeg_bridge（C++，保持 extern "C"） |
 | oaktimeline `bridge/{node,undo,common}` | node/undo → 直接调用；common 0 调用 → 删除；`teststubs.rs` 见 §7 |
 
@@ -182,10 +182,10 @@ layout 相同但 Rust 类型不同的 `CHandle`、POD（`OakVideoParams`、
 实现**（2026-08-10 全量 grep 确认），所以运行时必然 dlsym 失败，走
 "缺失"分支。破环 = 删除死调用：
 
-1. `disk_cache_path()`：实现**下沉 oakcommon**（新增
+1. `disk_cache_path()`：实现**下沉 oak_core**（新增
    `filefunctions::default_disk_cache_path()`，基于既有的
    `FileFunctions::get_configuration_location()`）。oaknode
-   `project.rs` 与 oakrender `manager.rs` 都直接调 oakcommon。
+   `project.rs` 与 oakrender `manager.rs` 都直接调 oak_core。
 2. `color_config_create_default()`/`color_config_load()`：oakrender 从未
    实现这两个符号 → node `colormanager.rs` 的调用恒为 `None`（走
    "标记已加载/保持原状" 分支）。删除调用、保留确定性等价逻辑（行为不变）。
@@ -205,12 +205,12 @@ layout 相同但 Rust 类型不同的 `CHandle`、POD（`OakVideoParams`、
   render→codec = 0。
 - **codec → render**：只有 cancelatom。实施时发现 codec 收到的 atom 句柄
   是 oakrender `make_owned` 按 **oakrender 的 `RefBox` 布局**装箱的，
-  codec 直接解引用会在不同 crate 的 `RefBox` 布局间读内存（oakcommon
+  codec 直接解引用会在不同 crate 的 `RefBox` 布局间读内存（oak_core
   value-first、其余 refs-first），**不安全**。因此 cancelatom 的读取保持
   经 oakrender 的 C 导出（codec `bridge::render` 的 link-time extern，
   与 `oakcore_*`/`fb_*` 同类，属"不可避免的 C 边界"）；实现体下沉
-  oakcommon（`cancelatom::CancelAtom`，oakrender 的
-  `oakrender_cancelatom_*` 导出改包 oakcommon，`render/cancelatom.rs`
+  oak_core（`cancelatom::CancelAtom`，oakrender 的
+  `oakrender_cancelatom_*` 导出改包 oak_core，`render/cancelatom.rs`
   变为 re-export）。
 
 结果：codec 与 render 之间无 crate 依赖；codec→render 仅剩 cancelatom
@@ -239,7 +239,7 @@ pub fn oaknode_project_init() -> CHandle {
 ```
 
 - 每个 ffi fn 的路径：`oak<mod>::ffi::<子模块>::<fn>`（如
-  `oaknode::ffi::project`、`oaknode::ffi::folder`、`oakcommon::ffi::config`…）；
+  `oaknode::ffi::project`、`oaknode::ffi::folder`、`oak_core::ffi::config`…）；
   实现时以模块 crate 实际 `pub mod` 布局为准（已核对：oaknode ffi 有
   `project/node/keyframe/…` 子模块）。
 - **facade 业务代码（node.rs/timeline.rs/… 共 393 处调用）零改动**：
@@ -257,24 +257,24 @@ pub fn oaknode_project_init() -> CHandle {
 逐方向（每步一个 crate 一个方向，`cargo build`+`cargo test` 闭环）：
 
 1. oaknode：`bridge/undo.rs`、`bridge/common.rs`、`bridge/codec.rs`
-   （→ oakundo/oakcommon/oakcodec 直接调，同 §5 的包装写法）；
+   （→ oakundo/oak_core/oakcodec 直接调，同 §5 的包装写法）；
 2. oaktimeline：`bridge/node.rs`、`bridge/undo.rs`（→ oaknode/oakundo）；
 3. oakrender：`bridge/node.rs`（→ oaknode，§4.1）、`bridge/common.rs`
-   （→ oakcommon）；
+   （→ oak_core）；
 4. oaktask：`bridge/{node,render,codec,undo,common}.rs`；
 5. oakplugin：`bridge/{node,render,undo}.rs`（suites 不动）；
-6. oakcodec：`bridge/common.rs`（→ oakcommon）、`bridge/render.rs`
-   （→ oakcommon cancelatom，§4.2）；
+6. oakcodec：`bridge/common.rs`（→ oak_core）、`bridge/render.rs`
+   （→ oak_core cancelatom，§4.2）；
 7. oakaudio：`bridge/{codec,common}.rs`；
-8. oaknode：`bridge/render.rs`（→ oakcommon，§4.1）、`bridge/timeline.rs`
+8. oaknode：`bridge/render.rs`（→ oak_core，§4.1）、`bridge/timeline.rs`
    （死代码删除，测试迁移见 §7）、`bridge/core.rs`（§4.3 保留 extern）。
 
-被调方需要被加为 path 依赖的 crate：oaknode 加 `oakundo`/`oakcommon`/
+被调方需要被加为 path 依赖的 crate：oaknode 加 `oakundo`/`oak_core`/
 `oakcodec`；oaktimeline 加 `oakundo`/`oaknode`；oakrender 加
-`oakcommon`/`oaknode`；oaktask 加 `oakundo`/`oakcommon`/`oakcodec`/
-`oaknode`/`oakrender`；oakplugin 加 `oakcore-rs`/`oakcommon`/`oakundo`/
-`oaknode`/`oakrender`；oakcodec 加 `oakcommon`；oakaudio 加
-`oakcommon`/`oakcodec`。**不产生任何环**（§1.3 已消除）。
+`oak_core`/`oaknode`；oaktask 加 `oakundo`/`oak_core`/`oakcodec`/
+`oaknode`/`oakrender`；oakplugin 加 `oakcore-rs`/`oak_core`/`oakundo`/
+`oaknode`/`oakrender`；oakcodec 加 `oak_core`；oakaudio 加
+`oak_core`/`oakcodec`。**不产生任何环**（§1.3 已消除）。
 
 ## 7. 测试策略（每 crate 测试保持绿）
 
@@ -283,14 +283,14 @@ pub fn oaknode_project_init() -> CHandle {
 - **用 `bridge/` 的测试必须迁移**（桥层从生产路径删除后不能留在测试里）：
   - 目标 crate 已 path 依赖的：`oaknode::bridge::undo::…` →
     `oakundo::ffi::…`（或 oakundo 类型层）直接调；`bridge::common::videoparams_*`
-    → `oakcommon::…`；`bridge::core::audioparams_*` → `oakcore_rs::…`
+    → `oak_core::…`；`bridge::core::audioparams_*` → `oakcore_rs::…`
     / 宿主 liboakcore extern；
   - 依赖不存在（环/死代码）的：`node::bridge::timeline` 的测试用
     oaktimeline 自身导出或改写；`node::bridge::render` 的测试改调
-    oakcommon 下沉后的函数；
+    oak_core 下沉后的函数；
   - 专门测 dlsym 机制的测试（如 `node/rust/tests/dbg2_test.rs` 的
     `bridge::dlsym::resolve`）随机制删除而删除。
-- **`test-stubs` feature（oakplugin/oakcommon/oaktimeline/oaknode）**：
+- **`test-stubs` feature（oakplugin/oak_core/oaktimeline/oaknode）**：
   语义变为"编译测试桩 C ABI（替代尚未存在的宿主/兄弟模块实现）"。
   直接调用落地后，同一二进制内不再同时出现"真实现 + 桩"冲突：
   facade `cargo test` 的 dev-dependency feature union 按新依赖图调整
@@ -319,7 +319,7 @@ pub fn oaknode_project_init() -> CHandle {
    `cargo build` + `cargo test`（这一步后直接调用才类型同一）。
 2. **facade bridge → 直接调用**（§5，步骤 a）。
 3. **环处理**（§4）：删除死调用；disk_cache_path/cancelatom 下沉
-   oakcommon；render 的 `codec_abi_available()` stub 检查删除。
+   oak_core；render 的 `codec_abi_available()` stub 检查删除。
 4. **模块 bridge 逐方向 → 直接调用**（§6，步骤 b）。
 5. **dlsym 删除**（步骤 c）：node/render/plugin 的 `bridge/mod.rs::dlsym`
    与残留调用清除；`linkage.rs` 注释更新。
@@ -354,7 +354,7 @@ pub fn oaknode_project_init() -> CHandle {
   `OakUndoCommandVtable`/`OakVideoTicketParams`/`OakRenderVideoParams`/
   `OffsetResult`/`StretchOffsetResult`/`SourceClip` → 各模块 crate 类型。
 - **环处理**（§4 实施结论）：node↔render 死调用删除；render→codec stub
-  删除；`oakcommon::{filefunctions::default_disk_cache_path, cancelatom}`；
+  删除；`oak_core::{filefunctions::default_disk_cache_path, cancelatom}`；
   render 的 `cancelatom.rs` 改为 re-export。
 - **模块 bridge**（步骤 b，模式已证明）：oaknode `bridge/undo.rs`
   → oakundo 直接调用（oakundo 加入 node 依赖；bridge 函数名/签名不变，
@@ -372,18 +372,18 @@ encoding-params POD（`oakcodec_encoding_params` 等）在 4 个 crate 各有
 本轮完成的方向（每步 `cargo build` + 该 crate `cargo test` 绿）：
 
 - **oaknode `bridge/{undo,common,codec}` → 直接调用**（上轮已做 undo，
-  本轮完成 common + codec）：oakcommon/oakcodec 加入 node 依赖；common
-  桥 31 个 dlsym 包装改为 `oakcommon::ffi::*` 直接调用，`test-stubs`
+  本轮完成 common + codec）：oak_core/oakcodec 加入 node 依赖；common
+  桥 31 个 dlsym 包装改为 `oak_core::ffi::*` 直接调用，`test-stubs`
   特性与库内 XML 桩删除；codec 桥的 `decoder_probe` 改为直接调用
   `oakcodec::ffi::decoder::oakcodec_decoder_probe`（签名修正为真实
   单参返回 CHandle，footage.rs 调用点同步）。node dlsym 52→20。
 - **oakrender `bridge/common` → 直接调用**：config/configuration_location/
-  disk_cache_path 改调 `oakcommon::ffi` 与 `oakcommon::filefunctions`；
+  disk_cache_path 改调 `oak_core::ffi` 与 `oak_core::filefunctions`；
   `bridge/codec.rs` 全死代码（0 生产调用、0 测试引用）**删除**；
   `bridge/node.rs`（copier 深拷贝）是死方向（oaknode 未实现该 C ABI，
   且 `oakrender_project_copier_*` 是冻结导出）——保留 dlsym 并记录。
   render dlsym 22→4。
-- **oakaudio `bridge/{codec,common}` → 直接调用**：oakcodec/oakcommon
+- **oakaudio `bridge/{codec,common}` → 直接调用**：oakcodec/oak_core
   加入 audio 依赖；codec 桥的 `*mut c_void` 句柄约定与真实
   `CHandle`/`OakCodecAudioStreamInfo`/`oakcodec_encoding_params` 对齐
   （类型别名统一），调用点（waveform/manager）同步；common 桥改直接
@@ -394,7 +394,7 @@ encoding-params POD（`oakcodec_encoding_params` 等）在 4 个 crate 各有
   断言改为探针错误路径（完整解码依赖宿主 ffmpeg_bridge，Rust 测试
   二进制不链接）。
 - **oakcodec `test-stubs` 特性拆分**（为 node 测试二进制提供宿主符号）：
-  `src/bridge/test_stubs.rs` 的 oakcommon_* 桩保持 `#[cfg(test)]`
+  `src/bridge/test_stubs.rs` 的 oak_core_* 桩保持 `#[cfg(test)]`
   （codec 自身测试用），oakcore_*/oakrender_* 桩改为
   `#[cfg(any(test, feature="test-stubs"))]`；node 的 dev-dependencies
   以 `features=["test-stubs"]` 依赖 oakcodec，解决 node 测试链接
@@ -429,16 +429,16 @@ encoding-params POD（`oakcodec_encoding_params` 等）在 4 个 crate 各有
   容错路径（`texture_is_dummy` 空句柄 0、`instance_render` 空 dst 被
   插件层 E_INVALID 拒绝、`render_job` 同）；OFX suites 层未触碰。
 - **oaktimeline `bridge/{node,undo,common}` → 直接调用**：oaknode/
-  oakundo/oakcommon 加入依赖；81 个桥函数直接调用。`teststubs.rs`
+  oakundo/oak_core 加入依赖；81 个桥函数直接调用。`teststubs.rs`
   （1658 行）改为纯 Rust mock（去 `#[no_mangle]`），桥函数加
   `#[cfg(any(test, feature="test-stubs"))]` mock 变体 / 真实变体，
   测试二进制（cfg(test) 对依赖关）经 `--features test-stubs` 解析
   `bridge::teststubs`——与真实 crate 导出共存无冲突。修复桥签名漂移：
-  `oakcommon_xml_reader_read_next_start_element` 2 参（found 标志，
+  `oak_core_xml_reader_read_next_start_element` 2 参（found 标志，
   调用点 ffi.rs/tests 同步）；`oakundo_stack_push`→真实
   `oakundo_undostack_push`。260 测试绿。
 - **oaktask `bridge/*` → 直接调用**（240 个桥函数）：oaknode/oakundo/
-  oakcommon/oakcodec/oakrender/oaktimeline 加入依赖（oakrender 由可选
+  oak_core/oakcodec/oakrender/oaktimeline 加入依赖（oakrender 由可选
   转必选，`real-oakrender` 特性改为标记）。镜像类型对齐真实 crate：
   `OakCancelAtom`/`OakRenderTicket`/`OakRenderCache`/`OakColorProcessor`
   等 → CHandle 别名，`OakCodecEncodingParams`/`OakCodecProxyParams`/

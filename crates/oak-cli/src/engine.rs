@@ -17,7 +17,7 @@
 //! Module-native engine helpers (M14 R2).
 //!
 //! oak-cli links the oak* module rlibs directly (oaknode / oaktimeline /
-//! oakcodec / oakrender / oaktask / oakcommon) instead of the built
+//! oakcodec / oakrender / oaktask / oak_core) instead of the built
 //! liboakengine dylib's C ABI. This module is the CLI's own assembly
 //! layer: it reproduces the facade operations the subcommands need —
 //! project load/create, footage probe, sequence + clip assembly, montage
@@ -43,14 +43,14 @@ use oak_node::project::Project;
 use oak_node::sequence::SequenceBehavior;
 use oak_node::track::{TrackBehavior, TrackListBehavior, TrackType};
 use oak_node::value::VideoParams;
-use oak_timeline::undogeneral::TimelineAddTrackCommand;
-use oak_timeline::undopointer::TrackPlaceBlockCommand;
-use oak_timeline::util::NodeRef;
 use oak_render::manager::RenderManager;
 use oak_render::procpool::bgra8_to_rgba8;
 use oak_render::ticket::{
-	AudioTicketParams, MontageClip, TicketPayload, VideoTicketParams,
+    AudioTicketParams, MontageClip, TicketPayload, VideoTicketParams,
 };
+use oak_timeline::undogeneral::TimelineAddTrackCommand;
+use oak_timeline::undopointer::TrackPlaceBlockCommand;
+use oak_timeline::util::NodeRef;
 
 /// The shared project reference (the modules' domain project handle).
 pub type ProjectRef = Arc<Mutex<Project>>;
@@ -663,7 +663,7 @@ pub fn render_frame(
 	m.tickets.wait(id).map_err(|e| e.to_string())?;
 	let result = m.tickets.result(id).ok_or_else(|| "render ticket produced no result".to_string())?;
 	match &result {
-		Ok(TicketPayload::Video(oak_render::texture::Texture::Cpu(frame))) => {
+		Ok(TicketPayload::Video(oak_core::texture::Texture::Cpu(frame))) => {
 			Ok(RenderedFrame {
 				width: frame.width,
 				height: frame.height,

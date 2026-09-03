@@ -52,7 +52,7 @@
 //! ## The content space
 //!
 //! The chain starts from the project's output spec
-//! ([`oak_render::color::pipeline_output_spec`]): sRGB content runs
+//! ([`oak_core::color::pipeline_output_spec`]): sRGB content runs
 //! through the named sRGB/Rec.709 space of the active OCIO config, and
 //! non-sRGB content (P3/BT.2020 gamuts, PQ/HLG transfers) is converted to
 //! CIE XYZ (D65, unit luminance) first and flows through the ICC's
@@ -82,9 +82,9 @@
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use oak_common::colormath::{output_spec_to_xyz_d65, OutputColorSpec, OutputGamut, OutputTransfer};
-use oak_common::configstore::ConfigStore;
-use oak_render::color::{pipeline_output_spec, ColorProcessor};
+use oak_core::colormath::{output_spec_to_xyz_d65, OutputColorSpec, OutputGamut, OutputTransfer};
+use oak_core::configstore::ConfigStore;
+use oak_core::color::{pipeline_output_spec, ColorProcessor};
 
 /// Config key: the display color management mode ("icc" / "off"). The
 /// preference only applies where the platform policy allows self-management
@@ -188,7 +188,7 @@ pub fn display_policy() -> DisplayPolicy {
 	// sRGB; a non-sRGB project output can't be honored through it — warn
 	// once so the degradation is visible in the log.
 	#[cfg(target_os = "windows")]
-	if oak_common::displayicc::windows_acm_active() {
+	if oak_core::displayicc::windows_acm_active() {
 		if pipeline_output_spec() != OutputColorSpec::default() {
 			static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 			WARNED.get_or_init(|| {
@@ -280,7 +280,7 @@ fn current_monitor_fingerprint(window: &gpui::Window, cx: &gpui::App) -> Option<
 	#[cfg(target_os = "windows")]
 	{
 		let id = u64::from(window.display(cx)?.id());
-		return oak_common::displayicc::windows_monitor_fingerprint(id);
+		return oak_core::displayicc::windows_monitor_fingerprint(id);
 	}
 	#[cfg(target_os = "linux")]
 	{
@@ -288,7 +288,7 @@ fn current_monitor_fingerprint(window: &gpui::Window, cx: &gpui::App) -> Option<
 		let center = window.bounds().center();
 		let x = f64::from(center.x) * f64::from(window.scale_factor());
 		let y = f64::from(center.y) * f64::from(window.scale_factor());
-		return oak_common::displayicc::x11_monitor_fingerprint_at(x, y);
+		return oak_core::displayicc::x11_monitor_fingerprint_at(x, y);
 	}
 	#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 	{
@@ -414,9 +414,9 @@ fn current() -> Option<State> {
 /// inside `system_display_icc_for`); an unknown one (empty or malformed)
 /// falls back to the main-display profile — the pre-multi-monitor behavior.
 fn monitor_icc_path(monitor: &str) -> Option<String> {
-	match oak_common::displayicc::monitor_ref_from_fingerprint(monitor) {
-		Some(monitor) => oak_common::displayicc::system_display_icc_for(&monitor),
-		None => oak_common::displayicc::system_display_icc(),
+	match oak_core::displayicc::monitor_ref_from_fingerprint(monitor) {
+		Some(monitor) => oak_core::displayicc::system_display_icc_for(&monitor),
+		None => oak_core::displayicc::system_display_icc(),
 	}
 }
 

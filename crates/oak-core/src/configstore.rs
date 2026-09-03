@@ -33,11 +33,11 @@ use std::sync::{Mutex, OnceLock};
 use crate::error::{Error, Result};
 
 /// Error-handler callback for user-visible config errors
-/// (`OakCommonConfigErrorHandler`). Called with title, message, and the
+/// (`oak_coreConfigErrorHandler`). Called with title, message, and the
 /// registered userdata.
 pub type ErrorHandler = Option<unsafe extern "C" fn(*const c_char, *const c_char, *mut c_void)>;
 
-/// Entry types (`OakCommonConfigEntryType`).
+/// Entry types (`oak_coreConfigEntryType`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryType {
 	/// No entry / null type.
@@ -377,7 +377,7 @@ impl ConfigStore {
 		Ok(())
 	}
 
-	/// Set a string entry. Mirrors `oakcommon_config_set` (`config.cpp:102`):
+	/// Set a string entry. Mirrors `oak_core_config_set` (`config.cpp:102`):
 	/// a new key is created as a string; setting an existing typed entry
 	/// parses the string into its declared type, and an unparseable value
 	/// leaves the entry unchanged.
@@ -400,7 +400,7 @@ impl ConfigStore {
 	}
 
 	/// Read an entry as a string (two-stage getter semantics: formatted
-	/// for numeric/bool entries). Mirrors `oakcommon_config_get`
+	/// for numeric/bool entries). Mirrors `oak_core_config_get`
 	/// (`config.cpp:134`).
 	pub fn get(&self, group: Option<&str>, key: &str) -> Result<String> {
 		if key.is_empty() {
@@ -492,7 +492,7 @@ impl ConfigStore {
 		self.set_entry(join_key(group, key), ConfigValue::Double(v));
 	}
 
-	/// Entry type of a key, or `NotFound`. Mirrors `oakcommon_config_entry_type`
+	/// Entry type of a key, or `NotFound`. Mirrors `oak_core_config_entry_type`
 	/// (`config.cpp:270`).
 	pub fn entry_type(&self, group: Option<&str>, key: &str) -> Result<EntryType> {
 		if key.is_empty() {
@@ -505,7 +505,7 @@ impl ConfigStore {
 	}
 
 	/// Register (or clear, with a null handler) the error handler. Mirrors
-	/// the domain half of `oakcommon_config_set_error_handler` (`config.cpp:288`).
+	/// the domain half of `oak_core_config_set_error_handler` (`config.cpp:288`).
 	pub fn set_error_handler(&self, handler: ErrorHandler, userdata: *mut c_void) -> Result<()> {
 		let ptr = handler.map_or(std::ptr::null_mut(), |h| h as *mut c_void);
 		self.error_handler.store(ptr, Ordering::Release);
@@ -887,7 +887,7 @@ mod tests {
 	fn with_temp_config<T>(f: impl FnOnce(&Path) -> T) -> T {
 		let _guard = test_lock().lock().unwrap();
 		let dir =
-			std::env::temp_dir().join(format!("oakcommon_configstore_test_{}", std::process::id()));
+			std::env::temp_dir().join(format!("oak_core_configstore_test_{}", std::process::id()));
 		let _ = std::fs::create_dir_all(&dir);
 		std::env::set_var("OAK_CONFIG_DIR", &dir);
 		let result = f(&dir);
@@ -1363,7 +1363,7 @@ CustomKey=hello
 			let res = s.load();
 			s.set_error_handler(None, std::ptr::null_mut()).unwrap();
 			assert!(res.is_err());
-			assert_eq!(res.unwrap_err().code(), crate::error::OAKCOMMON_E_FAILED);
+			assert_eq!(res.unwrap_err().code(), crate::error::OAKCORE_E_FAILED);
 
 			let reported = REPORTED.lock().unwrap().clone();
 			assert_eq!(reported.len(), 1);
@@ -1716,7 +1716,7 @@ FlatAfterEmptySection=ok
 			let res = s.load();
 			s.set_error_handler(None, std::ptr::null_mut()).unwrap();
 			assert!(res.is_err());
-			assert_eq!(res.unwrap_err().code(), crate::error::OAKCOMMON_E_FAILED);
+			assert_eq!(res.unwrap_err().code(), crate::error::OAKCORE_E_FAILED);
 			assert_eq!(REPORTED.lock().unwrap().len(), 1);
 		});
 	}
@@ -1735,7 +1735,7 @@ FlatAfterEmptySection=ok
 			let res = s.load();
 			s.set_error_handler(None, std::ptr::null_mut()).unwrap();
 			assert!(res.is_err());
-			assert_eq!(res.unwrap_err().code(), crate::error::OAKCOMMON_E_FAILED);
+			assert_eq!(res.unwrap_err().code(), crate::error::OAKCORE_E_FAILED);
 			let reported = REPORTED.lock().unwrap().clone();
 			assert_eq!(reported.len(), 1);
 			assert_eq!(reported[0].0, "Error loading settings");
@@ -1751,7 +1751,7 @@ FlatAfterEmptySection=ok
 	fn test_save_failure_reports_error() {
 		let _g = test_lock().lock().unwrap();
 		let dir =
-			std::env::temp_dir().join(format!("oakcommon_configstore_test_{}", std::process::id()));
+			std::env::temp_dir().join(format!("oak_core_configstore_test_{}", std::process::id()));
 		let _ = std::fs::create_dir_all(&dir);
 		// Point OAK_CONFIG_DIR at a regular FILE so writing
 		// "<dir>/config.toml.tmp" fails (create_dir_all on it is a silent
@@ -1772,7 +1772,7 @@ FlatAfterEmptySection=ok
 		let _ = std::fs::remove_dir_all(&dir);
 
 		assert!(res.is_err());
-		assert_eq!(res.unwrap_err().code(), crate::error::OAKCOMMON_E_FAILED);
+		assert_eq!(res.unwrap_err().code(), crate::error::OAKCORE_E_FAILED);
 		let reported = REPORTED.lock().unwrap().clone();
 		assert_eq!(reported.len(), 1);
 		assert_eq!(reported[0].0, "Error saving settings");

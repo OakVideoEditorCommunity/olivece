@@ -77,7 +77,7 @@ impl Default for ProcessorInner {
 }
 
 /// Map an oakcore [`SampleFormat`] to the equivalent ffmpeg [`Sample`].
-/// Replaces `FFmpegUtils::get_ffmpeg_sample_format` crossing the oakcommon
+/// Replaces `FFmpegUtils::get_ffmpeg_sample_format` crossing the oak_core
 /// C ABI (`// CPP-PARITY: src/common/src/ffmpegutils.cpp:83`).
 fn to_ffmpeg_sample_format(fmt: SampleFormat) -> Sample {
 	match fmt {

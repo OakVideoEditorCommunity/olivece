@@ -32,8 +32,8 @@
 
 use std::path::Path;
 
-use oak_common::configstore::ConfigStore;
-use oak_common::videoparams::VideoType;
+use oak_core::configstore::ConfigStore;
+use oak_core::videoparams::VideoType;
 use oak_undo::undocommand::UndoCommand;
 
 use crate::error::{Error, Result};

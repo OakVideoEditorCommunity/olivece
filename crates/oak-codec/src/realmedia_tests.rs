@@ -26,8 +26,8 @@
 //! compiled without `#[cfg(test)]` and cannot resolve those symbols; see
 //! `tests/ffi_contract_test.rs`).
 
-use oak_common::ocioutils::PixelFormat as OakPixelFormat;
-use oak_common::videoparams::VideoParams;
+use oak_core::ocioutils::PixelFormat as OakPixelFormat;
+use oak_core::videoparams::VideoParams;
 use crate::decoder::{
 	CodecStream, Decoder, RenderMode, RetrieveAudioStatus, RetrieveVideoParams,
 	K_COLOR_RANGE_DEFAULT,
@@ -503,7 +503,7 @@ static HW_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[test]
 fn hardware_decode_matches_software_decode() {
 	let _guard = HW_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-	let config = oak_common::configstore::ConfigStore::instance();
+	let config = oak_core::configstore::ConfigStore::instance();
 	let key = crate::hwdecode::CONFIG_KEY_HARDWARE_DECODING;
 
 	let decode_at = |time: i64| -> (Option<String>, Arc<Frame>) {

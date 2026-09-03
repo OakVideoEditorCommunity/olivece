@@ -17,19 +17,19 @@
 //! oakrender 桥（single-lib unification）：纹理/帧值类型与渲染调用面。
 //!
 //! oakrender 的 C ABI 已删除（单库化）：纹理是
-//! [`oak_render::texture::Texture`]（value enum，无句柄），CPU 帧是
-//! [`oak_render::texture::Frame`]。本 crate 的 render 驱动与 GL suite
+//! [`oak_core::texture::Texture`]（value enum，无句柄），CPU 帧是
+//! [`oak_core::texture::Frame`]。本 crate 的 render 驱动与 GL suite
 //! 直接持值类型：
 //!
-//! - [`Texture`] = [`oak_render::texture::Texture`]（值别名；
+//! - [`Texture`] = [`oak_core::texture::Texture`]（值别名；
 //!   clone 即引用语义，drop 自动释放后端 token——原 `texture_free`/
 //!   `frame_free` 调用面随值模型删除）；
-//! - [`Frame`] = [`oak_render::texture::Frame`]（值别名）；
-//! - [`Renderer`] = `Arc<dyn oak_render::backend::GpuContextLike>`
+//! - [`Frame`] = [`oak_core::texture::Frame`]（值别名）；
+//! - [`Renderer`] = `Arc<dyn oak_core::backend::GpuContextLike>`
 //!   （渲染器即 oakrender 后端上下文，facade 经
-//!   [`oak_render::backend::GpuContext::create`] 创建）；
+//!   [`oak_core::backend::GpuContext::create`] 创建）；
 //! - [`VideoParams`] 直接别名 oakrender 的
-//!   [`oak_render::frame::VideoParamsPod`]（同布局 POD）；
+//!   [`oak_core::frame::VideoParamsPod`]（同布局 POD）；
 //! - 像素格式常量直接别名 [`oak_core::PixelFormat`]。
 //!
 //! 保留桩（GPU 相关、wgpu 模型无直接 Rust 等价物）：
@@ -42,7 +42,7 @@
 /// `oakrender_video_params` POD — single-lib unification: aliases the
 /// oakrender crate's struct (identical layout;
 /// include/render/renderer.h:78).
-pub type VideoParams = oak_render::frame::VideoParamsPod;
+pub type VideoParams = oak_core::frame::VideoParamsPod;
 
 /// olive::PixelFormat::Format 的 f32 值。
 pub const PIXEL_FORMAT_F32: i32 = oak_core::PixelFormat::F32 as i32;
@@ -51,13 +51,13 @@ pub const PIXEL_FORMAT_U8: i32 = oak_core::PixelFormat::U8 as i32;
 
 /// oakrender 渲染器（后端上下文；Arc 共享，GPU 纹理据此 upload/
 /// download/blit——无需独立渲染器句柄）。
-pub type Renderer = std::sync::Arc<dyn oak_render::backend::GpuContextLike>;
+pub type Renderer = std::sync::Arc<dyn oak_core::backend::GpuContextLike>;
 
 /// oakrender 纹理（值型；GPU 或 CPU 包装）。
-pub type Texture = oak_render::texture::Texture;
+pub type Texture = oak_core::texture::Texture;
 
 /// oakrender CPU 帧（值型）。
-pub type Frame = oak_render::texture::Frame;
+pub type Frame = oak_core::texture::Frame;
 
 // ---- 桥调用面（值型实现；原 CHandle 桩随单库化重写）----------------------
 
@@ -138,10 +138,10 @@ pub fn texture_id(_texture: &Texture) -> i32 {
 	0
 }
 
-/// 渲染器是否为 OpenGL 后端（[`oak_render::backend::BackendKind::Gl`]；
+/// 渲染器是否为 OpenGL 后端（[`oak_core::backend::BackendKind::Gl`]；
 /// 原 `renderer_is_open_gl` 的句柄形态改为后端上下文 kind 查询）。
 pub fn renderer_is_open_gl(renderer: &Renderer) -> bool {
-	renderer.kind() == oak_render::backend::BackendKind::Gl
+	renderer.kind() == oak_core::backend::BackendKind::Gl
 }
 
 /// A GL-kind marker context for [`RenderJob::renderer`]. The field's only
@@ -154,22 +154,22 @@ pub fn renderer_is_open_gl(renderer: &Renderer) -> bool {
 /// oak-worker, where gl_bridge creates its own offscreen context.
 pub struct GlKindMarker;
 
-impl oak_render::backend::GpuContextLike for GlKindMarker {
-	fn kind(&self) -> oak_render::backend::BackendKind {
-		oak_render::backend::BackendKind::Gl
+impl oak_core::backend::GpuContextLike for GlKindMarker {
+	fn kind(&self) -> oak_core::backend::BackendKind {
+		oak_core::backend::BackendKind::Gl
 	}
 	fn destroy_texture(&self, _token: u64) {}
-	fn upload(&self, _token: u64, _frame: &oak_render::texture::Frame) -> oak_render::error::Result<()> {
+	fn upload(&self, _token: u64, _frame: &oak_core::texture::Frame) -> oak_render::error::Result<()> {
 		Ok(())
 	}
-	fn download(&self, _token: u64) -> oak_render::error::Result<oak_render::texture::Frame> {
-		Ok(oak_render::texture::Frame::new())
+	fn download(&self, _token: u64) -> oak_render::error::Result<oak_core::texture::Frame> {
+		Ok(oak_core::texture::Frame::new())
 	}
 	fn blit(
-		&self,
-		_src: u64,
-		_dst: u64,
-		_processor: Option<&oak_render::color::ColorProcessor>,
+        &self,
+        _src: u64,
+        _dst: u64,
+        _processor: Option<&oak_core::color::ColorProcessor>,
 	) -> oak_render::error::Result<()> {
 		Ok(())
 	}
@@ -181,9 +181,9 @@ mod tests {
 
 	/// 测试渲染器：最小 GpuContextLike 假实现（无 GPU 适配器需求）。
 	struct FakeGpu;
-	impl oak_render::backend::GpuContextLike for FakeGpu {
-		fn kind(&self) -> oak_render::backend::BackendKind {
-			oak_render::backend::BackendKind::Cpu
+	impl oak_core::backend::GpuContextLike for FakeGpu {
+		fn kind(&self) -> oak_core::backend::BackendKind {
+			oak_core::backend::BackendKind::Cpu
 		}
 		fn destroy_texture(&self, _token: u64) {}
 		fn upload(&self, _token: u64, _frame: &Frame) -> oak_render::error::Result<()> {
@@ -193,10 +193,10 @@ mod tests {
 			Ok(Frame::new())
 		}
 		fn blit(
-			&self,
-			_src: u64,
-			_dst: u64,
-			_processor: Option<&oak_render::color::ColorProcessor>,
+            &self,
+            _src: u64,
+            _dst: u64,
+            _processor: Option<&oak_core::color::ColorProcessor>,
 		) -> oak_render::error::Result<()> {
 			Ok(())
 		}

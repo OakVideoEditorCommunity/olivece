@@ -18,9 +18,9 @@
 //! flag shared between a render/encode caller and its worker.
 //!
 //! Single-lib unification (see `docs/zh/plans/riir/single-lib.md`): the
-//! implementation moved to oakcommon; this module re-exports it so the
+//! implementation moved to oak_core; this module re-exports it so the
 //! render ffi's `oakrender_cancelatom_*` exports (and their C-ABI
 //! consumers, e.g. oakcodec) keep working unchanged.
 
-/// Shared cancellation atom (oakcommon).
-pub use oak_common::cancelatom::CancelAtom;
+/// Shared cancellation atom (oak_core).
+pub use oak_core::cancelatom::CancelAtom;

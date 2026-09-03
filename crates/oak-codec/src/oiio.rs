@@ -18,7 +18,7 @@
 //!
 //! Mirrors `src/codec/src/oiio/{oiiodecoder,oiioencoder}.{h,cpp}`. OIIO
 //! frame conversion goes through the local
-//! [`crate::oiioframebridge`] helpers plus oakcommon's OIIO mapping
+//! [`crate::oiioframebridge`] helpers plus oak_core's OIIO mapping
 //! functions.
 //!
 //! The OIIO dylib (`liboakoiio`) is not linked into this build, so every
@@ -58,9 +58,9 @@ impl Decoder for OIIODecoder {
 	}
 
 	fn probe(
-		&self,
-		_filename: &str,
-		_cancelled: Option<&oak_common::cancelatom::CancelAtom>,
+        &self,
+        _filename: &str,
+        _cancelled: Option<&oak_core::cancelatom::CancelAtom>,
 	) -> Option<crate::footagedescription::FootageDescription> {
 		// Probing is a dylib operation; without it we cannot report anything.
 		None
@@ -113,12 +113,12 @@ impl Decoder for OIIODecoder {
 	}
 
 	fn conform_audio(
-		&self,
-		_output_filenames: &[String],
-		_sample_rate: i32,
-		_channel_layout: u64,
-		_sample_format: i32,
-		_cancelled: Option<&oak_common::cancelatom::CancelAtom>,
+        &self,
+        _output_filenames: &[String],
+        _sample_rate: i32,
+        _channel_layout: u64,
+        _sample_format: i32,
+        _cancelled: Option<&oak_core::cancelatom::CancelAtom>,
 	) -> crate::error::Result<()> {
 		Err(crate::error::Error::Failed(Self::NOT_AVAILABLE.to_string()))
 	}
