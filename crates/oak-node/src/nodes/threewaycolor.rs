@@ -19,8 +19,8 @@
 //! `olive::ThreeWayColorNode`).
 
 use crate::factory::NodeMeta;
+use crate::jobs::ShaderJobPayload;
 use crate::node::{Category, NodeBehavior, NodeCore};
-use crate::nodes::jobs::ShaderJobPayload;
 
 /// Texture input id (C++ `k_texture_input`). Type: texture; flags:
 /// not-keyframable; this is the node's effect input.
@@ -289,11 +289,11 @@ pub fn register(meta: &mut Vec<NodeMeta>) {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::value::{NodeValue, NodeValueTable, ValueType};
-	use oak_core::Rational;
+    use super::*;
+    use crate::value::{NodeValue, NodeValueTable, ValueType};
+    use oak_core::Rational;
 
-	#[test]
+    #[test]
 	fn input_names() {
 		let n = ThreeWayColorNode;
 		assert_eq!(n.input_name(TEXTURE_INPUT), "Input");
@@ -375,7 +375,7 @@ mod tests {
 			panic!("expected a texture-typed value");
 		};
 		let payload =
-			unsafe { crate::handle::get_checked::<crate::nodes::jobs::ShaderJobPayload>(handle) }
+			unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(handle) }
 				.expect("payload boxed behind the handle");
 		assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.threewaycolor");
 		assert_eq!(payload.shader_id, "");

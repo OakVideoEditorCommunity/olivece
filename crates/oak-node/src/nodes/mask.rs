@@ -424,7 +424,7 @@ impl NodeBehavior for MaskDistortNode {
 				params.insert(id.to_string(), core.value_at_time(id, -1, time));
 			}
 		}
-		let job = crate::handle::make_owned(crate::nodes::jobs::ShaderJobPayload {
+		let job = crate::handle::make_owned(crate::jobs::ShaderJobPayload {
 			node_id: crate::id::NodeId::INVALID,
 			time,
 			iterations: 1,
@@ -562,11 +562,11 @@ pub fn register(meta: &mut Vec<NodeMeta>) {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::value::{NodeValue, NodeValueTable, ValueType};
-	use oak_core::Rational;
+    use super::*;
+    use crate::value::{NodeValue, NodeValueTable, ValueType};
+    use oak_core::Rational;
 
-	#[test]
+    #[test]
 	fn input_names() {
 		let n = MaskDistortNode {
 			polygon: crate::nodes::polygon::PolygonGenerator,
@@ -643,7 +643,7 @@ mod tests {
 			panic!("pushed value is not a texture handle");
 		};
 		let job = unsafe {
-			crate::handle::get_checked::<crate::nodes::jobs::ShaderJobPayload>(handle)
+			crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(handle)
 		}
 		.expect("real shader job");
 		assert_eq!(job.shader_id, "mask");

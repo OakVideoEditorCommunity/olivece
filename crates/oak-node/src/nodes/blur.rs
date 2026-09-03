@@ -18,8 +18,8 @@
 //! `olive::BlurFilterNode`).
 
 use crate::factory::NodeMeta;
+use crate::jobs::ShaderJobPayload;
 use crate::node::{Category, Gizmo, NodeBehavior, NodeCore};
-use crate::nodes::jobs::ShaderJobPayload;
 
 /// Texture input id (C++ `k_texture_input`). Type: texture; flags:
 /// not-keyframable; this is the node's effect input.
@@ -580,12 +580,12 @@ pub fn create() -> (NodeCore, Box<dyn NodeBehavior>) {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::node::NodeBehavior;
-	use crate::value::{NodeValue, NodeValueTable, ValueType};
-	use oak_core::Rational;
+    use super::*;
+    use crate::node::NodeBehavior;
+    use crate::value::{NodeValue, NodeValueTable, ValueType};
+    use oak_core::Rational;
 
-	fn tex() -> NodeValue {
+    fn tex() -> NodeValue {
 		NodeValue::Texture(crate::handle::CHandle::null())
 	}
 

@@ -21,8 +21,8 @@
 //! the pairing heuristic, and the static eval/shader helpers shared
 //! by `MathNode` (and conceptually other binary math nodes).
 
+use crate::jobs::ShaderJobPayload;
 use crate::node::NodeCore;
-use crate::nodes::jobs::ShaderJobPayload;
 use crate::value::{NodeValue, NodeValueRow, NodeValueTable, ValueType};
 
 /// Binary operation (C++ `MathNodeBase::Operation`).
@@ -980,11 +980,11 @@ impl ValueType {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::value::{NodeValueTable, SampleBuffer};
-	use oak_core::{Rational, SampleFormat};
+    use super::*;
+    use crate::value::{NodeValueTable, SampleBuffer};
+    use oak_core::{Rational, SampleFormat};
 
-	fn table(values: Vec<NodeValue>) -> NodeValueTable {
+    fn table(values: Vec<NodeValue>) -> NodeValueTable {
 		let mut t = NodeValueTable::default();
 		for v in values {
 			let ty = v.value_type();
@@ -1487,7 +1487,7 @@ mod tests {
 			_ => panic!("texture expected"),
 		};
 		let payload = unsafe {
-			crate::handle::get_checked::<crate::nodes::jobs::ShaderJobPayload>(&handle)
+			crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(&handle)
 		}
 		.expect("shader job payload boxed in the pushed texture");
 		assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.math");
@@ -1632,8 +1632,8 @@ mod tests {
 
 	#[test]
 	fn value_rational_arithmetic_all_ops() {
-		use oak_core::Rational;
-		for (op, a, b, expect) in [
+        use oak_core::Rational;
+        for (op, a, b, expect) in [
 			(
 				Operation::Add,
 				Rational::new(1, 2),

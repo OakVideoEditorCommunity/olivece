@@ -18,8 +18,8 @@
 //! `olive::ChromaKeyNode`, derived from `olive::OCIOBaseNode`).
 
 use crate::factory::NodeMeta;
+use crate::jobs::ShaderJobPayload;
 use crate::node::{Category, NodeBehavior, NodeCore};
-use crate::nodes::jobs::ShaderJobPayload;
 
 /// Key color input id (C++ `k_color_input`). Type: color; default
 /// `Color(0.0, 1.0, 0.0, 1.0)` (opaque green).
@@ -441,11 +441,11 @@ pub fn register(meta: &mut Vec<NodeMeta>) {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::value::{NodeValue, NodeValueTable, ValueType};
-	use oak_core::Rational;
+    use super::*;
+    use crate::value::{NodeValue, NodeValueTable, ValueType};
+    use oak_core::Rational;
 
-	#[test]
+    #[test]
 	fn input_names() {
 		let n = ChromaKeyNode;
 		assert_eq!(n.input_name(crate::nodes::ociobase::TEXTURE_INPUT), "Input");

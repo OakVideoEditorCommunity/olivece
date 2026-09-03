@@ -109,8 +109,8 @@ impl FootageBehavior {
 	/// prior `streams`/`valid` state is preserved on failure (no partial
 	/// state).
 	pub fn probe(&mut self) -> crate::error::Result<()> {
-		use crate::error::Error;
-		// Direct probe through the oakcodec decoder registry (single-lib
+        use crate::error::Error;
+        // Direct probe through the oakcodec decoder registry (single-lib
 		// unification; replaces the former `oakcodec_decoder_probe` C ABI
 		// call).
 		let desc = oak_codec::decoder::receive_list_of_all_decoders()
@@ -355,7 +355,7 @@ impl NodeBehavior for FootageBehavior {
 	}
 
 	/// Emit the decode request (C++ `Footage::ProcessFootageRequest`): a
-	/// boxed [`crate::nodes::jobs::FootageJobPayload`] the render hooks
+	/// boxed [`crate::jobs::FootageJobPayload`] the render hooks
 	/// resolve to the decoded frame. A footage with no probed video stream
 	/// (or no filename) outputs nothing.
 	fn value(
@@ -390,7 +390,7 @@ impl NodeBehavior for FootageBehavior {
 		} else {
 			(self.filename.clone(), stream.index)
 		};
-		let payload = crate::nodes::jobs::FootageJobPayload {
+		let payload = crate::jobs::FootageJobPayload {
 			filename,
 			stream_index,
 			time,
@@ -768,10 +768,10 @@ fn stream_duration_seconds(duration: i64, time_base: (i32, i32)) -> oak_core::Ra
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use oak_codec::footagedescription::{FootageDescription, StreamEntry};
+    use super::*;
+    use oak_codec::footagedescription::{FootageDescription, StreamEntry};
 
-	fn video_entry(stream_index: i32, duration: i64) -> StreamEntry {
+    fn video_entry(stream_index: i32, duration: i64) -> StreamEntry {
 		let mut vp = oak_core::videoparams::VideoParams::new_basic(
             1920,
             1080,
@@ -880,7 +880,7 @@ mod tests {
 		let NodeValue::Texture(handle) = table.get(ValueType::Texture).unwrap() else {
 			unreachable!()
 		};
-		let payload = unsafe { crate::handle::get_checked::<crate::nodes::jobs::FootageJobPayload>(handle) }
+		let payload = unsafe { crate::handle::get_checked::<crate::jobs::FootageJobPayload>(handle) }
 			.expect("footage output boxes a FootageJobPayload");
 		assert_eq!(payload.filename, "clip.mov");
 		assert_eq!(payload.stream_index, 1);

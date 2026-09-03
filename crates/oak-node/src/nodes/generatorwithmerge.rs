@@ -22,7 +22,7 @@
 //! base texture. Not instantiable, so this is a helper module, not a
 //! [`NodeBehavior`] implementation.
 
-use crate::nodes::jobs::ShaderJobPayload;
+use crate::jobs::ShaderJobPayload;
 use crate::value::NodeValue;
 
 /// Base texture input id (C++ `k_base_input`). Type: texture; flags:
@@ -162,13 +162,13 @@ impl GeneratorWithMerge {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::value::{NodeValue, NodeValueTable, ValueType};
-	use oak_core::Rational;
+    use super::*;
+    use crate::value::{NodeValue, NodeValueTable, ValueType};
+    use oak_core::Rational;
 
-	#[test]
+    #[test]
 	fn push_job_without_base_pushes_job_unchanged() {
-		let job = crate::handle::make_owned(crate::nodes::jobs::ShaderJobPayload {
+		let job = crate::handle::make_owned(crate::jobs::ShaderJobPayload {
 			type_id: "org.olivevideoeditor.Olive.solidgenerator".to_string(),
 			time: Rational::new(2, 1),
 			shader_id: "1".to_string(),
@@ -185,7 +185,7 @@ mod tests {
 			_ => panic!("texture expected"),
 		};
 		let payload = unsafe {
-			crate::handle::get_checked::<crate::nodes::jobs::ShaderJobPayload>(&handle)
+			crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(&handle)
 		}
 		.expect("job payload boxed");
 		assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.solidgenerator");
@@ -210,7 +210,7 @@ mod tests {
 
 	#[test]
 	fn push_job_with_base_boxes_merge_payload() {
-		let gen_job = crate::handle::make_owned(crate::nodes::jobs::ShaderJobPayload {
+		let gen_job = crate::handle::make_owned(crate::jobs::ShaderJobPayload {
 			type_id: "org.olivevideoeditor.Olive.solidgenerator".to_string(),
 			time: Rational::new(2, 1),
 			shader_id: "1".to_string(),
@@ -226,7 +226,7 @@ mod tests {
 			_ => panic!("texture expected"),
 		};
 		let merge = unsafe {
-			crate::handle::get_checked::<crate::nodes::jobs::ShaderJobPayload>(&handle)
+			crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(&handle)
 		}
 		.expect("merge job payload boxed");
 		assert_eq!(merge.shader_id, "mrg");
@@ -240,7 +240,7 @@ mod tests {
 			_ => panic!("texture expected"),
 		};
 		let blend_job = unsafe {
-			crate::handle::get_checked::<crate::nodes::jobs::ShaderJobPayload>(&blend)
+			crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(&blend)
 		}
 		.expect("blend job payload boxed");
 		assert_eq!(blend_job.type_id, "org.olivevideoeditor.Olive.solidgenerator");

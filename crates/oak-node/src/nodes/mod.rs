@@ -30,7 +30,6 @@ mod dropshadowfilter;
 mod flipdistortnode;
 mod generatorwithmerge;
 pub mod group;
-pub mod jobs;
 mod mask;
 mod math;
 mod mathbase;
@@ -70,7 +69,6 @@ mod volume;
 mod wavedistortnode;
 mod whitebalance;
 
-use crate::factory::NodeMeta;
 use crate::node::{NodeBehavior, NodeCore};
 
 /// A no-op behavior for vacant arena slots (graph internal; never

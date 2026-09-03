@@ -281,12 +281,12 @@ pub fn register(meta: &mut Vec<NodeMeta>) {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::node::NodeBehavior;
-	use crate::value::{NodeValue, NodeValueTable, ValueType};
-	use oak_core::Rational;
+    use super::*;
+    use crate::node::NodeBehavior;
+    use crate::value::{NodeValue, NodeValueTable, ValueType};
+    use oak_core::Rational;
 
-	fn row(values: &[(&str, NodeValue)]) -> crate::value::NodeValueRow {
+    fn row(values: &[(&str, NodeValue)]) -> crate::value::NodeValueRow {
 		values
 			.iter()
 			.map(|(k, v)| (k.to_string(), v.clone()))
@@ -417,7 +417,7 @@ mod tests {
 			_ => panic!("texture expected"),
 		};
 		let payload = unsafe {
-			crate::handle::get_checked::<crate::nodes::jobs::ShaderJobPayload>(&handle)
+			crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(&handle)
 		}
 		.expect("shader job payload boxed in the pushed texture");
 		assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.math");
@@ -453,7 +453,7 @@ mod tests {
 			_ => panic!("texture expected"),
 		};
 		let payload = unsafe {
-			crate::handle::get_checked::<crate::nodes::jobs::ShaderJobPayload>(&handle)
+			crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(&handle)
 		};
 		assert!(payload.is_none(), "no shader job for a null texture");
 	}

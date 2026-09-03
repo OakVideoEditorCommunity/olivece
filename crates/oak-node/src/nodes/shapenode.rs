@@ -20,8 +20,8 @@
 //! [`super::generatorwithmerge`]).
 
 use crate::factory::NodeMeta;
+use crate::jobs::ShaderJobPayload;
 use crate::node::{Category, NodeBehavior, NodeCore};
-use crate::nodes::jobs::ShaderJobPayload;
 
 /// Shape type input id (C++ `k_type_input`). Type: combo; prepended
 /// ahead of the base inputs; combo strings (matching the C++ `Type`
@@ -371,12 +371,12 @@ pub fn create() -> (NodeCore, Box<dyn NodeBehavior>) {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::node::NodeBehavior;
-	use crate::value::{NodeValue, NodeValueTable, ValueType};
-	use oak_core::Rational;
+    use super::*;
+    use crate::node::NodeBehavior;
+    use crate::value::{NodeValue, NodeValueTable, ValueType};
+    use oak_core::Rational;
 
-	#[test]
+    #[test]
 	fn input_names() {
 		let n = ShapeNode;
 		assert_eq!(n.input_name(TYPE_INPUT), "Type");

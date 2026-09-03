@@ -40,7 +40,7 @@ use oak_core::color::ColorProcessor;
 use oak_core::frame::VideoParamsPod;
 use oak_core::texture::{Frame, Texture};
 use oak_core::{PixelFormat, Rational, TimeRange};
-use oak_node::nodes::jobs::{FootageJobPayload, ShaderJobPayload};
+use oak_node::jobs::{FootageJobPayload, ShaderJobPayload};
 use oak_node::value::{NodeValue, NodeValueRow, NodeValueTable};
 
 /// Static mapping of OCIO-based node shaders to the OCIO function they
@@ -1058,7 +1058,7 @@ fn render_footage_frame_inner(
 /// the legacy sRGB working space or when the frame has no pixel data.
 fn convert_decoded_to_working(dst: &mut Frame, decoded: &oak_codec::frame::Frame) {
     use oak_core::colormath::{source_primaries_from_av, source_transfer_from_av,
-                                WorkingColorSpace,
+                              WorkingColorSpace,
     };
     if oak_core::color::pipeline_working_space() == WorkingColorSpace::SrgbLegacy {
         return;

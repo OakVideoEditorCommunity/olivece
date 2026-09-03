@@ -18,8 +18,8 @@
 //! `olive::MergeNode`): alpha-over composites two textures.
 
 use crate::factory::NodeMeta;
+use crate::jobs::ShaderJobPayload;
 use crate::node::{Category, NodeBehavior, NodeCore};
-use crate::nodes::jobs::ShaderJobPayload;
 
 /// Base (background) texture input id (C++ `k_base_in`). Type:
 /// texture; flags: not-keyframable.
@@ -217,12 +217,12 @@ pub fn create() -> (NodeCore, Box<dyn NodeBehavior>) {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::node::NodeBehavior;
-	use crate::value::{NodeValue, NodeValueTable, ValueType};
-	use oak_core::Rational;
+    use super::*;
+    use crate::node::NodeBehavior;
+    use crate::value::{NodeValue, NodeValueTable, ValueType};
+    use oak_core::Rational;
 
-	fn tex() -> NodeValue {
+    fn tex() -> NodeValue {
 		NodeValue::Texture(crate::handle::CHandle::null())
 	}
 

@@ -232,7 +232,7 @@ impl NodeBehavior for PolygonGenerator {
 				core.value_at_time(COLOR_INPUT, -1, time),
 			);
 		}
-		let job = crate::handle::make_owned(crate::nodes::jobs::ShaderJobPayload {
+		let job = crate::handle::make_owned(crate::jobs::ShaderJobPayload {
 			node_id: crate::id::NodeId::INVALID,
 			time,
 			iterations: 1,
@@ -382,12 +382,12 @@ pub fn create() -> (NodeCore, Box<dyn NodeBehavior>) {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-	use crate::node::NodeBehavior;
-	use crate::value::{NodeValue, NodeValueTable, ValueType};
-	use oak_core::Rational;
+    use super::*;
+    use crate::node::NodeBehavior;
+    use crate::value::{NodeValue, NodeValueTable, ValueType};
+    use oak_core::Rational;
 
-	#[test]
+    #[test]
 	fn input_names() {
 		let n = PolygonGenerator;
 		assert_eq!(
@@ -440,7 +440,7 @@ mod tests {
 			panic!("pushed value is not a texture handle");
 		};
 		let job = unsafe {
-			crate::handle::get_checked::<crate::nodes::jobs::ShaderJobPayload>(handle)
+			crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(handle)
 		}
 		.expect("real shader job");
 		assert_eq!(job.shader_id, "rgb");
