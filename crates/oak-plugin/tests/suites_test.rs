@@ -249,9 +249,8 @@ fn memory_suite_ledger() {
 /// image effect suite：describe 期 clipDefine/clipGetPropertySet 与
 /// 属性读写；实例期 clipGetHandle。
 ///
-/// clipGetImage/clipReleaseImage 配对依赖
-/// [`oak_plugin::clip::ClipInstance::fetch_image`]（bridge::render 帧
-/// 访问 C ABI 未冻结）——随最小测试插件落地补全（`// TODO(plugin)`）。
+/// clipGetImage/clipReleaseImage 配对经
+/// [`oak_plugin::clip::ClipInstance::fetch_image`] 与存活表记账验证。
 #[test]
 fn image_effect_clip_image_pairing() {
 	let mut desc = EffectDescriptor::new();
@@ -331,23 +330,57 @@ fn image_effect_clip_image_pairing() {
 		);
 	}
 
-	// clipGetImage/clipReleaseImage 配对：依赖 clip fetch_image
-	// （bridge::render 未冻结）——插件落地后补全。
-	if common::test_plugin_dir().is_none() {
-		common::skip("clipGetImage 配对随最小测试插件落地（M11 §2.4）");
-		return;
+	// clipGetImage/clipReleaseImage 配对：输入 clip 排入一帧后 get
+	// 取到登记在存活表的图像；release 摘除；二次 release → BadHandle
+	// （HS:2053-2068 的 releaseReference 配对）。
+	let mut frame = oak_render::eval::generate_frame(
+		oak_core::Rational::new(0, 1),
+		(2, 2),
+		oak_core::PixelFormat::F32,
+	)
+	.unwrap();
+	for (i, v) in [0.1f32, 0.2, 0.3, 1.0].iter().enumerate() {
+		frame.data[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
 	}
-	// TODO(plugin)：插件驱动 clipGetImage → clipReleaseImage 配对 +
-	// 不配对时的销毁记账断言。
+	inst.clips[0].set_input_texture(
+		Some(oak_core::texture::Texture::wrap_frame(frame)),
+		0.0,
+	);
+	// 注意另取句柄：上面未找到路径的 clip_get_handle 把 clip_h 置空了。
+	let mut img_clip: *mut c_void = std::ptr::null_mut();
+	unsafe {
+		assert_eq!(
+			(s.clip_get_handle)(ih, name.as_ptr(), &mut img_clip, std::ptr::null_mut()),
+			OK
+		);
+	}
+	let mut img: *mut c_void = std::ptr::null_mut();
+	unsafe {
+		assert_eq!(
+			(s.clip_get_image)(img_clip, 0.0, std::ptr::null(), &mut img),
+			OK,
+			"clipGetImage 抓取排入的输入帧"
+		);
+	}
+	assert!(!img.is_null());
+	assert_eq!(tag::kind(img), tag::IMAGE);
+	unsafe {
+		assert_eq!((s.clip_release_image)(img), OK);
+		assert_eq!(
+			(s.clip_release_image)(img),
+			BAD_HANDLE,
+			"二次 release 必须 BadHandle（存活表已摘除）"
+		);
+	}
 }
 
 /// param suite：describe 期 define→getHandle→getValue（默认值）；
 /// 实例期 int/double/bool/choice/string/RGBA/2D/3D 的
 /// setValue/getValue round-trip；AtTime == 当前值。
 ///
-/// 声明原含"paramSetValue 触发 instanceChanged"：通知走
-/// [`oak_plugin::param::notify_instance_changed`]（bridge 期实现）——
-/// 随插件+桥落地补全（`// TODO(bridge)`）。
+/// 声明含"paramSetValue 触发 instanceChanged"：通知走
+/// [`oak_plugin::param::notify_instance_changed`]，插件自改经 undo
+/// 命令写回绑定节点的输入。
 #[test]
 fn param_suite_roundtrip_and_change_action() {
 	// describe 期。
@@ -454,8 +487,9 @@ fn param_suite_roundtrip_and_change_action() {
 		assert_eq!(iv2, 9);
 	}
 
-	// TODO(bridge)：paramSetValue → instanceChanged 断言随
-	// notify_instance_changed（bridge 期）落地。
+	// paramSetValue → instanceChanged 回写（经 PARAM_OWNER 登记表，
+	// pub(crate)）由 crate 内测试
+	// `suites::param::tests::set_value_writes_back_to_bound_node` 覆盖。
 }
 
 /// paramGetValueAtTime/paramSetValueAtTime 与关键帧族

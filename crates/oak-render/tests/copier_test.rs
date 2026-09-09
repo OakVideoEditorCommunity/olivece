@@ -129,10 +129,12 @@ fn cancel_video_tasks_semantics() {
 	d.shutdown();
 }
 
-/// Change-record marshalling: every ChangeRecord kind survives the
-/// C struct round-trip (layout pinned by the C ABI header).
+/// Change-record layout: the C ABI header pins the struct to a 4-byte
+/// kind + 48-byte opaque payload (52 bytes total). The kind constants
+/// stay distinct so the wire tags never collide.
 #[test]
-fn change_record_marshalling() {
+fn change_record_layout_is_abi_pinned() {
+	assert_eq!(std::mem::size_of::<oak_render::copier::ChangeRecord>(), 52);
 	let kinds = [
 		oak_render::copier::change_kind::NODE_ADD,
 		oak_render::copier::change_kind::NODE_REMOVE,
@@ -143,17 +145,10 @@ fn change_record_marshalling() {
 		oak_render::copier::change_kind::PROJECT_SETTING_CHANGE,
 		oak_render::copier::change_kind::FOOTAGE_PROXY,
 	];
-	for kind in kinds {
-		let record = oak_render::copier::ChangeRecord {
-			kind,
-			payload: [0xAA; 48],
-		};
-		assert_eq!(record.kind, kind);
-		assert_eq!(record.payload.len(), 48);
-		assert_eq!(
-			std::mem::size_of::<oak_render::copier::ChangeRecord>(),
-			52
-		);
+	for (i, a) in kinds.iter().enumerate() {
+		for b in &kinds[i + 1..] {
+			assert_ne!(a, b, "change-kind tags must be distinct");
+		}
 	}
 }
 

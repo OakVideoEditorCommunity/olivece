@@ -19,13 +19,13 @@
 //! 快照在 0 期由**现行 C++ 实现**抓取入库（tests/ofx/snapshots/ 与
 //! tests/ofx/frames/）；本文件的测试断言 Rust 实现与之逐字段/逐像素
 //! 一致。**0 期基建尚未落地**（tests/ofx/ 目录为空）——依赖快照/
-//! 帧/GL 的用例一律 `#[ignore]`，落地后摘掉并补全断言（见
+//! 帧库的用例一律 `#[ignore]`，落地后摘掉并补全断言（见
 //! [`descriptor_snapshots_match`] 的说明）。无真实 bundle 的环境
 //! （CI）整文件 skip。
 //!
-//! [`cimg_full_describe_smoke`] 不依赖快照：真实 CImg bundle 存在时
-//! 全量 describe + 协商冒烟（健壮性，不比对），是本次唯一实际执行
-//! 的用例。
+//! 本文件当前没有实际执行的用例：渲染/GL/色彩链路本身已实现并经
+//! `gl_render_test.rs`/`colour_test.rs` 覆盖，这里缺的只是 golden
+//! 参照物。
 
 mod common;
 
@@ -82,11 +82,11 @@ fn cimg_full_describe_smoke() {
 ///
 /// # ignore 原因
 ///
-/// `tests/ofx/frames/`（C++ 实现抓取的 EXR + SHA256 库）尚未生成；
-/// 且 CPU 渲染链路依赖 renderer 桥（cargo 内无 liboakrender 真实现，
-/// 只有测试桩）。快照与真桥都落地后实现并摘除。
+/// `tests/ofx/frames/`（C++ 实现抓取的 EXR + SHA256 参照库）尚未生成
+/// ——渲染链路本身已是真实现（render_driver + oak-render eval），
+/// 缺的只是 golden 参照物。参照库落地后实现并摘除。
 #[test]
-#[ignore = "M11 0 期渲染 golden（tests/ofx/frames/）+ 真 liboakrender 缺失；落地后实现并摘除"]
+#[ignore = "M11 0 期渲染 golden 参照库（tests/ofx/frames/）尚未生成；落地后实现并摘除"]
 fn render_golden_cpu_bitexact() {
 	todo!("0 期渲染 golden 落地后实现")
 }
@@ -95,9 +95,11 @@ fn render_golden_cpu_bitexact() {
 ///
 /// # ignore 原因
 ///
-/// GL 路径属 M11 第 2 期（OpenGLRender suite 未实现），帧库亦未生成。
+/// GL 渲染路径已实现（suites/gl_render.rs，macOS CGL + CPU 回退），
+/// 缺的只是 golden 帧库（tests/ofx/frames/ 未生成）。帧库落地后实现
+/// 并摘除。
 #[test]
-#[ignore = "GL 路径属 M11 第 2 期，且帧库未生成；2 期后实现并摘除"]
+#[ignore = "golden 帧库（tests/ofx/frames/）未生成；落地后实现并摘除"]
 fn render_golden_gl_tolerant() {
 	todo!("M11 第 2 期 GL 路径落地后实现")
 }
@@ -108,10 +110,10 @@ fn render_golden_gl_tolerant() {
 ///
 /// # ignore 原因
 ///
-/// 同 [`render_golden_cpu_bitexact`]：依赖帧库与 OCIO 链路
-/// （ofxColour 属 M11 第 2 期）。
+/// 同 [`render_golden_cpu_bitexact`]：只缺 golden 参照帧库——F32
+/// 管线和 OCIO/ofxColour 链路均已实现（colour_test.rs 覆盖）。
 #[test]
-#[ignore = "M11 0 期帧库 + 第 2 期 ofxColour/OCIO 链路缺失；落地后实现并摘除"]
+#[ignore = "golden 帧库（tests/ofx/frames/）未生成；落地后实现并摘除"]
 fn pipeline_is_f32_acescg() {
 	todo!("帧库与 OCIO 链路落地后实现")
 }

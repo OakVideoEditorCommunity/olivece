@@ -87,13 +87,27 @@ fn marker_set_time_point_preserves_name_color() {
 	assert_eq!(m.time().out(), Rational::new(40, 1));
 }
 
-/// `has_sibling_at_time` is a De-Qt simplification that always reports
-/// `false`; sibling queries go through the list instead.
+/// Sibling detection goes through the owning list: two markers sharing
+/// an in point are both found by `get_marker_at_time` (the per-marker
+/// `has_sibling_at_time` is a documented De-Qt simplification with no
+/// parent pointer).
 #[test]
 fn marker_sibling_detection() {
-	let m = TimelineMarker::new();
-	assert!(!m.has_sibling_at_time(Rational::new(0, 1)));
-	assert!(!m.has_sibling_at_time(Rational::new(42, 1)));
+	let mut list = TimelineMarkerList::new();
+	let mut a = TimelineMarker::new();
+	a.set_time_point(Rational::new(42, 1));
+	a.set_name("a");
+	let mut b = TimelineMarker::new();
+	b.set_time_point(Rational::new(42, 1));
+	b.set_name("b");
+	let mut other = TimelineMarker::new();
+	other.set_time_point(Rational::new(7, 1));
+	list.add_marker(a);
+	list.add_marker(b);
+	list.add_marker(other);
+	assert_eq!(list.get_marker_at_time(Rational::new(42, 1)).map(|m| m.name()), Some("a"));
+	assert!(list.get_marker_at_time(Rational::new(7, 1)).is_some());
+	assert!(list.get_marker_at_time(Rational::new(8, 1)).is_none());
 }
 
 /// The list starts empty and grows with each `add_marker`, preserving
@@ -489,24 +503,3 @@ fn marker_commands_box_to_undo_command() {
 	assert_eq!(list_of(&list_h).size(), 1);
 }
 
-/// Loading a marker with a `color`/`in`/`out` attribute equal to the
-/// sentinel matches how `EditToInfo` consumers treat defaults.
-#[test]
-fn marker_defaults_map_to_edit_to_info() {
-	// A default marker carries the null time and default color (0).
-	let m = TimelineMarker::new();
-	assert_eq!(m.color(), 0);
-	assert_eq!(m.time().in_(), Rational::new(0, 1));
-
-	// `EditToInfo` defaults mirror those sentinels: null node references
-	// (`None`, the single-lib replacement for the null `CHandle`) and the
-	// null rational for `nearest_time`.
-	let info = EditToInfo {
-		track: None,
-		nearest_time: m.time().in_(),
-		nearest_block: None,
-	};
-	assert!(info.track.is_none());
-	assert!(info.nearest_block.is_none());
-	assert_eq!(info.nearest_time, Rational::new(0, 1));
-}

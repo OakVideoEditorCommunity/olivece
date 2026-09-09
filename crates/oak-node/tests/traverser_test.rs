@@ -319,6 +319,7 @@ fn connected_input_uses_adjusted_time() {
 		}
 		fn input_time_adjustment(
 			&self,
+			_core: &NodeCore,
 			input: &str,
 			_element: i32,
 			time: TimeRange,
@@ -351,5 +352,49 @@ fn connected_input_uses_adjusted_time() {
 		table.get(ValueType::Rational),
 		Some(&NodeValue::Rational(Rational::new(6, 1))),
 		"the upstream was evaluated at the doubled time"
+	);
+}
+
+/// The real TimeOffsetNode (not a test double) remaps its upstream's
+/// evaluation time through the trait: the keyframable offset lives on
+/// the node core, which the trait method now receives. Evaluating the
+/// offset at t=10 with `time_in` = 5 pulls the upstream at t=15 (C++
+/// `get_remapped_time`: `input + time_in`).
+#[test]
+fn time_offset_node_shifts_upstream_evaluation_time() {
+	struct TimeEcho;
+	impl NodeBehavior for TimeEcho {
+		fn name(&self) -> &str {
+			"TimeEcho"
+		}
+		fn type_id(&self) -> &str {
+			"test.timeecho"
+		}
+		fn duplicate(&self, _c: &NodeCore) -> Option<Box<dyn NodeBehavior>> {
+			Some(Box::new(TimeEcho))
+		}
+		fn value(&self, _c: &NodeCore, _i: &NodeValueRow, t: Rational, table: &mut NodeValueTable) {
+			table.push(ValueType::Rational, NodeValue::Rational(t), None);
+		}
+	}
+
+	let mut g = Graph::new();
+	let src = node_with_input(&mut g, Box::new(TimeEcho));
+	let (mut core, behavior) = oak_node::factory::Factory::global()
+		.create_any("org.olivevideoeditor.Olive.timeoffset")
+		.expect("timeoffset registered");
+	core.set_standard_value("time_in", -1, NodeValue::Rational(Rational::new(5, 1)));
+	let offset = g.add_node(core, behavior);
+	g.connect(src, offset, "input_in", -1).unwrap();
+
+	let mut t = Traverser::new();
+	let mut hooks = Noop;
+	let table = t
+		.evaluate(&g, &EvalRequest::new(offset, Rational::new(10, 1)), &mut hooks)
+		.unwrap();
+	assert_eq!(
+		table.get(ValueType::Rational),
+		Some(&NodeValue::Rational(Rational::new(15, 1))),
+		"the upstream must be evaluated at the offset time (10 + 5)"
 	);
 }

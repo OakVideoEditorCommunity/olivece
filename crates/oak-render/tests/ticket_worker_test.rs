@@ -243,9 +243,12 @@ fn snapshot_store_refcount() {
 	);
 }
 
-/// TimeRange sanity (used above).
+/// The arena hands back the time a submitted ticket carries (the
+/// metadata the playback clock queries while the job runs).
 #[test]
-fn range_sanity() {
-	let r = TimeRange::new(Rational::new(0, 1), Rational::new(10, 1));
-	assert_eq!(r.length(), Rational::new(10, 1));
+fn arena_time_roundtrips_submitted_ticket() {
+	let (arena, d) = test_arena(ok_producer());
+	let id = arena.submit_video(params(Rational::new(7, 1)), Box::new(|_| {}));
+	assert_eq!(arena.time(id), Some(Rational::new(7, 1)));
+	d.shutdown();
 }

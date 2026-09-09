@@ -248,10 +248,9 @@ fn add_entry_reclaims_the_free_slot() {
 	let fresh = g.add_node(core, Box::new(TestNode { id: "fresh" }));
 	assert_ne!(fresh, victim, "the fresh node takes a different slot");
 	assert!(g.is_valid(victim), "the restored node survives add_node");
-	assert_eq!(
-		g.get(victim).map(|e| e.core.label.as_str()),
-		g.get(victim).map(|e| e.core.label.as_str()),
-	);
+	// The fresh node must not clobber the restored node's slot: the
+	// victim keeps its original (default empty) label.
+	assert_eq!(g.get(victim).map(|e| e.core.label.as_str()), Some(""));
 	assert_eq!(g.node_count(), count_before + 1);
 }
 

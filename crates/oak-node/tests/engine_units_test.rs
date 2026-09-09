@@ -688,8 +688,8 @@ fn node_behavior_defaults() {
 	assert!(b.value_hint_for_input("in").is_none());
 	assert_eq!(b.connected_render_output(&core, "in", -1), None);
 	let tr = TimeRange::new(Rational::new(0, 1), Rational::new(5, 1));
-	assert_eq!(b.input_time_adjustment("in", -1, tr, true), tr);
-	assert_eq!(b.output_time_adjustment("in", -1, tr, false), tr);
+	assert_eq!(b.input_time_adjustment(&core, "in", -1, tr, true), tr);
+	assert_eq!(b.output_time_adjustment(&core, "in", -1, tr, false), tr);
 
 	// value / process_samples / generate_frame no-ops.
 	let mut table = NodeValueTable::default();

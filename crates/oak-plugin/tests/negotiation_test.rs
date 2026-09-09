@@ -204,10 +204,15 @@ fn sequence_render_brackets() {
 			max: 200.0,
 		};
 		assert!(inst.value.begin_sequence_render(range).is_ok());
+		// begin 后实例记录该序列范围（timeline 上下文的 getTimeBounds
+		// 读它）。
+		let stored = *inst.value.sequence_range.lock().unwrap();
+		let stored = stored.expect("begin_sequence_render 必须登记范围");
+		assert_eq!((stored.min, stored.max), (10.0, 200.0));
 		assert!(inst.value.end_sequence_render(range).is_ok());
+		// end 后清除。
+		assert!(inst.value.sequence_range.lock().unwrap().is_none());
 
-		// begin → timeline 上下文带范围（经 render 设置；单测直达
-		// RenderCtx 的接线见 suites::timeline 测试）。
 		Host::global().shutdown();
 	});
 }
