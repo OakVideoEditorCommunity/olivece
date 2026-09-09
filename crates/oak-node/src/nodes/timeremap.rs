@@ -56,9 +56,9 @@ impl TimeRemapNode {
 	/// original time); all other inputs fall through to the base-class
 	/// identity behavior.
 	///
-	/// The [`NodeBehavior::input_time_adjustment`] trait method carries no
-	/// `NodeCore`, so this value-resolving variant is what render-time call
-	/// sites (and the tests) use; the trait method documents that gap.
+	/// The [`NodeBehavior::input_time_adjustment`] trait method receives the
+	/// core and delegates here; kept as an associated fn so the tests can
+	/// drive the mapping without a behavior instance.
 	pub fn input_time_adjustment_with(
 		core: &NodeCore,
 		input: &str,
@@ -115,23 +115,18 @@ impl NodeBehavior for TimeRemapNode {
 	/// `input_in`, both ends of the range are replaced by the `time_in`
 	/// value at that time (C++ `get_remapped_time()`: `time_in` evaluated at
 	/// `input`, discarding the original time); all other inputs fall through
-	/// to the base-class identity behavior.
-	///
-	/// The C++ evaluation reads the keyframable `time_in` input, which
-	/// requires the node's data ([`NodeCore`]) — not carried by this trait
-	/// signature. The exact remap is ported in
-	/// [`Self::input_time_adjustment_with`] (and tested there); until the
-	/// adjustment API gains core access, the identity range is returned
+	/// to the base-class identity behavior. `core` carries the node's data
+	/// (the keyframable `time_in` input), matching the C++ member read
 	/// (`// CPP-PARITY: timeremap.cpp` `input_time_adjustment`).
 	fn input_time_adjustment(
 		&self,
+		core: &NodeCore,
 		input: &str,
 		element: i32,
 		time: TimeRange,
 		traverse: bool,
 	) -> TimeRange {
-		let _ = (input, element, traverse);
-		time
+		Self::input_time_adjustment_with(core, input, element, time, traverse)
 	}
 
 	/// Output-side time remap (C++ `output_time_adjustment()`): the C++
@@ -140,12 +135,13 @@ impl NodeBehavior for TimeRemapNode {
 	/// base-class identity behavior; declared here for parity.
 	fn output_time_adjustment(
 		&self,
+		core: &NodeCore,
 		input: &str,
 		element: i32,
 		time: TimeRange,
 		traverse: bool,
 	) -> TimeRange {
-		let _ = (input, element, traverse);
+		let _ = (core, input, element, traverse);
 		time
 	}
 
@@ -328,8 +324,14 @@ mod tests {
 	fn output_time_adjustment_is_identity() {
 		let n = TimeRemapNode;
 		let t = TimeRange::new(Rational::new(10, 1), Rational::new(20, 1));
-		assert_eq!(n.output_time_adjustment(INPUT_INPUT, -1, t, true), t);
-		assert_eq!(n.output_time_adjustment("other_in", -1, t, true), t);
+		assert_eq!(
+			n.output_time_adjustment(&NodeCore::new(), INPUT_INPUT, -1, t, true),
+			t
+		);
+		assert_eq!(
+			n.output_time_adjustment(&NodeCore::new(), "other_in", -1, t, true),
+			t
+		);
 	}
 
 	#[test]

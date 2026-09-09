@@ -673,13 +673,25 @@ mod tests {
 	}
 
 	#[test]
-	fn value_gaussian_pushes_deferred_job() {
-		let (mut core, behavior) = create();
-		core.set_standard_value(RADIUS_INPUT, -1, NodeValue::Float(10.0));
-		let inputs = crate::value::NodeValueRow::from([(TEXTURE_INPUT.to_string(), tex())]);
+	fn value_gaussian_pushes_shader_job() {
+		let (core, behavior) = create();
+		let inputs = crate::value::NodeValueRow::from([
+			(TEXTURE_INPUT.to_string(), tex()),
+			(RADIUS_INPUT.to_string(), NodeValue::Float(10.0)),
+		]);
 		let mut table = NodeValueTable::default();
 		behavior.value(&core, &inputs, Rational::new(0, 1), &mut table);
-		assert!(table.get(ValueType::Texture).is_some());
+		let Some(NodeValue::Texture(h)) = table.get(ValueType::Texture) else {
+			panic!("texture expected");
+		};
+		let payload = unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(h) }
+			.expect("shader job pushed");
+		assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.blur");
+		assert_eq!(
+			payload.params.get(RADIUS_INPUT),
+			Some(&NodeValue::Float(10.0)),
+			"the blur radius rides in the job params"
+		);
 	}
 
 	#[test]

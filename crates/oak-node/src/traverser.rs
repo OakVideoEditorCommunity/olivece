@@ -221,7 +221,7 @@ fn adjusted_time(
 ) -> Rational {
 	entry
 		.behavior
-		.input_time_adjustment(input, element, TimeRange::new(time, time), true)
+		.input_time_adjustment(&entry.core, input, element, TimeRange::new(time, time), true)
 		.in_()
 }
 

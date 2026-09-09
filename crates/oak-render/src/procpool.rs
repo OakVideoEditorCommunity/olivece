@@ -2691,8 +2691,26 @@ mod tests {
 
 	#[test]
 	fn copy_counter_counts_only_slot_to_vec() {
+		// The zero-copy contract: only `slot_to_vec` bumps the counter —
+		// `slot_bytes` (the borrowed view the preview path uses) must not.
 		reset_main_heap_frame_copies();
-		assert_eq!(main_heap_frame_copies(), 0);
+		let key = format!("oak-procpool-copycounter-{}", std::process::id());
+		let view = ShmRegionView::create(&key, 2, 64).expect("shm segment");
+		let _borrowed = view.slot_bytes(0);
+		assert_eq!(
+			main_heap_frame_copies(),
+			0,
+			"borrowed slot reads stay zero-copy"
+		);
+		let _copied = view.slot_to_vec(0);
+		assert_eq!(
+			main_heap_frame_copies(),
+			1,
+			"slot_to_vec is the one counted copy"
+		);
+		drop(view);
+		SharedMemoryRegion::unlink_key(&key);
+		reset_main_heap_frame_copies();
 	}
 
 	/// A worker's `plugin_progress` NDJSON line is forwarded to the

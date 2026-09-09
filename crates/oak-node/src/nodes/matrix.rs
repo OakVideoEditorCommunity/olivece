@@ -258,6 +258,35 @@ fn matrix_rotate_z(m: [f64; 16], degrees: f64) -> [f64; 16] {
 	matrix_mul(m, r)
 }
 
+/// Invert a 2D affine transform (C++ `Matrix4x4::inverted` on the 2D
+/// path). The matrices this crate generates are affine —
+/// `[a b 0 tx; c d 0 ty; 0 0 sz 0; 0 0 0 1]` in the row-major
+/// `m[r*4+c]` layout — so the inverse is analytic. `None` when the
+/// affine part is singular (a zero scale collapses the plane; the C++
+/// callers fall back to identity there).
+pub fn matrix_invert_2d(m: [f64; 16]) -> Option<[f64; 16]> {
+	let (a, b, tx) = (m[0], m[1], m[3]);
+	let (c, d, ty) = (m[4], m[5], m[7]);
+	let det = a * d - b * c;
+	if det.abs() < 1e-12 {
+		return None;
+	}
+	let inv = 1.0 / det;
+	let (ia, ib, ic, id) = (d * inv, -b * inv, -c * inv, a * inv);
+	let mut out = super::mathbase::identity_matrix();
+	out[0] = ia;
+	out[1] = ib;
+	out[3] = -(ia * tx + ib * ty);
+	out[4] = ic;
+	out[5] = id;
+	out[7] = -(ic * tx + id * ty);
+	let sz = m[10];
+	if sz.abs() > 1e-12 {
+		out[10] = 1.0 / sz;
+	}
+	Some(out)
+}
+
 /// Resolve a vec2 input from the render row or the keyframed/standard
 /// value (C++ `value.at(id).to_vec2()`; missing values read as
 /// `(0, 0)`).

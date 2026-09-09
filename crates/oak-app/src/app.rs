@@ -3668,31 +3668,50 @@ struct AppArgs {
 }
 
 impl AppArgs {
-	/// Parses `std::env::args` plus the `OAK_ENGINE` override:
-	/// `oakapp [project.ove] [--mock]`.
-	fn from_env() -> Self {
+	/// The pure parse step: `oakapp [project.ove] [--mock]`. The first
+	/// positional wins; later positionals are ignored. `oak_engine` is
+	/// the `OAK_ENGINE` override ("mock", case-insensitive). `--help` is
+	/// skipped here — `from_env` handles it (print + exit).
+	fn parse_args(
+		argv: impl IntoIterator<Item = std::ffi::OsString>,
+		oak_engine: Option<&str>,
+	) -> Self {
 		let mut args = AppArgs::default();
-		for arg in std::env::args_os().skip(1) {
+		for arg in argv {
 			let text = arg.to_string_lossy();
 			match text.as_ref() {
 				"--mock" => args.mock = true,
-				"--help" | "-h" => {
-					println!("oakapp — Oak Video Editor");
-					println!("usage: oakapp [project.ove] [--mock]");
-					println!("  --mock   use the mock engine (or set OAK_ENGINE=mock)");
-					std::process::exit(0);
-				}
+				"--help" | "-h" => {}
 				_ if args.project.is_none() => args.project = Some(arg.into()),
 				other => println!("[app] ignoring unknown argument {other:?}"),
 			}
 		}
-		if std::env::var("OAK_ENGINE")
+		if oak_engine
 			.map(|v| v.eq_ignore_ascii_case("mock"))
 			.unwrap_or(false)
 		{
 			args.mock = true;
 		}
 		args
+	}
+
+	/// Parses `std::env::args` plus the `OAK_ENGINE` override:
+	/// `oakapp [project.ove] [--mock]`.
+	fn from_env() -> Self {
+		// --help prints and exits before the pure parse.
+		if std::env::args_os()
+			.skip(1)
+			.any(|a| a == "--help" || a == "-h")
+		{
+			println!("oakapp — Oak Video Editor");
+			println!("usage: oakapp [project.ove] [--mock]");
+			println!("  --mock   use the mock engine (or set OAK_ENGINE=mock)");
+			std::process::exit(0);
+		}
+		Self::parse_args(
+			std::env::args_os().skip(1),
+			std::env::var("OAK_ENGINE").ok().as_deref(),
+		)
 	}
 }
 
@@ -5434,20 +5453,10 @@ mod tests {
 	/// flag, and the `OAK_ENGINE` env var forces the mock.
 	#[test]
 	fn app_args_parse_path_and_mock_flag() {
-		// Simulate argv without touching the real environment: parse a slice
-		// directly.
-		let parse = |argv: &[&str], env: Option<&str>| -> AppArgs {
-			let mut args = AppArgs::default();
-			for text in argv {
-				match *text {
-					"--mock" => args.mock = true,
-					other => args.project = Some(PathBuf::from(other)),
-				}
-			}
-			if env.map(|v| v.eq_ignore_ascii_case("mock")).unwrap_or(false) {
-				args.mock = true;
-			}
-			args
+		// Drive the real parser with synthetic argv (the env override is
+		// a parameter, no process-global env is touched).
+		let parse = |argv: &[&str], env: Option<&str>| {
+			AppArgs::parse_args(argv.iter().map(std::ffi::OsString::from), env)
 		};
 		let a = parse(&["/tmp/a.ove"], None);
 		assert_eq!(a.project, Some(PathBuf::from("/tmp/a.ove")));
@@ -5462,6 +5471,10 @@ mod tests {
 		let d = parse(&[], None);
 		assert!(d.project.is_none());
 		assert!(!d.mock);
+
+		// The first positional wins; later positionals are ignored.
+		let e = parse(&["/tmp/a.ove", "/tmp/b.ove"], None);
+		assert_eq!(e.project, Some(PathBuf::from("/tmp/a.ove")));
 	}
 
 	// -------------------------------------------------------------------

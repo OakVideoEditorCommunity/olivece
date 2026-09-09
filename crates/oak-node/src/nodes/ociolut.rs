@@ -56,8 +56,8 @@ struct ProcessorState {
 	/// `last_direction_`, starts `-1`).
 	last_direction: i64,
 	/// Cached processor for change detection (C++ `last_processor_`);
-	/// released with the node.
-	last_processor: Option<crate::handle::CHandle>,
+	/// shared with the base's active processor slot.
+	last_processor: Option<std::sync::Arc<oak_core::color::ColorProcessor>>,
 	/// Human-readable reason no LUT processor is active (C++
 	/// `last_error_`); empty when a valid processor is in use or no LUT
 	/// file has been selected yet.
@@ -76,10 +76,6 @@ impl Default for ProcessorState {
 		}
 	}
 }
-
-// The cached processor handle wraps a refcounted C object that is only
-// dereferenced from the render path; see `OcioBase` for the rationale.
-unsafe impl Send for ProcessorState {}
 
 /// OCIO LUT node. Applies a LUT file through OpenColorIO.
 pub struct OCIOLutNode {
@@ -175,7 +171,7 @@ impl OCIOLutNode {
 		{
 			let state = self.state.lock().unwrap();
 			if !state.dirty
-				&& state.last_processor.as_ref().is_some_and(|p| !p.is_null())
+				&& state.last_processor.is_some()
 				&& Self::file_path(core) == state.last_path
 				&& Self::read_direction_input(core) == state.last_direction
 			{
@@ -186,34 +182,63 @@ impl OCIOLutNode {
 	}
 
 	/// Rebuild the processor from the LUT path and direction (C++
-	/// `create_processor_from_inputs()`): no manager, empty path,
-	/// non-regular file, or unsupported extension -> clear both
-	/// processors, reset the cache markers, record the error, and return
-	/// false; unchanged path+direction with a live cached processor ->
-	/// clear the dirty flag and return false (reuse); otherwise create
-	/// the LUT processor via `oakrender_color_processor_create_lut`
-	/// (direction 0 = forward), update the cache markers and both
-	/// processor slots, and return true.
+	/// `create_processor_from_inputs()`): empty path, non-regular file,
+	/// or a failed OCIO FileTransform -> clear both processor slots,
+	/// reset the cache markers, record the error, and return false;
+	/// otherwise create the LUT processor via
+	/// [`oak_core::color::ColorProcessor::create_lut`] on the process-wide
+	/// default config (direction 0 = forward), update the cache markers
+	/// and both processor slots, and return true. A missing default
+	/// config yields `None` from `create_lut`, landing in the error
+	/// branch (the node then passes its input through unchanged).
+	/// `// CPP-PARITY: ociolut.cpp` `create_processor_from_inputs()`.
 	fn create_processor_from_inputs(&self, core: &NodeCore) -> bool {
-		let _ = core;
-		let mut state = self.state.lock().unwrap();
+		let path = Self::file_path(core);
+		let direction = Self::read_direction_input(core);
 
-		// C++ branch 1: no color manager. The Rust model reaches the
-		// manager through the oakrender bridge (absent here), so this
-		// branch is always taken: reset the cache markers and report
-		// false. The C++ additionally clears the standard processor and
-		// frees `last_processor_` — the Rust base processor is only
-		// reachable through `&mut self` and can never hold a processor
-		// without the render bridge, so those clears are no-ops here.
-		// The empty-path/non-regular-file/unsupported-extension error
-		// branches are unreachable without a manager and are not
-		// representable. `// CPP-PARITY: ociolut.cpp`
-		// create_processor_from_inputs.
-		state.last_processor = None;
-		state.last_path.clear();
-		state.last_direction = -1;
-		state.dirty = false;
-		false
+		// Reset both processor slots and the cache markers, recording
+		// `error` (empty = no error: no LUT selected yet).
+		let clear = |node: &Self, error: String| {
+			let mut state = node.state.lock().unwrap();
+			state.last_processor = None;
+			state.last_path.clear();
+			state.last_direction = -1;
+			state.dirty = false;
+			state.last_error = error;
+			node.base.set_processor(None);
+			false
+		};
+
+		if path.is_empty() {
+			return clear(self, String::new());
+		}
+		if !std::path::Path::new(&path).is_file() {
+			return clear(self, format!("LUT file not found: {path}"));
+		}
+		let dir = if direction == 1 {
+			oak_core::color::Direction::Inverse
+		} else {
+			oak_core::color::Direction::Normal
+		};
+		match oak_core::color::ColorProcessor::create_lut(&path, dir) {
+			Some(processor) => {
+				let processor = std::sync::Arc::new(processor);
+				{
+					let mut state = self.state.lock().unwrap();
+					state.last_processor = Some(processor.clone());
+					state.last_path = path;
+					state.last_direction = direction;
+					state.dirty = false;
+					state.last_error.clear();
+				}
+				self.base.set_processor(Some(processor));
+				true
+			}
+			None => clear(
+				self,
+				format!("Failed to create a LUT processor from {path}"),
+			),
+		}
 	}
 
 	/// OCIO config change hook (C++ `config_changed()` override):
@@ -506,7 +531,7 @@ mod tests {
 	}
 
 	#[test]
-	fn create_processor_from_inputs_resets_markers_without_manager() {
+	fn create_processor_from_inputs_resets_markers_without_lut() {
 		let n = node();
 		let core = NodeCore::new();
 		{
@@ -514,9 +539,13 @@ mod tests {
 			state.dirty = true;
 			state.last_path = "/tmp/foo.cube".to_string();
 			state.last_direction = 1;
-			state.last_processor = Some(crate::handle::CHandle::null());
+			state.last_processor = Some(std::sync::Arc::new(
+				oak_core::color::ColorProcessor::pass_through(),
+			));
 			state.last_error = "stale error".to_string();
 		}
+		// No FILE_INPUT on the core -> empty path branch: markers reset
+		// and the stale error clears (no LUT selected is not an error).
 		let created = n.create_processor_from_inputs(&core);
 		assert!(!created);
 		let state = n.state.lock().unwrap();
@@ -524,8 +553,7 @@ mod tests {
 		assert_eq!(state.last_path, "");
 		assert_eq!(state.last_direction, -1);
 		assert!(state.last_processor.is_none());
-		// The no-manager branch does not touch the recorded error (C++).
-		assert_eq!(state.last_error, "stale error");
+		assert_eq!(state.last_error, "");
 	}
 
 	#[test]
@@ -600,7 +628,9 @@ mod tests {
 			state.dirty = false;
 			state.last_path = "/tmp/x.cube".to_string();
 			state.last_direction = 1;
-			state.last_processor = Some(crate::handle::make_owned::<u8>(1));
+			state.last_processor = Some(std::sync::Arc::new(
+				oak_core::color::ColorProcessor::pass_through(),
+			));
 		}
 		// Unchanged path+direction with a live processor: early return,
 		// markers are preserved (create_processor_from_inputs would have
@@ -660,17 +690,45 @@ mod tests {
 	}
 
 	#[test]
-	fn value_pushes_deferred_job_with_processor() {
-		let core = NodeCore::new();
-		let mut n = node();
-		n.base.set_processor(Some(crate::handle::CHandle::null()));
+	fn value_pushes_color_transform_job_with_processor() {
+		let mut core = NodeCore::new();
+		core.add_input(crate::input::Input::new(
+			FILE_INPUT,
+			crate::value::ValueType::Text,
+			crate::value::NodeValue::Text(String::new()),
+		));
+		core.add_input(crate::input::Input::new(
+			DIRECTION_INPUT,
+			crate::value::ValueType::Combo,
+			crate::value::NodeValue::Combo(0),
+		));
+		core.set_standard_value(FILE_INPUT, -1, NodeValue::Text("/tmp/x.cube".into()));
+		core.set_standard_value(DIRECTION_INPUT, -1, NodeValue::Combo(1));
+		let n = node();
+		let processor = std::sync::Arc::new(oak_core::color::ColorProcessor::pass_through());
+		{
+			// Prime the cache so value()'s ensure_processor early-returns
+			// (unchanged path/direction, live cached processor).
+			let mut state = n.state.lock().unwrap();
+			state.dirty = false;
+			state.last_path = "/tmp/x.cube".to_string();
+			state.last_direction = 1;
+			state.last_processor = Some(processor.clone());
+		}
+		n.base.set_processor(Some(processor));
 		let inputs = crate::value::NodeValueRow::from([(
 			crate::nodes::ociobase::TEXTURE_INPUT.to_string(),
 			NodeValue::Texture(crate::handle::CHandle::null()),
 		)]);
 		let mut table = NodeValueTable::default();
 		n.value(&core, &inputs, Rational::new(0, 1), &mut table);
-		assert!(table.get(ValueType::Texture).is_some());
+		let Some(NodeValue::Texture(handle)) = table.get(ValueType::Texture) else {
+			panic!("job row expected");
+		};
+		assert!(unsafe {
+			crate::handle::get_checked::<crate::jobs::ColorTransformJobPayload>(handle)
+		}
+		.is_some());
 	}
 
 	#[test]

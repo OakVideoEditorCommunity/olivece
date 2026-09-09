@@ -416,15 +416,6 @@ mod tests {
 		stop: AtomicU32,
 	}
 
-	impl AutoCacheEvents for Probe {
-		fn progress(&mut self, value: f64) {
-			assert_eq!(value, 0.5);
-			self.progress.fetch_add(1, Ordering::Relaxed);
-		}
-		fn stop_proxy_tasks(&mut self) {
-			self.stop.fetch_add(1, Ordering::Relaxed);
-		}
-	}
 
 	#[test]
 	fn events_deliver_progress() {
@@ -447,8 +438,9 @@ mod tests {
 	}
 	impl AutoCacheEvents for ProbeEvents {
 		fn progress(&mut self, value: f64) {
+			// The reported fraction must arrive intact.
+			assert_eq!(value, 0.5);
 			self.probe.progress.fetch_add(1, Ordering::Relaxed);
-			let _ = value;
 		}
 		fn stop_proxy_tasks(&mut self) {
 			self.probe.stop.fetch_add(1, Ordering::Relaxed);

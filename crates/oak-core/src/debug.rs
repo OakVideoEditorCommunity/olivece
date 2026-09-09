@@ -254,10 +254,12 @@ mod tests {
 
 	#[test]
 	fn default_level_is_info() {
-		// Other tests may shift the process-global filter; this test
-		// asserts only that getting/setting round-trips.
-		let before = log_get_level();
-		let _ = before;
+		// The documented default is Info; (re)applying it must drive the
+		// process-global filter to the Info floor.
+		assert_eq!(DEFAULT_LOG_LEVEL, Level::Info);
+		log_set_level(DEFAULT_LOG_LEVEL);
+		assert_eq!(log_get_level(), Level::Info);
+		assert_eq!(log::max_level(), DEFAULT_LOG_LEVEL.to_filter());
 	}
 
 	#[test]
@@ -301,6 +303,16 @@ mod tests {
 			Level::Fatal,
 		] {
 			log_set_level(threshold);
+			// The observable filter state: the facade's max level tracks
+			// the threshold, and below-threshold traffic is disabled.
+			assert_eq!(log::max_level(), threshold.to_filter());
+			if threshold != Level::Debug {
+				assert!(
+					!log::log_enabled!(log::Level::Debug),
+					"debug traffic must be filtered at {threshold:?}"
+				);
+			}
+			// Emitting below the threshold is still an Ok no-op.
 			assert!(log(Level::Debug, "x").is_ok());
 			assert!(log(Level::Fatal, "y").is_ok());
 		}

@@ -308,7 +308,7 @@ mod tests {
 	}
 
 	#[test]
-	fn value_opacity_scaled_pushes_job_placeholder() {
+	fn value_opacity_scaled_pushes_shader_job() {
 		let (mut core, behavior) = create();
 		core.set_standard_value(VALUE_INPUT, -1, NodeValue::Float(0.5));
 		let inputs = crate::value::NodeValueRow::from([(
@@ -317,11 +317,20 @@ mod tests {
 		)]);
 		let mut table = NodeValueTable::default();
 		behavior.value(&core, &inputs, Rational::new(0, 1), &mut table);
-		assert!(table.get(ValueType::Texture).is_some());
+		// The scaled-opacity path pushes the default-variant shader job
+		// (a pass-through would push the input's null handle).
+		let Some(NodeValue::Texture(h)) = table.get(ValueType::Texture) else {
+			panic!("texture expected");
+		};
+		let payload = unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(h) }
+			.expect("shader job pushed");
+		assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.opacity");
+		assert_eq!(payload.shader_id, "");
+		assert_eq!(payload.effect_input, TEXTURE_INPUT);
 	}
 
 	#[test]
-	fn value_opacity_in_row_scaled_pushes_job_placeholder() {
+	fn value_opacity_in_row_scaled_pushes_shader_job() {
 		let (core, behavior) = create();
 		let inputs = crate::value::NodeValueRow::from([
 			(
@@ -332,7 +341,17 @@ mod tests {
 		]);
 		let mut table = NodeValueTable::default();
 		behavior.value(&core, &inputs, Rational::new(0, 1), &mut table);
-		assert!(table.get(ValueType::Texture).is_some());
+		let Some(NodeValue::Texture(h)) = table.get(ValueType::Texture) else {
+			panic!("texture expected");
+		};
+		let payload = unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(h) }
+			.expect("shader job pushed");
+		assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.opacity");
+		assert_eq!(
+			payload.params.get(VALUE_INPUT),
+			Some(&NodeValue::Float(0.5)),
+			"the opacity value rides in the job params"
+		);
 	}
 
 	#[test]
@@ -349,7 +368,7 @@ mod tests {
 	}
 
 	#[test]
-	fn value_texture_opacity_pushes_rgbmult_placeholder() {
+	fn value_texture_opacity_pushes_rgbmult_job() {
 		let (core, behavior) = create();
 		let inputs = crate::value::NodeValueRow::from([
 			(
@@ -363,7 +382,13 @@ mod tests {
 		]);
 		let mut table = NodeValueTable::default();
 		behavior.value(&core, &inputs, Rational::new(0, 1), &mut table);
-		assert!(table.get(ValueType::Texture).is_some());
+		// A texture opacity input selects the rgbmult shader variant.
+		let Some(NodeValue::Texture(h)) = table.get(ValueType::Texture) else {
+			panic!("texture expected");
+		};
+		let payload = unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(h) }
+			.expect("shader job pushed");
+		assert_eq!(payload.shader_id, "rgbmult");
 	}
 
 	#[test]

@@ -27,12 +27,16 @@ use crate::nodes::plugin::PluginJobPayload;
 use crate::value::NodeValueRow;
 
 /// Job types
+///
+/// The payloads travel boxed inside `Texture` values during graph
+/// evaluation (the renderer probes the box's payload type at resolve
+/// time); the graph-shaped job model lands in v0.6.
 
 pub enum Job{
 	FootageJob(FootageJobPayload),
 	ShaderJob(ShaderJobPayload),
 	PluginJob(PluginJobPayload),
-	ColorTransformJob
+	ColorTransformJob(ColorTransformJobPayload)
 }
 
 /// C++ `FootageJob` payload: the decode request a footage node emits at
@@ -77,9 +81,19 @@ pub struct ShaderJobPayload {
 	pub iterative_input: String,
 }
 
+/// C++ `ColorTransformJob` payload: the OCIO processor application a
+/// color node emits at its output. The processor is shared by `Arc` —
+/// the node keeps its cached processor while in-flight jobs reference
+/// the same immutable instance. The input texture value rides along
+/// (C++ `t->to_job(job)` wraps the texture the job applies to).
+#[derive(Clone)]
 pub struct ColorTransformJobPayload{
-	pub color_processor: ColorProcessor,
-
+	/// The OCIO processor to apply (C++ `ColorTransformJob::processor`).
+	pub color_processor: std::sync::Arc<ColorProcessor>,
+	/// The input texture value (C++ the texture `to_job` was called on).
+	pub input: crate::value::NodeValue,
+	/// Request time in media seconds.
+	pub time: Rational,
 }
 
 impl Default for FootageJobPayload {

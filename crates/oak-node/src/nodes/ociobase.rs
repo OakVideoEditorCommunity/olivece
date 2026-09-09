@@ -49,19 +49,17 @@ pub const TEXTURE_INPUT: &str = "tex_in";
 /// generation helpers reach the manager through
 /// `crate::colormanager`/oakrender at call time.
 pub struct OcioBase {
-	/// Owned color processor handle (C++ `processor_`, an
-	/// `OakColorProcessor`); `None`/empty while no valid processor has
-	/// been generated. Released with the node (C++ destructor calls
-	/// `oakrender_color_processor_free`).
-	processor: Option<crate::handle::CHandle>,
+	/// Owned color processor (C++ `processor_`, an `OakColorProcessor`),
+	/// shared by `Arc` because the [`crate::jobs::ColorTransformJobPayload`]
+	/// emitted at evaluation time carries the same immutable processor.
+	/// `None` while no valid processor has been generated. Released with
+	/// the node (C++ destructor calls `oakrender_color_processor_free`).
+	///
+	/// Behind a mutex because the C++ regenerates the processor from
+	/// `value()`-time paths (`ensure_processor()`'s mutable-in-const-
+	/// method pattern), so interior mutability is required.
+	processor: std::sync::Mutex<Option<std::sync::Arc<oak_core::color::ColorProcessor>>>,
 }
-
-// The processor handle wraps a refcounted C object that is only
-// dereferenced from the render path (the C++ base likewise passes its
-// `OakColorProcessor` across threads by value); moving the struct
-// between threads does not introduce sharing the C++ side does not
-// already have.
-unsafe impl Send for OcioBase {}
 
 impl OcioBase {
 	/// Construct the shared base state (C++ `OCIOBaseNode::OCIOBaseNode()`):
@@ -69,40 +67,42 @@ impl OcioBase {
 	/// [`TEXTURE_INPUT`], marks it the effect input and sets the
 	/// video-effect flag happens in each node's `create()`.
 	pub fn new() -> Self {
-		OcioBase { processor: None }
+		OcioBase {
+			processor: std::sync::Mutex::new(None),
+		}
 	}
 
-	/// Borrowed view of the owned processor handle (C++
+	/// Shared reference to the owned processor (C++
 	/// `OCIOBaseNode::processor()`; callers must NOT free it).
-	pub fn processor(&self) -> Option<&crate::handle::CHandle> {
-		self.processor.as_ref()
+	pub fn processor(&self) -> Option<std::sync::Arc<oak_core::color::ColorProcessor>> {
+		self.processor
+			.lock()
+			.unwrap_or_else(|e| e.into_inner())
+			.clone()
 	}
 
-	/// Take ownership of a new processor handle, releasing the old one
+	/// Take ownership of a new processor, releasing the old one
 	/// (C++ `OCIOBaseNode::set_processor()`, which frees the previous
 	/// `OakColorProcessor` before storing the new one).
 	pub fn set_processor(
-		&mut self,
-		processor: Option<crate::handle::CHandle>,
+		&self,
+		processor: Option<std::sync::Arc<oak_core::color::ColorProcessor>>,
 	) {
 		// The C++ frees the previous processor via
-		// `oakrender_color_processor_free`; the Rust handle is a
-		// refcounted `CHandle` released on drop, so replacing the field
-		// drops the old one automatically.
-		self.processor = processor;
+		// `oakrender_color_processor_free`; the Rust processor is an
+		// `Arc` released on drop, so replacing the field drops the old
+		// one automatically once any in-flight jobs release it.
+		*self.processor.lock().unwrap_or_else(|e| e.into_inner()) = processor;
 	}
 
 	/// Shared output evaluation (C++ `OCIOBaseNode::value()`): no texture
 	/// on [`TEXTURE_INPUT`] -> push nothing; texture present and
-	/// processor ready -> push a `ColorTransformJob` built from the
-	/// processor and the input texture; texture present but processor not
-	/// ready (e.g. still being generated asynchronously) -> pass the
-	/// input texture through unchanged.
-	///
-	/// The Rust model has no color-transform job payload: the ready case
-	/// pushes a null texture handle marking a renderer-deferred job
-	/// (the C++ `t->to_job(ColorTransformJob)` resolved by the renderer
-	/// via the processor); the not-ready case pushes the input texture.
+	/// processor ready -> push a boxed
+	/// [`crate::jobs::ColorTransformJobPayload`] built from the processor
+	/// and the input texture (the C++ `t->to_job(ColorTransformJob)`,
+	/// resolved by the render seam via the processor); texture present
+	/// but processor not ready (e.g. still being generated
+	/// asynchronously) -> pass the input texture through unchanged.
 	/// `// CPP-PARITY: ociobase.cpp` `value()`.
 	pub fn value(
 		&self,
@@ -111,20 +111,23 @@ impl OcioBase {
 		time: oak_core::Rational,
 		table: &mut NodeValueTable,
 	) {
-		let _ = (core, time);
-		match inputs.get(TEXTURE_INPUT) {
-			Some(tex @ NodeValue::Texture(_)) => {
-				if self.processor.is_some() {
-					table.push(
-						crate::value::ValueType::Texture,
-						NodeValue::Texture(crate::handle::CHandle::null()),
-						None,
-					);
-				} else {
-					table.push(crate::value::ValueType::Texture, tex.clone(), None);
-				}
-			}
-			_ => {}
+		let _ = core;
+		let Some(tex @ NodeValue::Texture(_)) = inputs.get(TEXTURE_INPUT) else {
+			return;
+		};
+		match self.processor() {
+			Some(processor) => table.push(
+				crate::value::ValueType::Texture,
+				NodeValue::Texture(crate::handle::make_owned(
+					crate::jobs::ColorTransformJobPayload {
+						color_processor: processor,
+						input: tex.clone(),
+						time,
+					},
+				)),
+				None,
+			),
+			None => table.push(crate::value::ValueType::Texture, tex.clone(), None),
 		}
 	}
 
@@ -156,9 +159,11 @@ mod tests {
 
 	#[test]
 	fn processor_state_transitions() {
-		let mut base = OcioBase::new();
+		let base = OcioBase::new();
 		assert!(base.processor().is_none());
-		base.set_processor(Some(crate::handle::CHandle::null()));
+		base.set_processor(Some(std::sync::Arc::new(
+			oak_core::color::ColorProcessor::pass_through(),
+		)));
 		assert!(base.processor().is_some());
 		base.set_processor(None);
 		assert!(base.processor().is_none());
@@ -194,21 +199,35 @@ mod tests {
 	}
 
 	#[test]
-	fn value_pushes_deferred_job_with_processor() {
-		let mut base = OcioBase::new();
-		base.set_processor(Some(crate::handle::CHandle::null()));
+	fn value_pushes_color_transform_job_with_processor() {
+		let base = OcioBase::new();
+		base.set_processor(Some(std::sync::Arc::new(
+			oak_core::color::ColorProcessor::pass_through(),
+		)));
 		let mut table = NodeValueTable::default();
-		let inputs = NodeValueRow::from([(
-			TEXTURE_INPUT.to_string(),
-			NodeValue::Texture(crate::handle::CHandle::null()),
-		)]);
+		let tex = NodeValue::Texture(crate::handle::make_owned(1u8));
+		let inputs = NodeValueRow::from([(TEXTURE_INPUT.to_string(), tex.clone())]);
 		base.value(
 			&NodeCore::new(),
 			&inputs,
 			oak_core::Rational::new(0, 1),
 			&mut table,
 		);
-		assert!(table.get(ValueType::Texture).is_some());
+		// The ready case pushes the boxed ColorTransformJobPayload (the
+		// C++ `t->to_job(ColorTransformJob)`).
+		let Some(NodeValue::Texture(handle)) = table.get(ValueType::Texture) else {
+			panic!("job row expected");
+		};
+		let payload = unsafe {
+			crate::handle::get_checked::<crate::jobs::ColorTransformJobPayload>(handle)
+		}
+		.expect("a boxed ColorTransformJobPayload");
+		assert!(std::sync::Arc::ptr_eq(
+			&payload.color_processor,
+			&base.processor().unwrap()
+		));
+		assert_eq!(payload.input, tex);
+		assert_eq!(payload.time, oak_core::Rational::new(0, 1));
 	}
 
 	#[test]

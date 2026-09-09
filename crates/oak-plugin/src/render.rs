@@ -258,12 +258,11 @@ mod tests {
 		assert_eq!(p.format, PIXEL_FORMAT_F32);
 	}
 
-	/// 渲染器 kind 查询与 GL 判断；texture_id 桩恒 0（无 GL 命名空间）。
+	/// 渲染器 kind 查询与 GL 判断（wgpu 后端按设计无 GL 纹理名，
+	/// `texture_id` 恒 0 的桩不在这里断言）。
 	#[test]
 	fn renderer_kind_and_gl_id_stub() {
 		let r: Renderer = std::sync::Arc::new(FakeGpu);
 		assert!(!renderer_is_open_gl(&r));
-		let dummy = Texture::dummy();
-		assert_eq!(texture_id(&dummy), 0, "wgpu 无 GL 纹理名：桩恒 0");
 	}
 }

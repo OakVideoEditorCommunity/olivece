@@ -337,6 +337,7 @@ impl NodeBehavior for ClipBlockBehavior {
 	/// in-point. Other inputs pass through unchanged.
 	fn input_time_adjustment(
 		&self,
+		_core: &NodeCore,
 		input: &str,
 		_element: i32,
 		time: TimeRange,
@@ -666,7 +667,9 @@ mod tests {
 	#[test]
 	fn clip_input_time_adjustment_maps_timeline_to_media() {
 		let time = TimeRange::new(Rational::new(12, 1), Rational::new(13, 1));
-		let map = |c: &ClipBlockBehavior| c.input_time_adjustment(clip_input::TEXTURE_INPUT, -1, time, false);
+		let map = |c: &ClipBlockBehavior| {
+			c.input_time_adjustment(&NodeCore::new(), clip_input::TEXTURE_INPUT, -1, time, false)
+		};
 
 		// Speed 1: media = (12 - 10) + 5 = 7.
 		assert_eq!(
@@ -695,7 +698,10 @@ mod tests {
 			TimeRange::new(Rational::new(11, 1), Rational::new(12, 1))
 		);
 		// Non-`tex_in` inputs pass through untouched.
-		assert_eq!(clip_with(2.0, true).input_time_adjustment("other_in", -1, time, false), time);
+		assert_eq!(
+			clip_with(2.0, true).input_time_adjustment(&NodeCore::new(), "other_in", -1, time, false),
+			time
+		);
 	}
 
 	/// The clip copies the connected `tex_in` texture to its output;

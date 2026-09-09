@@ -617,7 +617,16 @@ mod tests {
 		let inputs = crate::value::NodeValueRow::from([(TEXTURE_INPUT.to_string(), tex())]);
 		let mut table = NodeValueTable::default();
 		behavior.value(&core, &inputs, Rational::new(0, 1), &mut table);
-		assert!(table.get(ValueType::Texture).is_some());
+		// A corner off its default (y-only is enough — C++ `is_null()`
+		// requires BOTH components zero) pushes the job; a pass-through
+		// would push the input's own (null) handle instead.
+		let Some(NodeValue::Texture(h)) = table.get(ValueType::Texture) else {
+			panic!("texture expected");
+		};
+		assert!(
+			unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(h) }.is_some(),
+			"a moved corner must push the cornerpin shader job"
+		);
 	}
 
 	#[test]

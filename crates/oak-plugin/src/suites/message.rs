@@ -302,9 +302,9 @@ mod tests {
 	fn shim_v2_table_entry_resolves() {
 		let _g = TEST_LOCK.lock().unwrap();
 		let s = suite_v2();
-		assert!(!std::ptr::eq(
+		assert!(std::ptr::eq(
 			s.message as *const (),
-			ofx_message_shim_v1 as *const ()
+			ofx_message_shim_v2 as *const ()
 		));
 	}
 

@@ -21,7 +21,29 @@
 //! `pos_in`/`rot_in`/`scale_in`/`uniform_scale_in`/`anchor_in` inputs
 //! and the `generate_matrix` helper.
 
+/// The transform fragment shader: samples the input through the inverse
+/// of the node's pixel-space transform (`transform_in` carries the
+/// CPU-inverted matrix; `resolution_in` is auto-filled by the runner).
+/// The C++ path transforms vertices (`ove_mvpmat` in transform.vert);
+/// an affine transform is equivalently applied fragment-side by
+/// inverse-mapping the sample position — the fixed fullscreen vertex
+/// stage stays unchanged.
+const TRANSFORM_FRAG: &str = r#"uniform sampler2D tex_in;
+uniform mat4 transform_in;
+uniform vec2 resolution_in;
+
+in vec2 ove_texcoord;
+out vec4 frag_color;
+
+void main(void) {
+    vec2 px = ove_texcoord * resolution_in;
+    vec2 src = (transform_in * vec4(px, 0.0, 1.0)).xy;
+    frag_color = texture(tex_in, src / resolution_in);
+}
+"#;
+
 use crate::factory::NodeMeta;
+
 use crate::jobs::ShaderJobPayload;
 use crate::node::{Category, Gizmo, NodeBehavior, NodeCore};
 
@@ -366,21 +388,37 @@ impl NodeBehavior for TransformDistortNode {
 		);
 
 		match inputs.get(TEXTURE_INPUT) {
-			Some(crate::value::NodeValue::Texture(_)) => {
-				// The shader-job box (C++ `Texture::Job(globals.vparams(),
-				// job)`): the behavior's type id selects the fragment
-				// source, and the effect input key locates the main
-				// texture inside the params row. C++ also inserts
-				// `ove_mvpmat` (the auto-scaled real matrix) and sets the
-				// `ove_maintex` interpolation, but the matrix needs the
-				// texture's params and the sequence resolution — neither
-				// available here — so it is left absent and the runner
-				// fills an identity `ove_mvpmat`; the C++ identity check
-				// (pass-through when the real matrix is identity) is not
-				// representable either, so the job is always queued with a
-				// texture (`// CPP-PARITY: transformdistortnode.cpp`
-				// value(); TODO: inject the real matrix from the renderer
-				// seam, where the resolution data is available).
+			Some(tex @ crate::value::NodeValue::Texture(_)) => {
+				// The identity transform passes the texture through (C++
+				// skips the job when the real matrix is identity).
+				let identity = super::mathbase::identity_matrix();
+				let is_identity = generated_matrix
+					.iter()
+					.zip(identity)
+					.all(|(a, b)| (*a - b).abs() <= 1e-9);
+				if is_identity {
+					table.push(crate::value::ValueType::Texture, tex.clone(), None);
+					return;
+				}
+
+				// The job carries the inverse transform in pixel space
+				// (C++ inserts `ove_mvpmat` — the forward matrix for the
+				// vertex stage; the fragment-side implementation samples
+				// through the inverse, see TRANSFORM_FRAG). A singular
+				// matrix (zero scale) passes the input through, matching
+				// the C++ inverted()-fails fallback. The auto-scaled
+				// variant stays unrepresentable: it needs the texture's
+				// params and the sequence resolution at job-build time
+				// (`// CPP-PARITY: transformdistortnode.cpp` value()).
+				let Some(inverse) = super::matrix::matrix_invert_2d(generated_matrix) else {
+					table.push(crate::value::ValueType::Texture, tex.clone(), None);
+					return;
+				};
+				let mut params = inputs.clone();
+				params.insert(
+					"transform_in".to_string(),
+					crate::value::NodeValue::Matrix(inverse),
+				);
 				table.push(
 					crate::value::ValueType::Texture,
 					crate::value::NodeValue::Texture(crate::handle::make_owned(ShaderJobPayload {
@@ -390,7 +428,7 @@ impl NodeBehavior for TransformDistortNode {
 						type_id: self.type_id().to_string(),
 						shader_id: String::new(),
 						effect_input: core.effect_input.clone(),
-						params: inputs.clone(),
+						params,
 						iterative_input: TEXTURE_INPUT.to_string(),
 					})),
 					None,
@@ -404,12 +442,12 @@ impl NodeBehavior for TransformDistortNode {
 	}
 
 	/// Shader code request (C++ `get_shader_code()`): ignores the
-	/// request id and returns a default (empty) `ShaderCode` — the
-	/// node relies on the renderer's default vertex/fragment shaders,
-	/// so this maps to `None`.
+	/// request id and returns the transform fragment shader — the
+	/// inverse-sampling equivalent of the C++ default vertex-shader
+	/// transform (see [`TRANSFORM_FRAG`]).
 	fn shader_code(&self, request: &str) -> Option<String> {
 		let _ = request;
-		None
+		Some(TRANSFORM_FRAG.to_string())
 	}
 
 	/// Gizmo transform/positions (C++ `update_gizmo_positions()` and
@@ -715,8 +753,28 @@ mod tests {
 	}
 
 	#[test]
-	fn value_pushes_matrix_and_job_with_texture() {
+	fn value_identity_transform_passes_texture_through() {
+		// Default inputs (position 0, rotation 0, scale 1) generate the
+		// identity matrix: the texture passes through without a job (C++
+		// skips the job when the real matrix is identity).
 		let (core, behavior) = create();
+		let inputs = crate::value::NodeValueRow::from([(TEXTURE_INPUT.to_string(), tex())]);
+		let mut table = NodeValueTable::default();
+		behavior.value(&core, &inputs, Rational::new(0, 1), &mut table);
+		assert!(table.get(ValueType::Matrix).is_some());
+		assert_eq!(table.get(ValueType::Texture), Some(&tex()));
+	}
+
+	#[test]
+	fn value_pushes_matrix_and_job_with_texture() {
+		let (mut core, behavior) = create();
+		// A real transform (position +50 in x) generates a non-identity
+		// matrix, so the shader job is queued.
+		core.set_standard_value(
+			super::super::matrix::POSITION_INPUT,
+			-1,
+			NodeValue::Vec2([50.0, 0.0]),
+		);
 		let inputs = crate::value::NodeValueRow::from([(TEXTURE_INPUT.to_string(), tex())]);
 		let mut table = NodeValueTable::default();
 		behavior.value(&core, &inputs, Rational::new(0, 1), &mut table);
@@ -734,6 +792,12 @@ mod tests {
 		assert_eq!(payload.effect_input, TEXTURE_INPUT);
 		assert_eq!(payload.time, Rational::new(0, 1));
 		assert!(payload.params.contains_key(TEXTURE_INPUT));
+		// The job carries the inverse of the +50px translation
+		// (fragment-side inverse sampling).
+		match payload.params.get("transform_in") {
+			Some(NodeValue::Matrix(m)) => assert_eq!(m[3], -50.0),
+			other => panic!("transform_in must carry the inverse matrix: {other:?}"),
+		}
 	}
 
 	#[test]
@@ -771,9 +835,11 @@ mod tests {
 	}
 
 	#[test]
-	fn shader_code_returns_none() {
+	fn shader_code_returns_inverse_sampling_frag() {
 		let n = empty_node();
-		assert!(n.shader_code("anything").is_none());
+		let frag = n.shader_code("anything").expect("real transform shader");
+		assert!(frag.contains("transform_in"));
+		assert!(frag.contains("resolution_in"));
 	}
 
 	#[test]

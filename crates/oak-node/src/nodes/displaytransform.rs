@@ -368,17 +368,25 @@ mod tests {
 	}
 
 	#[test]
-	fn value_pushes_deferred_job_with_processor() {
+	fn value_pushes_color_transform_job_with_processor() {
 		let core = NodeCore::new();
-		let mut n = node();
-		n.base.set_processor(Some(crate::handle::CHandle::null()));
+		let n = node();
+		n.base.set_processor(Some(std::sync::Arc::new(
+			oak_core::color::ColorProcessor::pass_through(),
+		)));
 		let inputs = crate::value::NodeValueRow::from([(
 			crate::nodes::ociobase::TEXTURE_INPUT.to_string(),
 			NodeValue::Texture(crate::handle::CHandle::null()),
 		)]);
 		let mut table = NodeValueTable::default();
 		n.value(&core, &inputs, Rational::new(0, 1), &mut table);
-		assert!(table.get(ValueType::Texture).is_some());
+		let Some(NodeValue::Texture(handle)) = table.get(ValueType::Texture) else {
+			panic!("job row expected");
+		};
+		assert!(unsafe {
+			crate::handle::get_checked::<crate::jobs::ColorTransformJobPayload>(handle)
+		}
+		.is_some());
 	}
 
 	#[test]

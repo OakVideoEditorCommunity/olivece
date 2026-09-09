@@ -459,7 +459,7 @@ mod tests {
 	}
 
 	#[test]
-	fn value_with_base_merges() {
+	fn value_with_base_pushes_merge_job_with_nested_blend() {
 		let (core, behavior) = create();
 		let inputs = crate::value::NodeValueRow::from([(
 			super::super::generatorwithmerge::BASE_INPUT.to_string(),
@@ -467,7 +467,25 @@ mod tests {
 		)]);
 		let mut table = NodeValueTable::default();
 		behavior.value(&core, &inputs, Rational::new(0, 1), &mut table);
-		assert!(table.get(ValueType::Texture).is_some());
+		// The base-merge path pushes the "mrg" alpha-over job whose
+		// blend_in is the generator's own "rgb" job nested as a texture
+		// value (same shape as shapenode's merge test).
+		let Some(NodeValue::Texture(h)) = table.get(ValueType::Texture) else {
+			panic!("texture expected");
+		};
+		let mrg = unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(h) }
+			.expect("merge job pushed");
+		assert_eq!(mrg.shader_id, "mrg");
+		assert_eq!(mrg.effect_input, super::super::generatorwithmerge::BASE_INPUT);
+		assert!(mrg.params.contains_key(super::super::generatorwithmerge::BASE_INPUT));
+		let blend = match mrg.params.get(crate::nodes::merge::BLEND_INPUT) {
+			Some(NodeValue::Texture(b)) => *b,
+			other => panic!("blend_in must carry the nested job: {other:?}"),
+		};
+		let blend_job = unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(&blend) }
+			.expect("nested generator job");
+		assert_eq!(blend_job.shader_id, "rgb");
+		assert_eq!(blend_job.type_id, "org.olivevideoeditor.Olive.polygon");
 	}
 
 	#[test]

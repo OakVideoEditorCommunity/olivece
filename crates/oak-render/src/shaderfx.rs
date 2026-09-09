@@ -189,6 +189,10 @@ pub fn compile_effect(
 /// - `iterations` runs the shader that many times, feeding each pass's
 ///   output back as the main input (C++ `OpenGLRenderer::Blit`'s
 ///   ping-pong; the `ove_iteration` uniform tracks the pass index).
+///   `iterative_input` (C++ `ShaderJob::iterative_input`) names the
+///   texture the feedback lands in — e.g. the drop shadow's
+///   `previous_iteration_in` — while the other samplers keep their
+///   original bindings; empty/`None` feeds back into the main input.
 /// - Well-known uniforms are auto-filled when declared but absent from
 ///   `params`: `resolution_in` (the frame size), `ove_iteration`,
 ///   `ove_mvpmat` (identity).
@@ -200,6 +204,7 @@ pub fn run_effect(
 	dst: u64,
 	size: (i32, i32),
 	iterations: u32,
+	iterative_input: Option<&str>,
 ) -> Result<()> {
 	use oak_node::value::NodeValue;
 
@@ -250,7 +255,12 @@ pub fn run_effect(
 	}
 
 	// Ping-pong (C++ Blit): one scratch texture for two passes, two for
-	// longer chains; the last pass always lands in `dst`.
+	// longer chains; the last pass always lands in `dst`. Each pass feeds
+	// back into the iterative input (C++ `ShaderJob::iterative_input`),
+	// defaulting to the first (main) texture.
+	let feedback = iterative_input
+		.and_then(|name| effect.translated.textures.iter().position(|t| t == name))
+		.unwrap_or(0);
 	let scratch_a = ctx.create_texture(size.0, size.1)?;
 	let scratch_b = if iterations > 2 {
 		Some(ctx.create_texture(size.0, size.1)?)
@@ -273,7 +283,10 @@ pub fn run_effect(
 			};
 			let uniforms = pack_uniforms(&effect.translated, &pass_row);
 			ctx.run_shader_pass(&effect.program, &uniforms, &input_tokens, target)?;
-			input_tokens[0] = target;
+			if !input_tokens.is_empty() {
+				let slot = feedback.min(input_tokens.len() - 1);
+				input_tokens[slot] = target;
+			}
 		}
 		Ok(())
 	})();
@@ -912,7 +925,7 @@ void main() {
 
 		let mut row = oak_node::value::NodeValueRow::new();
 		row.insert("opacity_in".into(), oak_node::value::NodeValue::Float(0.5));
-		run_effect(&ctx, &effect, &row, &[("tex_in".to_string(), src)], dst, (16, 4), 1).unwrap();
+		run_effect(&ctx, &effect, &row, &[("tex_in".to_string(), src)], dst, (16, 4), 1, None).unwrap();
 
 		let out = ctx.download(dst).unwrap();
 		for px in 0..16usize {
@@ -956,13 +969,13 @@ void main() {
 		row.insert("radius_in".into(), oak_node::value::NodeValue::Float(0.0));
 		row.insert("horiz_in".into(), oak_node::value::NodeValue::Boolean(true));
 		row.insert("vert_in".into(), oak_node::value::NodeValue::Boolean(false));
-		run_effect(&ctx, &effect, &row, &[("tex_in".to_string(), src)], dst, (16, 1), 1).unwrap();
+		run_effect(&ctx, &effect, &row, &[("tex_in".to_string(), src)], dst, (16, 1), 1, None).unwrap();
 		let out = ctx.download(dst).unwrap();
 		assert_eq!(out.data, step.data, "radius 0 is a passthrough");
 
 		// radius 2 horizontal box: out(x) = 0.5 * (in[x-1] + in[x+1]).
 		row.insert("radius_in".into(), oak_node::value::NodeValue::Float(2.0));
-		run_effect(&ctx, &effect, &row, &[("tex_in".to_string(), src)], dst, (16, 1), 1).unwrap();
+		run_effect(&ctx, &effect, &row, &[("tex_in".to_string(), src)], dst, (16, 1), 1, None).unwrap();
 		let out = ctx.download(dst).unwrap();
 		for x in 0..16usize {
 			let got = pixel(&out, x)[0];
@@ -1014,7 +1027,7 @@ void main() {
 			"color_in".into(),
 			oak_node::value::NodeValue::Color([1.0, 1.0, 1.0, 1.0]),
 		);
-		run_effect(&ctx, &effect, &row, &[], dst, (512, 512), 1).unwrap();
+		run_effect(&ctx, &effect, &row, &[], dst, (512, 512), 1, None).unwrap();
 		let out = ctx.download(dst).unwrap();
 
 		let center = pixel(&out, 256 * 512 + 256);
@@ -1024,7 +1037,7 @@ void main() {
 
 		// Degenerate: a single point draws nothing.
 		row.insert("point_count".into(), oak_node::value::NodeValue::Int(1));
-		run_effect(&ctx, &effect, &row, &[], dst, (512, 512), 1).unwrap();
+		run_effect(&ctx, &effect, &row, &[], dst, (512, 512), 1, None).unwrap();
 		let out = ctx.download(dst).unwrap();
 		assert_eq!(
 			pixel(&out, 256 * 512 + 256),
@@ -1079,6 +1092,7 @@ void main() {
 			dst,
 			(512, 512),
 			1,
+			None,
 		)
 		.unwrap();
 		let out = ctx.download(dst).unwrap();
@@ -1096,6 +1110,7 @@ void main() {
 			dst,
 			(512, 512),
 			1,
+			None,
 		)
 		.unwrap();
 		let out = ctx.download(dst).unwrap();
@@ -1128,6 +1143,7 @@ void main() {
 			dst,
 			(512, 512),
 			1,
+			None,
 		)
 		.unwrap();
 		let out = ctx.download(dst).unwrap();
@@ -1208,6 +1224,7 @@ void main() {
 			dst,
 			(8, 4),
 			1,
+			None,
 		)
 		.unwrap();
 		let out = ctx.download(dst).unwrap();
@@ -1299,6 +1316,7 @@ void main() {
 			dst,
 			(8, 4),
 			1,
+			None,
 		)
 		.unwrap();
 		let out = ctx.download(dst).unwrap();

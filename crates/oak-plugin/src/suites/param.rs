@@ -1028,4 +1028,63 @@ mod tests {
 			);
 		}
 	}
+
+	/// paramSetValue → instanceChanged 回写（C++ paramChangedByPlugin）：
+	/// 实例绑定节点后，插件侧改值经 PARAM_OWNER 定位实例、
+	/// notify_instance_changed 生成 undo 命令并立即 redo——节点输入
+	/// 即新值。
+	#[test]
+	fn set_value_writes_back_to_bound_node() {
+		let (inst, ih) = make_instance();
+		let s = suite_v1();
+		let mut gain: *mut c_void = std::ptr::null_mut();
+		unsafe {
+			assert_eq!(
+				(s.param_get_handle)(ih, cs("gain").as_ptr(), &mut gain, std::ptr::null_mut()),
+				0
+			);
+		}
+
+		// 宿主侧登记：param → 实例（生产由 createInstance 路径做），
+		// 实例 → oaknode 节点（facade 装配期做）。
+		let project = oak_node::project::Project::new();
+		let node_id = {
+			let mut guard = project.lock().unwrap_or_else(|e| e.into_inner());
+			let id = guard.graph.add_node(
+				oak_node::node::NodeCore::empty(),
+				Box::new(oak_node::nodes::EmptyBehavior),
+			);
+			guard.graph.get_mut(id).unwrap().core.add_input(
+				oak_node::input::Input::new(
+					"gain",
+					oak_node::value::ValueType::Int,
+					oak_node::value::NodeValue::Int(0),
+				),
+			);
+			id
+		};
+		let identity = crate::node::register_node(project.clone(), node_id);
+		inst.bind_node(identity as usize);
+		let param_addr = tag::strip(gain) as usize;
+		register_param_owner(param_addr, &inst.props as *const PropertySet as usize);
+
+		unsafe {
+			assert_eq!((s.param_set_value)(gain, 5), 0);
+		}
+		let stored = project
+			.lock()
+			.unwrap_or_else(|e| e.into_inner())
+			.graph
+			.get(node_id)
+			.unwrap()
+			.core
+			.standard_value("gain", -1);
+		assert_eq!(
+			stored,
+			oak_node::value::NodeValue::Int(5),
+			"插件改值必须经 instanceChanged 写回节点输入"
+		);
+		unregister_params_of(&inst.props as *const PropertySet as usize);
+		crate::node::unregister_node(identity);
+	}
 }

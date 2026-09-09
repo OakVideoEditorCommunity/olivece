@@ -66,9 +66,9 @@ impl TimeOffsetNode {
 	/// `time_in` value evaluated at that endpoint; all other inputs fall
 	/// through to the base-class identity behavior.
 	///
-	/// The [`NodeBehavior::input_time_adjustment`] trait method carries no
-	/// `NodeCore`, so this value-resolving variant is what render-time call
-	/// sites (and the tests) use; the trait method documents that gap.
+	/// The [`NodeBehavior::input_time_adjustment`] trait method receives the
+	/// core and delegates here; kept as an associated fn so the tests can
+	/// drive the mapping without a behavior instance.
 	pub fn input_time_adjustment_with(
 		core: &NodeCore,
 		input: &str,
@@ -146,42 +146,35 @@ impl NodeBehavior for TimeOffsetNode {
 	/// `input_in`, both ends of the range are shifted forward by the current
 	/// `time_in` value (C++ `get_remapped_time()`: `input + time_in`);
 	/// all other inputs fall through to the base-class identity behavior.
-	///
-	/// The C++ evaluation reads the keyframable `time_in` input, which
-	/// requires the node's data ([`NodeCore`]) — not carried by this trait
-	/// signature. The exact remap is ported in
-	/// [`Self::input_time_adjustment_with`] (and tested there); until the
-	/// adjustment API gains core access, the identity range is returned
+	/// `core` carries the node's data (the keyframable `time_in` input),
+	/// matching the C++ member read
 	/// (`// CPP-PARITY: timeoffsetnode.cpp` `input_time_adjustment`).
 	fn input_time_adjustment(
 		&self,
+		core: &NodeCore,
 		input: &str,
 		element: i32,
 		time: TimeRange,
 		traverse: bool,
 	) -> TimeRange {
-		let _ = (input, element, traverse);
-		time
+		Self::input_time_adjustment_with(core, input, element, time, traverse)
 	}
 
 	/// Output-side time remap (C++ `output_time_adjustment()`): the exact
 	/// inverse of the input adjustment — for `input_in`, both ends of the
 	/// range are shifted back by subtracting the `time_in` value (C++
 	/// `get_remapped_output_time()`: `input - time_in`); all other inputs
-	/// fall through to the base-class identity behavior.
-	///
-	/// As with the input side, the value read needs the node's data; the
-	/// exact remap is ported in [`Self::output_time_adjustment_with`]
+	/// fall through to the base-class identity behavior
 	/// (`// CPP-PARITY: timeoffsetnode.cpp` `output_time_adjustment`).
 	fn output_time_adjustment(
 		&self,
+		core: &NodeCore,
 		input: &str,
 		element: i32,
 		time: TimeRange,
 		traverse: bool,
 	) -> TimeRange {
-		let _ = (input, element, traverse);
-		time
+		Self::output_time_adjustment_with(core, input, element, time, traverse)
 	}
 
 	/// Evaluate outputs (C++ `value()`): pushes the value arriving at

@@ -553,27 +553,31 @@ pub trait NodeBehavior: Send {
 
 	/// Time adjustment through this node (C++
 	/// `input_time_adjustment()`/`output_time_adjustment()`; clips
-	/// override for speed/reverse).
+	/// override for speed/reverse, the time nodes for offset/remap).
+	/// `core` is the node's own data — the C++ implementations read
+	/// member inputs (e.g. the offset/remap value) at call time.
 	fn input_time_adjustment(
 		&self,
+		core: &NodeCore,
 		input: &str,
 		element: i32,
 		time: TimeRange,
 		traverse: bool,
 	) -> TimeRange {
-		let _ = (input, element, traverse);
+		let _ = (core, input, element, traverse);
 		time
 	}
 
 	/// Output-side time adjustment.
 	fn output_time_adjustment(
 		&self,
+		core: &NodeCore,
 		input: &str,
 		element: i32,
 		time: TimeRange,
 		traverse: bool,
 	) -> TimeRange {
-		let _ = (input, element, traverse);
+		let _ = (core, input, element, traverse);
 		time
 	}
 

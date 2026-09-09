@@ -261,15 +261,20 @@ fn registry() -> &'static Mutex<HashMap<u64, RegistryEntry>> {
 }
 
 /// 登记 oaknode 节点（facade 装配期调用；对应 M9 C++ 版
-/// `oaknode_node_identity()` 注册表的登记侧）。返回打包身份
-/// （[`oak_node::id::NodeId::identity`]），写入
-/// [`crate::instance::Instance::bind_node`]。同一身份重复登记
-/// 覆盖旧条目（重绑定）。
+/// `oaknode_node_identity()` 注册表的登记侧）。返回的注册表键是打包
+/// 身份 +1（[`oak_node::id::NodeId::identity`]）：身份 0 是合法的首
+/// 节点，而 `Instance::node_identity` 以 0 为未绑定哨兵，移位后二者
+/// 永不冲突。键写入 [`crate::instance::Instance::bind_node`]，摘除与
+/// 查找（[`node_from_identity`]）用同一键。同一身份重复登记覆盖旧
+/// 条目（重绑定）。
 pub fn register_node(
 	project: Arc<Mutex<oak_node::project::Project>>,
 	id: oak_node::id::NodeId,
 ) -> u64 {
-	let identity = id.identity();
+	let identity = id
+		.identity()
+		.checked_add(1)
+		.expect("register_node: the invalid node id has no registry key");
 	let entry = RegistryEntry {
 		project: Arc::downgrade(&project),
 		id,

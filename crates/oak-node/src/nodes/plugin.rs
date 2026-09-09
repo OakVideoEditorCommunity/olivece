@@ -487,21 +487,31 @@ mod tests {
 	}
 
 	#[test]
-	fn value_resolves_source_clip_first() {
+	fn value_pushes_job_for_source_clip_only_input() {
+		// Gate: a plugin with only the simple-source clip connected still
+		// emits its job (the C++ resolution tries `Source` before
+		// `tex_in`). With no texture at all, nothing is pushed.
 		let n = node();
 		let core = NodeCore::new();
+
 		let mut row = NodeValueRow::default();
 		row.insert(
 			SOURCE_CLIP.to_string(),
 			NodeValue::Texture(crate::handle::CHandle::null()),
 		);
-		row.insert(
-			TEXTURE_INPUT.to_string(),
-			NodeValue::Texture(crate::handle::CHandle::null()),
-		);
 		let mut table = NodeValueTable::default();
 		n.value(&core, &row, Rational::new(0, 1), &mut table);
-		assert!(matches!(table.get(ValueType::Texture), Some(NodeValue::Texture(_))));
+		assert!(
+			matches!(table.get(ValueType::Texture), Some(NodeValue::Texture(h)) if !h.is_null()),
+			"a source-clip-only row must still produce the plugin job"
+		);
+
+		let mut table = NodeValueTable::default();
+		n.value(&core, &NodeValueRow::default(), Rational::new(0, 1), &mut table);
+		assert!(
+			table.get(ValueType::Texture).is_none(),
+			"no texture anywhere -> no job"
+		);
 	}
 
 	#[test]

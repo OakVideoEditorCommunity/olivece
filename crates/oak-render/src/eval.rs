@@ -24,8 +24,10 @@
 //! ([`set_plugin_executor`]); footage jobs decode through the oakcodec
 //! decoder bridge; shader jobs execute on the shared GPU context
 //! ([`oak_core::backend::GpuContext`], falling back to an input pass-
-//! through when no adapter is available); color transforms by identity
-//! and the disk frame-cache payload I/O remain deferred.
+//! through when no adapter is available); color transform jobs apply
+//! their OCIO processor (CPU frames convert for real; the GPU
+//! color-managed blit is deferred at the backend and passes through);
+//! the disk frame-cache payload I/O remains deferred.
 
 use std::sync::{Arc, Mutex};
 
@@ -40,7 +42,7 @@ use oak_core::color::ColorProcessor;
 use oak_core::frame::VideoParamsPod;
 use oak_core::texture::{Frame, Texture};
 use oak_core::{PixelFormat, Rational, TimeRange};
-use oak_node::jobs::{FootageJobPayload, ShaderJobPayload};
+use oak_node::jobs::{ColorTransformJobPayload, FootageJobPayload, ShaderJobPayload};
 use oak_node::value::{NodeValue, NodeValueRow, NodeValueTable};
 
 /// Static mapping of OCIO-based node shaders to the OCIO function they
@@ -241,6 +243,14 @@ pub fn plugin_instance_factory() -> Option<Arc<PluginInstanceFactory>> {
         .clone()
 }
 
+/// Box a resolved texture into the table's texture channel (the render
+/// seam's output is the one place a texture legitimately travels as a
+/// refcounted handle — [`oak_node::handle::get_checked`] probes against
+/// `Texture` stay type-checked).
+fn texture_value(texture: Texture) -> NodeValue {
+    NodeValue::Texture(oak_node::handle::make_owned(texture))
+}
+
 /// The failure marker frame: solid magenta (1, 0, 1, 1) F32 RGBA —
 /// the C++ plugin renderer paints failed plugin output purple so a
 /// broken plugin is visible instead of silently black.
@@ -267,30 +277,51 @@ impl RenderEvalHooks {
         }
     }
 
-    /// C++ process_color_transform.
+    /// C++ process_color_transform: apply the job's OCIO processor to the
+    /// input texture. A CPU frame converts in place (the real OCIO
+    /// `convert_frame`); a GPU input passes through with a one-time log —
+    /// the color-managed GPU blit is deferred at the backend
+    /// (`GpuContext::blit` rejects a processor). An invalid processor
+    /// passes the input through unchanged (C++ creates processors
+    /// non-fatally); a non-texture input is `Error::Invalid`.
     fn process_color_transform_job(
         &mut self,
-        src: &mut Texture,
-        spec: &JobSpec,
-        processor: &ColorProcessor
-    ) -> Result<()> {
-        // The processor is looked up by identity in the process-wide
-        // processor cache; this pass resolves the identity through the
-        // default config (the processor cache lands with the manager).
-        let ctx = oak_core::backend::GpuContext::shared();
-        if let Some(ctx) = ctx {
-            let Ok(dst) = ctx.create_texture(src.size().0, src.size().1) else {
-                return Err(Error::Failed("Unable to create destination texture".to_string()));
-            };
-            match src {
-                Texture::Gpu { token: s, ctx, .. }
-                => { return ctx.blit(*s, dst, Some(processor));},
-                _ => return Err(Error::Failed(
-                    "CPU or mixed CPU/GPU texture blit unsupported".into(),
-                )),
-            }
+        payload: &ColorTransformJobPayload,
+    ) -> Result<Texture> {
+        let NodeValue::Texture(handle) = &payload.input else {
+            return Err(Error::Invalid);
+        };
+        if handle.ctx.is_null() {
+            return Err(Error::Invalid);
         }
-        Err(Error::Invalid)
+        let tex = (unsafe { oak_node::handle::get_checked::<Texture>(handle) })
+            .cloned()
+            .ok_or(Error::Invalid)?;
+        if !payload.color_processor.is_valid() {
+            // No valid processor (no default config, LUT load failure):
+            // pass the input through, mirroring the C++ non-fatal
+            // processor creation.
+            return Ok(tex);
+        }
+        let mut tex = tex;
+        if let Texture::Cpu(frame) = &mut tex {
+            // The CPU leg converts in place (real OCIO `convert_frame`).
+            payload.color_processor.convert_frame(frame)?;
+            return Ok(tex);
+        }
+        // GPU leg: deferred at the backend — pass through, logged once
+        // per processor.
+        let key = format!(
+            "colortransform:gpu:{}",
+            payload.color_processor.cache_id()
+        );
+        if unsupported_warned().insert(key) {
+            eprintln!(
+                "color transform on a GPU texture passes through unchanged: \
+                 color-managed GPU blit deferred at the backend"
+            );
+        }
+        Ok(tex)
     }
 
     /// C++ process_frame_generation: fill the destination with a generated
@@ -504,14 +535,71 @@ impl RenderEvalHooks {
         }
     }
 
+    /// Resolve the color-transform payloads an OCIO node pushed into its
+    /// output table (C++ ColorTransformJob processing in jobmanager.cpp):
+    /// apply each boxed [`ColorTransformJobPayload`]'s processor to its
+    /// input texture and replace the box with the result. Failures fall
+    /// back to the job's input texture (a pass-through — the C++ renderer
+    /// leaves the failed transform's output as its input); genuine
+    /// textures pass through.
+    fn resolve_color_transform_jobs(&mut self, table: &mut NodeValueTable) {
+        // Collect the boxes up front: replacing a row while iterating
+        // `rows_mut` would alias the table.
+        let jobs: Vec<(usize, ColorTransformJobPayload)> = table
+            .rows_mut()
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, (_, value, _))| {
+                let NodeValue::Texture(handle) = value else {
+                    return None;
+                };
+                if handle.ctx.is_null() {
+                    return None;
+                }
+                let payload = unsafe {
+                    oak_node::handle::get_checked::<ColorTransformJobPayload>(handle)
+                }
+                .cloned();
+                payload.map(|p| (i, p))
+            })
+            .collect();
+        for (i, payload) in jobs {
+            let resolved = match self.process_color_transform_job(&payload) {
+                Ok(texture) => NodeValue::Texture(oak_node::handle::make_owned(texture)),
+                Err(err) => {
+                    eprintln!("color transform job failed: {err:#}");
+                    payload.input.clone()
+                }
+            };
+            table.rows_mut()[i].1 = resolved;
+        }
+    }
+
     /// Execute one shader payload (C++ process_shader run by the render
     /// worker): compile the emitting behavior's fragment shader on the
-    /// shared GPU context, upload a CPU input frame when needed, run the
-    /// requested iterations and return the result texture. `None` when the
-    /// job cannot run (no GPU context, unknown node type, missing shader,
-    /// or a compile/upload/run failure) — the caller then falls back to
-    /// the effect input texture.
+    /// shared GPU context and run the requested iterations. **Every**
+    /// texture-typed param is bound by its input id (C++ binds all
+    /// sampler inputs — merge's base/blend, the keyers' garbage/core
+    /// mattes, opacity's texture modulation); a param boxing a nested
+    /// shader payload resolves recursively first (the C++
+    /// AcceleratedJob chain — generator-over-base `mrg` jobs). CPU
+    /// frames upload into scratch textures; the pass size comes from
+    /// the effect input's texture (else the first bound texture, else
+    /// the hook's frame size, else 1x1). `None` when the job cannot run
+    /// (no GPU context, unknown node type, missing shader, or a
+    /// compile/upload/run failure) — the caller then falls back to the
+    /// effect input texture.
     fn process_shader_job(&self, payload: &ShaderJobPayload) -> Option<Texture> {
+        self.process_shader_job_depth(payload, 0)
+    }
+
+    /// [`Self::process_shader_job`] with a recursion guard for nested
+    /// payloads (generator-over-base chains nest at most 2 deep).
+    fn process_shader_job_depth(&self, payload: &ShaderJobPayload, depth: u32) -> Option<Texture> {
+        /// Nested-payload recursion ceiling (defensive; real graphs nest
+        /// a generator job inside a merge job and stop there).
+        const MAX_JOB_DEPTH: u32 = 8;
+
         // One log line per shader per process instead of one per frame.
         let warn = |reason: &str| {
             let key = format!("shader:{}:{}", payload.type_id, payload.shader_id);
@@ -521,16 +609,6 @@ impl RenderEvalHooks {
                     payload.type_id, payload.shader_id
                 );
             }
-        };
-
-        // The main input texture: the param row entry under the effect
-        // input id (usually "tex_in"), already resolved by the traverser
-        // (footage decode runs before the shader pass in `resolve`).
-        let input = match payload.params.get(&payload.effect_input) {
-            Some(NodeValue::Texture(handle)) if !handle.ctx.is_null() => {
-                (unsafe { oak_node::handle::get_checked::<Texture>(handle) }).cloned()
-            }
-            _ => None,
         };
 
         let Some(ctx) = oak_core::backend::GpuContext::shared() else {
@@ -619,22 +697,52 @@ impl RenderEvalHooks {
             }
         };
 
-        // Inputs + pass size: GPU input textures bind directly; CPU frames
-        // upload into a scratch texture first (`uploaded` is freed on every
-        // exit path).
-        let (inputs, size, uploaded): (Vec<(String, u64)>, (i32, i32), Option<u64>) =
-            match &input {
-                Some(Texture::Gpu {
-                         token,
-                         width,
-                         height,
-                         ..
-                     }) => (
-                    vec![(payload.effect_input.clone(), *token)],
-                    (*width, *height),
-                    None,
-                ),
-                Some(Texture::Cpu(frame)) => {
+        // Bind every texture-typed param by name: genuine texture boxes
+        // bind directly (CPU frames upload into scratch first); nested
+        // shader payloads (the generator layer of an `mrg` job) resolve
+        // recursively. `scratch` holds the upload tokens created here;
+        // `keepalive` holds the cloned `Texture`s — a `Texture::Gpu`
+        // clone destroys its token on drop, so the clones must outlive
+        // the pass. Both are released when the job finishes (input-token
+        // destruction at job end matches the historical semantics).
+        let mut inputs: Vec<(String, u64)> = Vec::new();
+        let mut scratch: Vec<u64> = Vec::new();
+        let mut keepalive: Vec<Texture> = Vec::new();
+        let mut size: Option<(i32, i32)> = None;
+        let bind = |key: &str,
+                        value: &NodeValue,
+                        inputs: &mut Vec<(String, u64)>,
+                        scratch: &mut Vec<u64>,
+                        keepalive: &mut Vec<Texture>,
+                        size: &mut Option<(i32, i32)>|
+         -> Option<()> {
+            let NodeValue::Texture(handle) = value else {
+                return None;
+            };
+            if handle.ctx.is_null() {
+                return None;
+            }
+            let tex = (unsafe { oak_node::handle::get_checked::<Texture>(handle) })
+                .cloned()
+                .or_else(|| {
+                    if depth >= MAX_JOB_DEPTH {
+                        return None;
+                    }
+                    let nested = (unsafe {
+                        oak_node::handle::get_checked::<ShaderJobPayload>(handle)
+                    })
+                    .cloned()?;
+                    Some(self.process_shader_job_depth(&nested, depth + 1)?)
+                });
+            let tex = tex?;
+            let (token, tex_size) = match &tex {
+                Texture::Gpu {
+                    token,
+                    width,
+                    height,
+                    ..
+                } => (*token, (*width, *height)),
+                Texture::Cpu(frame) => {
                     let token = match ctx.create_texture(frame.width, frame.height) {
                         Ok(t) => t,
                         Err(err) => {
@@ -647,20 +755,50 @@ impl RenderEvalHooks {
                         warn(&format!("input upload failed: {err:#}"));
                         return None;
                     }
-                    (
-                        vec![(payload.effect_input.clone(), token)],
-                        (frame.width, frame.height),
-                        Some(token),
-                    )
+                    scratch.push(token);
+                    (token, (frame.width, frame.height))
                 }
-                None => (Vec::new(), (1, 1), None),
             };
+            // The pass size follows the effect input's texture (C++ the
+            // job's video params = the main input size); any other bound
+            // texture sets it only when no effect input was seen.
+            if size.is_none() || key == payload.effect_input {
+                *size = Some(tex_size);
+            }
+            inputs.push((key.to_string(), token));
+            keepalive.push(tex);
+            Some(())
+        };
+
+        // The effect input binds first: `run_effect` falls back to
+        // `inputs.first()` for the shader's first declared sampler.
+        let effect_value = payload.params.get(&payload.effect_input).cloned();
+        if let Some(value) = &effect_value {
+            bind(
+                &payload.effect_input,
+                value,
+                &mut inputs,
+                &mut scratch,
+                &mut keepalive,
+                &mut size,
+            );
+        }
+        for (key, value) in &payload.params {
+            if key == &payload.effect_input {
+                continue;
+            }
+            bind(key, value, &mut inputs, &mut scratch, &mut keepalive, &mut size);
+        }
+        // Generators bind no texture: render at the requested frame size
+        // (the graph driver sets it to the sequence size); 1x1 only when
+        // nobody knows better.
+        let size = size.or(self.frame_size).unwrap_or((1, 1));
 
         let dst = match ctx.create_texture(size.0.max(1), size.1.max(1)) {
             Ok(t) => t,
             Err(err) => {
-                if let Some(t) = uploaded {
-                    ctx.destroy_texture(t);
+                for t in &scratch {
+                    ctx.destroy_texture(*t);
                 }
                 warn(&format!("output texture: {err:#}"));
                 return None;
@@ -675,9 +813,14 @@ impl RenderEvalHooks {
             dst,
             size,
             payload.iterations.max(1) as u32,
+            if payload.iterative_input.is_empty() {
+                None
+            } else {
+                Some(payload.iterative_input.as_str())
+            },
         );
-        if let Some(t) = uploaded {
-            ctx.destroy_texture(t);
+        for t in &scratch {
+            ctx.destroy_texture(*t);
         }
         match result {
             Ok(()) => Some(Texture::Gpu {
@@ -717,6 +860,7 @@ impl oak_node::traverser::RenderHooks for RenderEvalHooks {
         self.resolve_plugin_jobs(table);
         self.resolve_footage_jobs(table);
         self.resolve_shader_jobs(table);
+        self.resolve_color_transform_jobs(table);
     }
 }
 
@@ -2304,7 +2448,111 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// The composite seam matches the C++ alpha-over math: bottom (last)
+    /// The resolve seam applies a ColorTransformJob's OCIO processor for
+    /// real (C++ ColorTransformJob processing): a CPU frame converts
+    /// through the LUT in place.
+    #[test]
+    fn resolve_color_transform_job_applies_lut_on_cpu() {
+        if oak_core::color::set_up_default_config().is_err() {
+            eprintln!("bundled OCIO missing; skipping");
+            return;
+        }
+        // 1D LUT doubling the red channel (linear ramp 0→0, 1→2).
+        let path = std::env::temp_dir()
+            .join(format!("oakrender_lut_double_{}.cube", std::process::id()));
+        std::fs::write(&path, "LUT_1D_SIZE 2\n0.0 0.0 0.0\n2.0 1.0 1.0\n").unwrap();
+
+        let Some(processor) = oak_core::color::ColorProcessor::create_lut(
+            path.to_str().unwrap(),
+            oak_core::color::Direction::Normal,
+        )
+        .filter(|p| p.is_valid()) else {
+            eprintln!("LUT processor unavailable; skipping");
+            let _ = std::fs::remove_file(&path);
+            return;
+        };
+
+        // Input: a 0.25-grey CPU frame.
+        let mut frame = generate_frame(Rational::new(0, 1), (2, 2), PixelFormat::F32).unwrap();
+        for px in frame.data.chunks_exact_mut(16) {
+            for (c, v) in px.chunks_exact_mut(4).zip([0.25f32, 0.25, 0.25, 1.0]) {
+                c.copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        let payload = ColorTransformJobPayload {
+            color_processor: std::sync::Arc::new(processor),
+            input: NodeValue::Texture(oak_node::handle::make_owned(Texture::wrap_frame(frame))),
+            time: Rational::new(0, 1),
+        };
+        let mut table = NodeValueTable::default();
+        table.push(
+            oak_node::value::ValueType::Texture,
+            NodeValue::Texture(oak_node::handle::make_owned(payload)),
+            None,
+        );
+
+        use oak_node::traverser::RenderHooks;
+        let mut hooks = RenderEvalHooks::new();
+        hooks.resolve(
+            oak_node::id::NodeId::INVALID,
+            &NodeValueRow::new(),
+            &mut table,
+        );
+
+        let rows = table.rows();
+        let NodeValue::Texture(handle) = &rows[0].1 else {
+            unreachable!()
+        };
+        let out = unsafe { oak_node::handle::get_checked::<Texture>(handle) }
+            .expect("the job box is replaced by the converted texture");
+        let px = first_pixel(out);
+        assert!(
+            (px[0] - 0.5).abs() < 1e-3,
+            "red channel doubles through the LUT: {px:?}"
+        );
+        assert!((px[1] - 0.25).abs() < 1e-4, "green unchanged: {px:?}");
+        assert_eq!(px[3], 1.0, "alpha preserved");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An invalid processor passes the input texture through unchanged
+    /// (C++ creates processors non-fatally).
+    #[test]
+    fn resolve_color_transform_job_passes_through_when_processor_invalid() {
+        let mut frame = generate_frame(Rational::new(0, 1), (2, 2), PixelFormat::F32).unwrap();
+        for px in frame.data.chunks_exact_mut(16) {
+            for (c, v) in px.chunks_exact_mut(4).zip([0.4f32, 0.3, 0.2, 1.0]) {
+                c.copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        let payload = ColorTransformJobPayload {
+            color_processor: std::sync::Arc::new(ColorProcessor::pass_through()),
+            input: NodeValue::Texture(oak_node::handle::make_owned(Texture::wrap_frame(frame))),
+            time: Rational::new(0, 1),
+        };
+        let mut table = NodeValueTable::default();
+        table.push(
+            oak_node::value::ValueType::Texture,
+            NodeValue::Texture(oak_node::handle::make_owned(payload)),
+            None,
+        );
+
+        use oak_node::traverser::RenderHooks;
+        let mut hooks = RenderEvalHooks::new();
+        hooks.resolve(
+            oak_node::id::NodeId::INVALID,
+            &NodeValueRow::new(),
+            &mut table,
+        );
+
+        let rows = table.rows();
+        let NodeValue::Texture(handle) = &rows[0].1 else {
+            unreachable!()
+        };
+        let out = unsafe { oak_node::handle::get_checked::<Texture>(handle) }
+            .expect("the job box is replaced by the input texture");
+        assert_eq!(first_pixel(out), [0.4, 0.3, 0.2, 1.0], "untouched");
+    }
     /// into transparent, then top (first) over it — `out = src*a +
     /// dst*(1-a)`, `out_a = a + dst_a*(1-a)` (premultiplied source).
     #[test]
@@ -2431,5 +2679,215 @@ mod tests {
         ctx.destroy_texture(dst);
         ctx.destroy_texture(src);
     }
+
+    /// Pixel readback helper for the GPU verification tests.
+    fn pixel_at(frame: &Frame, x: usize, y: usize) -> [f32; 4] {
+        let at = (y * frame.width as usize + x) * 16;
+        let mut out = [0f32; 4];
+        for c in 0..4 {
+            out[c] = f32::from_le_bytes(frame.data[at + c * 4..at + c * 4 + 4].try_into().unwrap());
+        }
+        out
+    }
+
+    /// Build a solid-color F32 CPU frame.
+    fn filled_frame(size: (i32, i32), rgba: [f32; 4]) -> Texture {
+        let mut frame = generate_frame(Rational::new(0, 1), size, PixelFormat::F32).unwrap();
+        for px in frame.data.chunks_exact_mut(16) {
+            for (c, v) in px.chunks_exact_mut(4).zip(rgba) {
+                c.copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        Texture::wrap_frame(frame)
+    }
+
+    /// Evaluate one node's `value()` against `inputs` and resolve the
+    /// resulting table through the hooks (the full value -> job -> GPU
+    /// run -> texture path), reading the frame back while the table —
+    /// which owns the texture's GPU token — is still alive.
+    fn eval_node_row(
+        type_id: &str,
+        inputs: NodeValueRow,
+        frame_size: Option<(i32, i32)>,
+    ) -> Frame {
+        use oak_node::traverser::RenderHooks;
+        let (core, behavior) = oak_node::factory::Factory::global()
+            .create_any(type_id)
+            .expect("node type registered");
+        let mut table = NodeValueTable::default();
+        behavior.value(&core, &inputs, Rational::new(0, 1), &mut table);
+        let mut hooks = RenderEvalHooks::new();
+        hooks.frame_size = frame_size;
+        hooks.resolve(oak_node::id::NodeId::INVALID, &inputs, &mut table);
+        let Some(NodeValue::Texture(handle)) =
+            table.get(oak_node::value::ValueType::Texture)
+        else {
+            panic!("{type_id}: no texture produced");
+        };
+        if handle.ctx.is_null() {
+            panic!("{type_id}: null texture produced");
+        }
+        let tex = (unsafe { oak_node::handle::get_checked::<Texture>(handle) })
+            .expect("resolved texture");
+        assert!(
+            matches!(tex, Texture::Gpu { .. }),
+            "{type_id}: the job must render on the GPU"
+        );
+        tex.to_frame().expect("readback")
+    }
+
+    /// Merge over the real GPU path: the merge node declares no effect
+    /// input, so base and blend must bind by name for the alpha-over to
+    /// run at all. Red base + half-alpha green blend -> (0.5, 1, 0, 1).
+    #[test]
+    fn gpu_merge_alpha_over_binds_base_and_blend() {
+        if oak_core::backend::GpuContext::shared().is_none() {
+            eprintln!("no adapter; skipping");
+            return;
+        }
+        let mut inputs = NodeValueRow::new();
+        inputs.insert(
+            "base_in".into(),
+            texture_value(filled_frame((16, 16), [1.0, 0.0, 0.0, 1.0])),
+        );
+        inputs.insert(
+            "blend_in".into(),
+            texture_value(filled_frame((16, 16), [0.0, 1.0, 0.0, 0.5])),
+        );
+        let frame = eval_node_row("org.olivevideoeditor.Olive.merge", inputs, None);
+        assert_eq!(frame.width, 16, "the pass size follows the base");
+        for (x, y) in [(0, 0), (8, 8), (15, 15)] {
+            let px = pixel_at(&frame, x, y);
+            let want = [0.5, 1.0, 0.0, 1.0];
+            for (c, (got, w)) in px.iter().zip(want).enumerate() {
+                assert!(
+                    (got - w).abs() < 1e-4,
+                    "merge ({x},{y}) ch{c}: got {got}, want {w}"
+                );
+            }
+        }
+    }
+
+    /// A bare generator (no input connected) renders at the hook's frame
+    /// size instead of a 1x1 the composite step would drop.
+    #[test]
+    fn gpu_generator_without_input_renders_at_frame_size() {
+        if oak_core::backend::GpuContext::shared().is_none() {
+            eprintln!("no adapter; skipping");
+            return;
+        }
+        let mut inputs = NodeValueRow::new();
+        inputs.insert("color_in".into(), NodeValue::Color([0.2, 0.4, 0.6, 1.0]));
+        let frame = eval_node_row(
+            "org.olivevideoeditor.Olive.solidgenerator",
+            inputs,
+            Some((8, 4)),
+        );
+        assert_eq!((frame.width, frame.height), (8, 4));
+        let px = pixel_at(&frame, 3, 2);
+        for (c, w) in [0.2f32, 0.4, 0.6, 1.0].iter().enumerate() {
+            assert!(
+                (px[c] - w).abs() < 1e-4,
+                "solid ch{c}: got {}, want {w}",
+                px[c]
+            );
+        }
+    }
+
+    /// Generator-over-base ("mrg"): the nested generator job resolves
+    /// recursively and alpha-overs onto the base — the pentagon is green
+    /// (the generated layer), the corners stay red (the base).
+    #[test]
+    fn gpu_generator_over_base_composites_nested_job() {
+        if oak_core::backend::GpuContext::shared().is_none() {
+            eprintln!("no adapter; skipping");
+            return;
+        }
+        let mut inputs = NodeValueRow::new();
+        inputs.insert(
+            "base_in".into(),
+            texture_value(filled_frame((512, 512), [1.0, 0.0, 0.0, 1.0])),
+        );
+        inputs.insert("color_in".into(), NodeValue::Color([0.0, 1.0, 0.0, 1.0]));
+        let frame = eval_node_row("org.olivevideoeditor.Olive.polygon", inputs, Some((512, 512)));
+        assert_eq!((frame.width, frame.height), (512, 512));
+        let center = pixel_at(&frame, 256, 256);
+        assert!(
+            center[1] > 0.9 && center[0] < 0.1,
+            "pentagon center is the generated green: {center:?}"
+        );
+        let corner = pixel_at(&frame, 5, 5);
+        assert!(
+            corner[0] > 0.9 && corner[1] < 0.1,
+            "corner keeps the red base: {corner:?}"
+        );
+    }
+
+    /// Drop shadow with non-zero softness: three iterations feed back
+    /// through `previous_iteration_in`; the blurred shadow lands offset
+    /// from the source, widening the non-transparent area.
+    #[test]
+    fn gpu_dropshadow_softness_blurs_and_offsets() {
+        if oak_core::backend::GpuContext::shared().is_none() {
+            eprintln!("no adapter; skipping");
+            return;
+        }
+        // 16x16 transparent frame with an opaque 4x4 square at (4,4).
+        let mut frame = generate_frame(Rational::new(0, 1), (16, 16), PixelFormat::F32).unwrap();
+        for y in 4..8usize {
+            for x in 4..8usize {
+                let at = (y * 16 + x) * 16;
+                for (c, v) in [1.0f32, 1.0, 1.0, 1.0].iter().enumerate() {
+                    frame.data[at + c * 4..at + c * 4 + 4].copy_from_slice(&v.to_le_bytes());
+                }
+            }
+        }
+        let mut inputs = NodeValueRow::new();
+        inputs.insert("tex_in".into(), texture_value(Texture::wrap_frame(frame)));
+        inputs.insert("color_in".into(), NodeValue::Color([0.0, 0.0, 0.0, 1.0]));
+        inputs.insert("distance_in".into(), NodeValue::Float(4.0));
+        inputs.insert("angle_in".into(), NodeValue::Float(45.0));
+        inputs.insert("radius_in".into(), NodeValue::Float(2.0));
+        inputs.insert("opacity_in".into(), NodeValue::Float(1.0));
+        inputs.insert("fast_in".into(), NodeValue::Boolean(false));
+
+        let out_frame = eval_node_row("org.olivevideoeditor.Olive.dropshadow", inputs, None);
+        assert_eq!((out_frame.width, out_frame.height), (16, 16));
+        let covered = out_frame
+            .data
+            .chunks_exact(16)
+            .filter(|px| f32::from_le_bytes(px[12..16].try_into().unwrap()) > 0.01)
+            .count();
+        assert!(
+            covered > 16,
+            "the offset blurred shadow must widen the covered area beyond the 4x4 source square: {covered}"
+        );
+    }
+    /// Transform over the real GPU path: the fragment-side inverse
+    /// sampling applies the node's matrix for real — a +3px x
+    /// translation moves the white pixel from (2, 3) to (5, 3).
+    #[test]
+    fn gpu_transform_translates_pixels() {
+        if oak_core::backend::GpuContext::shared().is_none() {
+            eprintln!("no adapter; skipping");
+            return;
+        }
+        // 8x8 black frame with one white pixel at (2, 3).
+        let mut frame = generate_frame(Rational::new(0, 1), (8, 8), PixelFormat::F32).unwrap();
+        let at = (3 * 8 + 2) * 16;
+        for (c, v) in [1.0f32, 1.0, 1.0, 1.0].iter().enumerate() {
+            frame.data[at + c * 4..at + c * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        let mut inputs = NodeValueRow::new();
+        inputs.insert("tex_in".into(), texture_value(Texture::wrap_frame(frame)));
+        inputs.insert("pos_in".into(), NodeValue::Vec2([3.0, 0.0]));
+
+        let out = eval_node_row("org.olivevideoeditor.Olive.transform", inputs, None);
+        assert_eq!((out.width, out.height), (8, 8));
+        assert_eq!(pixel_at(&out, 2, 3), [0.0, 0.0, 0.0, 0.0], "source spot vacated");
+        assert_eq!(pixel_at(&out, 5, 3), [1.0, 1.0, 1.0, 1.0], "pixel moved +3 in x");
+        assert_eq!(pixel_at(&out, 0, 0), [0.0, 0.0, 0.0, 0.0]);
+    }
+
 }
 
