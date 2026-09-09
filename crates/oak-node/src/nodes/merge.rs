@@ -122,9 +122,10 @@ impl NodeBehavior for MergeNode {
 	/// renderer's resolve hook executes and replaces with the result
 	/// texture; the params row carries both input textures, keyed by
 	/// their input ids. The C++ `MergeNode` constructor never sets an
-	/// effect input, so `effect_input` is empty and the runner has no
-	/// main texture to bind — binding `base_in`/`blend_in` explicitly is
-	/// a renderer TODO. The "blend has fewer than 4 channels" check
+	/// effect input, so `effect_input` is empty and the runner binds
+	/// `base_in`/`blend_in` explicitly by name (the pass size follows the
+	/// first bound texture — the base). The "blend has fewer than 4
+	/// channels" check
 	/// needs the texture's channel count, which the Rust texture handle
 	/// does not carry, so the alpha-less blend case is only
 	/// distinguishable by presence here (`// CPP-PARITY: merge.cpp`

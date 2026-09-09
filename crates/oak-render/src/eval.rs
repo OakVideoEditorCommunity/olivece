@@ -2889,5 +2889,103 @@ mod tests {
         assert_eq!(pixel_at(&out, 0, 0), [0.0, 0.0, 0.0, 0.0]);
     }
 
+    /// Shape generator over the real GPU path: a centered 8x8 rectangle
+    /// on a 16x16 frame fills exactly the middle block (pixel centers
+    /// with texcoord in [0.25, 0.75)), everything outside stays
+    /// transparent.
+    #[test]
+    fn gpu_shape_rectangle_draws_centered_block() {
+        if oak_core::backend::GpuContext::shared().is_none() {
+            eprintln!("no adapter; skipping");
+            return;
+        }
+        let mut inputs = NodeValueRow::new();
+        inputs.insert("pos_in".into(), NodeValue::Vec2([0.0, 0.0]));
+        inputs.insert("size_in".into(), NodeValue::Vec2([8.0, 8.0]));
+        inputs.insert("color_in".into(), NodeValue::Color([1.0, 0.0, 0.0, 1.0]));
+        inputs.insert("type_in".into(), NodeValue::Combo(0));
+        inputs.insert("radius_in".into(), NodeValue::Float(20.0));
+
+        let frame = eval_node_row("org.olivevideoeditor.Olive.shape", inputs, Some((16, 16)));
+        assert_eq!((frame.width, frame.height), (16, 16));
+        for (x, y, inside) in [(8, 8, true), (4, 4, true), (11, 11, true), (0, 0, false), (3, 8, false), (12, 8, false), (15, 15, false)] {
+            let px = pixel_at(&frame, x, y);
+            if inside {
+                assert_eq!(px, [1.0, 0.0, 0.0, 1.0], "({x},{y}) inside the rect");
+            } else {
+                assert_eq!(px, [0.0, 0.0, 0.0, 0.0], "({x},{y}) outside the rect");
+            }
+        }
+    }
+
+    /// Shape generator, the ellipse and rounded-rectangle dispatches:
+    /// the ellipse fills the center and fades out before the corners;
+    /// the rounded rect fills the middle but cuts the corner at (4,4)
+    /// (radius 20 clamps to half the 8px size).
+    #[test]
+    fn gpu_shape_ellipse_and_rounded_rect() {
+        if oak_core::backend::GpuContext::shared().is_none() {
+            eprintln!("no adapter; skipping");
+            return;
+        }
+        let base_inputs = || {
+            let mut inputs = NodeValueRow::new();
+            inputs.insert("pos_in".into(), NodeValue::Vec2([0.0, 0.0]));
+            inputs.insert("size_in".into(), NodeValue::Vec2([8.0, 8.0]));
+            inputs.insert("color_in".into(), NodeValue::Color([1.0, 0.0, 0.0, 1.0]));
+            inputs.insert("radius_in".into(), NodeValue::Float(20.0));
+            inputs
+        };
+
+        let mut ellipse = base_inputs();
+        ellipse.insert("type_in".into(), NodeValue::Combo(1));
+        let frame = eval_node_row("org.olivevideoeditor.Olive.shape", ellipse, Some((16, 16)));
+        assert_eq!(pixel_at(&frame, 8, 8), [1.0, 0.0, 0.0, 1.0], "ellipse center");
+        assert_eq!(pixel_at(&frame, 0, 0), [0.0, 0.0, 0.0, 0.0], "ellipse corner faded out");
+
+        let mut rounded = base_inputs();
+        rounded.insert("type_in".into(), NodeValue::Combo(2));
+        let frame = eval_node_row("org.olivevideoeditor.Olive.shape", rounded, Some((16, 16)));
+        assert_eq!(pixel_at(&frame, 8, 8), [1.0, 0.0, 0.0, 1.0], "rounded rect middle");
+        assert_eq!(pixel_at(&frame, 6, 6), [1.0, 0.0, 0.0, 1.0], "rounded rect inside the corner arc");
+        assert_eq!(pixel_at(&frame, 0, 0), [0.0, 0.0, 0.0, 0.0], "rounded rect far corner");
+        assert!(
+            pixel_at(&frame, 4, 4)[3] < 0.1,
+            "rounded rect corner (4,4) is cut by the arc: {:?}",
+            pixel_at(&frame, 4, 4)
+        );
+    }
+
+    /// Despill over the real GPU path: green-screen AVERAGE caps the
+    /// green channel at the red/blue average (the shader's method
+    /// dispatch must survive translation).
+    #[test]
+    fn gpu_despill_average_caps_green() {
+        if oak_core::backend::GpuContext::shared().is_none() {
+            eprintln!("no adapter; skipping");
+            return;
+        }
+        let mut inputs = NodeValueRow::new();
+        inputs.insert(
+            "tex_in".into(),
+            texture_value(filled_frame((4, 4), [0.2, 0.9, 0.3, 1.0])),
+        );
+        inputs.insert("color_in".into(), NodeValue::Combo(0));
+        inputs.insert("method_in".into(), NodeValue::Combo(0));
+        inputs.insert("preserve_luminance_input".into(), NodeValue::Boolean(false));
+
+        let frame = eval_node_row("org.olivevideoeditor.Olive.despill", inputs, None);
+        assert_eq!((frame.width, frame.height), (4, 4));
+        let px = pixel_at(&frame, 2, 2);
+        let want = [0.2f32, 0.25, 0.3, 1.0];
+        for (c, w) in want.iter().enumerate() {
+            assert!(
+                (px[c] - w).abs() < 1e-4,
+                "despill ch{c}: got {}, want {w}",
+                px[c]
+            );
+        }
+    }
+
 }
 

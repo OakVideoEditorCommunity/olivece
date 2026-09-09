@@ -43,8 +43,10 @@ pub const RADIUS_INPUT: &str = "radius_in";
 pub struct ShapeNode;
 
 /// Fragment shader for the `"shape"` shader id (C++ loads
-/// `:/shaders/shape.frag` in `get_shader_code`). Text copied verbatim
-/// from `engine/shaders/shape.frag`.
+/// `:/shaders/shape.frag` in `get_shader_code`). Text adapted from
+/// `engine/shaders/shape.frag`: the C++ `switch (type_in)` dispatch is
+/// spelled as if/else chains because naga's WGSL emitter rejects
+/// fall-through-capable GLSL switch blocks.
 const SHADER_FRAG: &str = r#"// Input texture coordinate
 in vec2 ove_texcoord;
 out vec4 frag_color;
@@ -88,22 +90,14 @@ void main() {
 
   vec4 col = vec4(0.0);
 
-  switch (type_in) {
-  case SHAPE_RECTANGLE:
-  {
+  if (type_in == SHAPE_RECTANGLE) {
     col = draw_rect(real_position, real_size);
-    break;
-  }
-  case SHAPE_ELLIPSE:
-  {
+  } else if (type_in == SHAPE_ELLIPSE) {
     vec2 center = p+size_in*0.5;
     float radius = size_in.y*0.5;
     float aspect_ratio = size_in.x/size_in.y;
     col = draw_ellipse(center, radius, aspect_ratio);
-    break;
-  }
-  case SHAPE_ROUNDEDRECT:
-  {
+  } else if (type_in == SHAPE_ROUNDEDRECT) {
     // Limit radius so it is never larger than half the shortest size
     float r = min(radius_in, min(size_in.y*0.5, size_in.x*0.5));
     vec2 real_rad = vec2(r / resolution_in.x, r / resolution_in.y);
@@ -122,8 +116,6 @@ void main() {
     } else {
       col = draw_rect(real_position, real_size);
     }
-    break;
-  }
   }
 
   frag_color = col;
@@ -199,9 +191,8 @@ impl NodeBehavior for ShapeNode {
 	/// the params here. With a `base_in` texture connected, the C++
 	/// `push_mergable_job` instead pushes a `"mrg"` alpha-over job whose
 	/// `blend_in` is the shape job nested as a texture value — mirrored
-	/// here as a nested payload, which the renderer cannot yet
-	/// recursively resolve (TODO; `// CPP-PARITY: shapenode.cpp`
-	/// `value()`, `generatorwithmerge.cpp` `push_mergable_job`).
+	/// here as a nested payload, which the renderer resolves recursively
+	/// (see `process_shader_job_depth`).
 	fn value(
 		&self,
 		core: &NodeCore,
@@ -231,10 +222,9 @@ impl NodeBehavior for ShapeNode {
 				// texture and `blend_in` = the shape job nested as a texture
 				// value; the merge's params are a fresh row holding exactly
 				// those two keys, and the default `ShaderJob` has
-				// `iterations = 1` and no iterative input. Recursively
-				// resolving the nested payload is a renderer TODO
-				// (`// CPP-PARITY: generatorwithmerge.cpp`
-				// `push_mergable_job`).
+				// `iterations = 1` and no iterative input. The renderer
+				// resolves the nested payload recursively
+				// (`process_shader_job_depth`).
 				let mut params = crate::value::NodeValueRow::new();
 				params.insert(
 					super::generatorwithmerge::BASE_INPUT.to_string(),

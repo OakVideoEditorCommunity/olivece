@@ -52,9 +52,12 @@ pub const LUMA_COEFFS_INPUT: &str = "luma_coeffs";
 pub struct DespillNode;
 
 /// Fragment shader (C++ loads the `:/shaders/despill.frag` resource in
-/// `get_shader_code`). Text copied verbatim from
-/// `engine/shaders/despill.frag`. The `luma_coeffs` uniform is not a
-/// node input — it is injected into the shader job by `value()`.
+/// `get_shader_code`). Text adapted from
+/// `engine/shaders/despill.frag`: the C++ `switch (method_in)`
+/// dispatch is spelled as if/else chains because naga's WGSL emitter
+/// rejects fall-through-capable GLSL switch blocks. The `luma_coeffs`
+/// uniform is not a node input — it is injected into the shader job by
+/// `value()`.
 const SHADER_FRAG: &str = r#"uniform sampler2D tex_in;
 uniform int color_in;
 uniform int method_in;
@@ -75,40 +78,30 @@ void main(void) {
     float color_average = 0.0;
 
     if(color_in == 0) { // Green screen
-        switch (method_in) {
-        case AVERAGE:
+        if (method_in == AVERAGE) {
             color_average = dot(tex_col.rb, vec2(0.5)); // (tex_col.r + tex_col.b) / 2.0
             tex_col.g = tex_col.g > color_average ? color_average: tex_col.g;
-            break;
-        case DOUBLE_RED_AVERAGE:
+        } else if (method_in == DOUBLE_RED_AVERAGE) {
             color_average = dot(tex_col.rb, vec2(2.0, 1.0) / 3.0); // (2.0 * tex_col.r + tex_col.b) / 3.0
             tex_col.g = tex_col.g > color_average ? color_average : tex_col.g;
-            break;
-        case DOUBLE_AVERAGE:
+        } else if (method_in == DOUBLE_AVERAGE) {
             color_average = dot(tex_col.br, vec2(2.0, 1.0) / 3.0); // (2.0 * tex_col.b + tex_col.r) / 3.0
             tex_col.g = tex_col.g > color_average ? color_average : tex_col.g;
-            break;
-        case BLUE_LIMIT:
+        } else if (method_in == BLUE_LIMIT) {
             tex_col.g = tex_col.g > tex_col.b ? tex_col.b : tex_col.g;
-            break;
         }
     } else { // Blue screen
-        switch (method_in) {
-        case AVERAGE:
+        if (method_in == AVERAGE) {
             color_average = dot(tex_col.rg, vec2(0.5)); // (tex_col.r + tex_col.g) / 2.0
             tex_col.b = tex_col.b > color_average ? color_average : tex_col.b;
-            break;
-        case DOUBLE_RED_AVERAGE:
+        } else if (method_in == DOUBLE_RED_AVERAGE) {
             color_average = dot(tex_col.rg, vec2(2.0, 1.0) / 3.0); // (2.0 * tex_col.r + tex_col.g) / 3.0
             tex_col.b = tex_col.b > color_average ? color_average : tex_col.b;
-            break;
-        case DOUBLE_AVERAGE:
+        } else if (method_in == DOUBLE_AVERAGE) {
             color_average = dot(tex_col.gr, vec2(2.0, 1.0) / 3.0); // (2.0 * tex_col.g+ tex_col.r) / 3.0
             tex_col.b = tex_col.b > color_average ? color_average : tex_col.b;
-            break;
-        case BLUE_LIMIT:
+        } else if (method_in == BLUE_LIMIT) {
             tex_col.b = tex_col.b > tex_col.g ? tex_col.g : tex_col.b;
-            break;
         }
     }
 
