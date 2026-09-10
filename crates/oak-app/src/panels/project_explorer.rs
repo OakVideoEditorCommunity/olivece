@@ -262,6 +262,27 @@ impl<E: AppEngine> Render for ProjectExplorerPanel<E> {
 				cx.emit(NewSequenceRequested);
 			}))
 			.child(crate::i18n::tr("project.new_sequence"));
+		// 添加文本素材: creates a text generator (a bin entry that drops on
+		// the timeline as a generator clip).
+		let add_text_button = div()
+			.id("project-add-text-footage")
+			.debug_selector(|| "project-add-text-footage".into())
+			.px_2()
+			.py_0p5()
+			.rounded_sm()
+			.flex()
+			.items_center()
+			.cursor_pointer()
+			.text_color(colors.text)
+			.text_xs()
+			.hover(|style| style.bg(colors.selected))
+			.tooltip(move |window, cx| {
+				tooltip_view(crate::i18n::tr("project.add_text_footage").into(), window, cx)
+			})
+			.on_click(cx.listener(|_this, _event: &ClickEvent, _window, cx| {
+				cx.emit(NewTextFootageRequested);
+			}))
+			.child(crate::i18n::tr("project.add_text_footage"));
 		let header = div()
 			.flex()
 			.items_center()
@@ -274,6 +295,7 @@ impl<E: AppEngine> Render for ProjectExplorerPanel<E> {
 			.text_sm()
 			.text_color(colors.text)
 			.child(div().flex_1().child(crate::i18n::tr("panel.project")))
+			.child(add_text_button)
 			.child(new_sequence_button);
 		div()
 			.size_full()
@@ -315,6 +337,13 @@ impl<E: AppEngine> EventEmitter<SequencePropertiesRequested> for ProjectExplorer
 pub struct NewSequenceRequested;
 
 impl<E: AppEngine> EventEmitter<NewSequenceRequested> for ProjectExplorerPanel<E> {}
+
+/// The project explorer asked the shell to create a text generator bin
+/// entry (the header's 添加文本素材 action).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewTextFootageRequested;
+
+impl<E: AppEngine> EventEmitter<NewTextFootageRequested> for ProjectExplorerPanel<E> {}
 
 /// The project explorer asked the shell to rename entry `id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -39,6 +39,9 @@
 //!   tested).
 //! * [`timecode`] — timecode / duration / fps / resolution formatting (pure,
 //!   unit tested).
+//! * [`textengine`] — the cosmic-text backend behind the text generator
+//!   nodes: the measure/render hooks they call through (`install`), and the
+//!   system font list feeding their font-family combo.
 
 pub mod audio_thread;
 pub mod component;
@@ -57,6 +60,7 @@ pub mod projectbrowser;
 pub mod real;
 pub mod renderops;
 pub mod scopes;
+pub mod textengine;
 pub mod timecode;
 pub mod transport;
 pub mod waveform;

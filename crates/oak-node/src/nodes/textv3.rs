@@ -26,17 +26,38 @@
 //! RGBA8888-premultiplied buffer); it now runs behind the
 //! facade-installed hooks in [`super::textbackend`]. No Rust font crate
 //! is chosen here on purpose.
+//!
+//! REDESIGN (Rust-only, no C++ counterpart): on top of the ported v3
+//! node this adds a structured, user-facing input set — `plain_text_in`,
+//! `font_family_in`, `font_size_in` and the outline/glow enable/color/
+//! size inputs — while the legacy `text_in` HTML input stays as the
+//! serialized compatibility carrier (now hidden) and as the migration
+//! source for pre-redesign projects ([`migrate_legacy_html`]). The
+//! outline/glow inputs drive a GPU post-process chain in [`value`]: the
+//! rasterized text coverage is dilated (square structuring element,
+//! `outline_width_in` clamped to 0..7) and colorized into a stroke,
+//! and/or blurred once per axis (two passes, `glow_radius_in` clamped
+//! to 0..64) and colorized into a glow; the results are alpha-over'd
+//! beneath the text. With both enabled the outline runs first and the
+//! glow samples the stroke. With both disabled (or no render backend
+//! installed) the node keeps the pre-redesign deferred null-job
+//! behavior.
 
 use crate::factory::NodeMeta;
+use crate::jobs::ShaderJobPayload;
 use crate::node::{Category, NodeBehavior, NodeCore};
 use crate::value::{NodeValue, NodeValueRow, NodeValueTable};
+use oak_core::frame::VideoParamsPod;
+use oak_core::texture::{Frame, Texture};
 use oak_core::Rational;
 
 use super::textbackend::{TextLayoutMode, TextLayoutRequest, TextLayoutSize, TextRenderTransform};
 
 /// Text input id (C++ `k_text_input`). Type: text; default
-/// `"<p style='font-size: 72pt; color: white;'>Sample Text</p>"`;
-/// properties: `vieweronly = true`.
+/// `LEGACY_DEFAULT_TEXT_HTML`; properties: `vieweronly = true`; flags:
+/// hidden (REDESIGN: carried internally and kept for the serialized
+/// compatibility of pre-redesign projects; the user-facing text is
+/// [`PLAIN_TEXT_INPUT`]).
 pub const TEXT_INPUT: &str = "text_in";
 
 /// Vertical alignment input id (C++ `k_vertical_alignment_input`).
@@ -51,6 +72,65 @@ pub const USE_ARGS_INPUT: &str = "use_args_in";
 /// Format arguments array input id (C++ `k_args_input`). Type: text;
 /// flags: array; properties: `arraystart = 1`.
 pub const ARGS_INPUT: &str = "args_in";
+
+/// Plain text input id (REDESIGN addition, no C++ counterpart). Type:
+/// text; default [`DEFAULT_PLAIN_TEXT`]. The editable user-facing text
+/// and — when a text layout backend is installed — the text the
+/// generator lays out; the legacy (hidden) [`TEXT_INPUT`] HTML stays as
+/// the compatibility carrier.
+pub const PLAIN_TEXT_INPUT: &str = "plain_text_in";
+
+/// Font family input id (REDESIGN addition, no C++ counterpart). Type:
+/// str-combo; default empty (the backend's default font). The option
+/// list is injected by the backend layer (a `combo_option` property),
+/// so this node has no [`TextGeneratorV3::input_combo_strings`] entry
+/// for it; free-form entry is allowed.
+pub const FONT_FAMILY_INPUT: &str = "font_family_in";
+
+/// Font size input id (REDESIGN addition, no C++ counterpart). Type:
+/// float; default `72.0`; properties: `min = 1.0`.
+pub const FONT_SIZE_INPUT: &str = "font_size_in";
+
+/// Outline enable toggle input id (REDESIGN addition, no C++
+/// counterpart). Type: boolean; default `false`.
+pub const OUTLINE_ENABLED_INPUT: &str = "outline_enabled_in";
+
+/// Outline color input id (REDESIGN addition, no C++ counterpart).
+/// Type: color; default opaque black.
+pub const OUTLINE_COLOR_INPUT: &str = "outline_color_in";
+
+/// Outline width input id (REDESIGN addition, no C++ counterpart).
+/// Type: float; default `2.0`; properties: `min = 0.0`.
+pub const OUTLINE_WIDTH_INPUT: &str = "outline_width_in";
+
+/// Glow enable toggle input id (REDESIGN addition, no C++
+/// counterpart). Type: boolean; default `false`.
+pub const GLOW_ENABLED_INPUT: &str = "glow_enabled_in";
+
+/// Glow color input id (REDESIGN addition, no C++ counterpart). Type:
+/// color; default opaque yellow.
+pub const GLOW_COLOR_INPUT: &str = "glow_color_in";
+
+/// Glow radius input id (REDESIGN addition, no C++ counterpart). Type:
+/// float; default `8.0`; properties: `min = 0.0`.
+pub const GLOW_RADIUS_INPUT: &str = "glow_radius_in";
+
+/// Font color input id (REDESIGN addition, no C++ counterpart). Type:
+/// color; default opaque white (the backend rasterizes in white, so the
+/// default leaves the raster unchanged). The glyphs are tinted with it
+/// during rasterization, premultiplied — the same treatment the outline
+/// and glow colorize passes give their own layers.
+pub const COLOR_INPUT: &str = "color_in";
+
+/// Default of the legacy [`TEXT_INPUT`] HTML payload (the C++
+/// `k_text_input` default, verbatim). Used by [`create`] and by
+/// [`migrate_legacy_html`] to recognize an untouched legacy value.
+pub const LEGACY_DEFAULT_TEXT_HTML: &str =
+	"<p style='font-size: 72pt; color: white;'>Sample Text</p>";
+
+/// Default of [`PLAIN_TEXT_INPUT`] (REDESIGN addition): the localized
+/// placeholder text new text nodes start with.
+pub const DEFAULT_PLAIN_TEXT: &str = "文本";
 
 /// Vertical alignment (C++ `TextGeneratorV3::VerticalAlignment`, values
 /// `k_v_align_top = 0`, `k_v_align_middle = 1`, `k_v_align_bottom = 2`).
@@ -96,11 +176,12 @@ pub struct TextGeneratorV3 {
 	dont_emit_valign: bool,
 }
 
-/// `Variant::to_string()` for the text input (Text payload, with a
-/// numeric fallback for mis-typed connections).
+/// `Variant::to_string()` for the text inputs (Text and string-combo
+/// payloads — the latter for [`FONT_FAMILY_INPUT`] — with a numeric
+/// fallback for mis-typed connections).
 fn to_text(v: &NodeValue) -> String {
 	match v {
-		NodeValue::Text(s) => s.clone(),
+		NodeValue::Text(s) | NodeValue::StrCombo(s) => s.clone(),
 		other => other.to_double().to_string(),
 	}
 }
@@ -120,6 +201,132 @@ fn to_vec2(v: &NodeValue) -> [f64; 2] {
 		other => [other.to_double(), 0.0],
 	}
 }
+
+/// Largest rasterization dimension accepted from `size_in`. Both the
+/// CPU staging buffer and the intermediate GPU textures are `w * h * 4`
+/// bytes, so an absurd shape size is clamped rather than allocated.
+const MAX_RASTER_SIZE: i32 = 8192;
+
+/// Shader id of the outline dilation pass: a square dilation (the
+/// algorithm of [`super::dilate`], with the radius read from
+/// [`OUTLINE_WIDTH_INPUT`]).
+pub const OUTLINE_DILATE_SHADER_ID: &str = "outline_dilate";
+
+/// Shader id of the outline colorize pass: multiplies the dilated
+/// coverage by [`OUTLINE_COLOR_INPUT`].
+pub const OUTLINE_COLORIZE_SHADER_ID: &str = "outline_colorize";
+
+/// Shader id of the glow blur pass. The job runs one iteration per axis
+/// (horizontal, then vertical).
+pub const GLOW_BLUR_SHADER_ID: &str = "glow_blur";
+
+/// Shader id of the glow colorize pass: multiplies the blurred coverage
+/// by [`GLOW_COLOR_INPUT`].
+pub const GLOW_COLORIZE_SHADER_ID: &str = "glow_colorize";
+
+/// Effect-texture input id shared by the four post-process shaders: the
+/// coverage texture produced by the preceding pass.
+const POST_TEXTURE_INPUT: &str = "tex_in";
+
+/// Resolution input id. The raster resolution is inserted explicitly so
+/// the evaluation pass cannot pre-fill it with the sequence resolution.
+const RESOLUTION_INPUT: &str = "resolution_in";
+
+/// Fragment shader of the outline dilation pass: the square
+/// `(2r+1)^2` max filter of [`super::dilate`], with the radius taken
+/// from `outline_width_in` (rounded and clamped to `0..=7`) instead of
+/// the dilate node's own input and the rest copied verbatim.
+const OUTLINE_DILATE_FRAG: &str = r#"uniform sampler2D tex_in;
+uniform float outline_width_in;
+uniform vec2 resolution_in;
+
+in vec2 ove_texcoord;
+out vec4 frag_color;
+
+void main() {
+  int radius = int(clamp(outline_width_in, 0.0, 7.0) + 0.5);
+  vec2 texel = vec2(1.0) / resolution_in;
+
+  vec4 acc = texture(tex_in, ove_texcoord);
+  for (int dy = -radius; dy <= radius; ++dy) {
+    for (int dx = -radius; dx <= radius; ++dx) {
+      vec2 uv = ove_texcoord + vec2(float(dx), float(dy)) * texel;
+      acc = max(acc, texture(tex_in, uv));
+    }
+  }
+
+  frag_color = acc;
+}
+"#;
+
+/// Fragment shader of the outline colorize pass: tint the coverage with
+/// [`OUTLINE_COLOR_INPUT`] and emit it premultiplied, so it composites
+/// as `color * alpha` over whatever is beneath it.
+const OUTLINE_COLORIZE_FRAG: &str = r#"uniform sampler2D tex_in;
+uniform vec4 outline_color_in;
+
+in vec2 ove_texcoord;
+out vec4 frag_color;
+
+void main() {
+  vec4 coverage = texture(tex_in, ove_texcoord);
+  float alpha = coverage.a * outline_color_in.a;
+
+  frag_color = vec4(outline_color_in.rgb * alpha, alpha);
+}
+"#;
+
+/// Fragment shader of the glow blur pass: a box blur over the axis
+/// selected by `ove_iteration` (0 = horizontal, 1 = vertical), taps one
+/// texel apart and averaged over `2r + 1`. `glow_radius_in` is rounded
+/// and clamped to `0..=64`; a sub-pixel radius passes the texture
+/// through.
+const GLOW_BLUR_FRAG: &str = r#"uniform sampler2D tex_in;
+uniform float glow_radius_in;
+uniform vec2 resolution_in;
+
+uniform int ove_iteration;
+
+in vec2 ove_texcoord;
+out vec4 frag_color;
+
+void main() {
+  int radius = int(clamp(glow_radius_in, 0.0, 64.0) + 0.5);
+  if (radius < 1) {
+    frag_color = texture(tex_in, ove_texcoord);
+    return;
+  }
+
+  vec4 composite = vec4(0.0);
+  for (int i = -radius; i <= radius; ++i) {
+    vec2 uv = ove_texcoord;
+    if (ove_iteration == 0) {
+      uv.x += float(i) / resolution_in.x;
+    } else {
+      uv.y += float(i) / resolution_in.y;
+    }
+    composite += texture(tex_in, uv);
+  }
+
+  frag_color = composite / float(radius * 2 + 1);
+}
+"#;
+
+/// Fragment shader of the glow colorize pass: tint the blurred coverage
+/// with [`GLOW_COLOR_INPUT`] and emit it premultiplied.
+const GLOW_COLORIZE_FRAG: &str = r#"uniform sampler2D tex_in;
+uniform vec4 glow_color_in;
+
+in vec2 ove_texcoord;
+out vec4 frag_color;
+
+void main() {
+  vec4 coverage = texture(tex_in, ove_texcoord);
+  float alpha = coverage.a * glow_color_in.a;
+
+  frag_color = vec4(glow_color_in.rgb * alpha, alpha);
+}
+"#;
 
 impl TextGeneratorV3 {
 	/// Map our alignment to the gizmo's alignment int (C++
@@ -258,10 +465,21 @@ impl NodeBehavior for TextGeneratorV3 {
 	/// "Text", `valign_in` -> "Vertical Alignment" (combo strings
 	/// Top/Middle/Bottom), `args_in` -> "Arguments"; the base class
 	/// retranslate covers the inherited shape inputs and `base_in`
-	/// ("Base").
+	/// ("Base"). The redesign inputs are named here too ("Text" for
+	/// `plain_text_in`, "Font Family", "Font Size", "Outline"/"Outline
+	/// Color"/"Outline Width", "Glow"/"Glow Color"/"Glow Radius").
 	fn input_name<'a>(&self, id: &'a str) -> &'a str {
 		match id {
-			TEXT_INPUT => "Text",
+			TEXT_INPUT | PLAIN_TEXT_INPUT => "Text",
+			FONT_FAMILY_INPUT => "Font Family",
+			FONT_SIZE_INPUT => "Font Size",
+			OUTLINE_ENABLED_INPUT => "Outline",
+			OUTLINE_COLOR_INPUT => "Outline Color",
+			OUTLINE_WIDTH_INPUT => "Outline Width",
+			GLOW_ENABLED_INPUT => "Glow",
+			GLOW_COLOR_INPUT => "Glow Color",
+			GLOW_RADIUS_INPUT => "Glow Radius",
+			COLOR_INPUT => "Color",
 			VERTICAL_ALIGNMENT_INPUT => "Vertical Alignment",
 			ARGS_INPUT => "Arguments",
 			crate::nodes::generatorwithmerge::BASE_INPUT => "Base",
@@ -271,11 +489,29 @@ impl NodeBehavior for TextGeneratorV3 {
 
 	/// Combo input option labels (C++ `retranslate()` /
 	/// `set_combo_box_strings`): `valign_in` -> "Top", "Middle",
-	/// "Bottom".
+	/// "Bottom". The redesign's `font_family_in` is a str-combo whose
+	/// option list is injected by the backend layer, so it has no
+	/// static labels here.
 	fn input_combo_strings(&self, id: &str) -> Vec<&'static str> {
 		match id {
 			VERTICAL_ALIGNMENT_INPUT => vec!["Top", "Middle", "Bottom"],
 			_ => Vec::new(),
+		}
+	}
+
+	/// Shader code request: the merged generate shader is served under
+	/// the `"mrg"` request (shared with
+	/// [`crate::nodes::generatorwithmerge`]), the four post-process passes
+	/// (REDESIGN, no C++ counterpart) under their shader ids. Every other
+	/// request is unhandled.
+	fn shader_code(&self, request: &str) -> Option<String> {
+		match request {
+			"mrg" => Some(crate::nodes::generatorwithmerge::merge_shader_frag().to_string()),
+			OUTLINE_DILATE_SHADER_ID => Some(OUTLINE_DILATE_FRAG.to_string()),
+			OUTLINE_COLORIZE_SHADER_ID => Some(OUTLINE_COLORIZE_FRAG.to_string()),
+			GLOW_BLUR_SHADER_ID => Some(GLOW_BLUR_FRAG.to_string()),
+			GLOW_COLORIZE_SHADER_ID => Some(GLOW_COLORIZE_FRAG.to_string()),
+			_ => None,
 		}
 	}
 
@@ -289,13 +525,25 @@ impl NodeBehavior for TextGeneratorV3 {
 	/// the job); otherwise pass the base input texture through
 	/// unchanged.
 	///
-	/// The Rust model has no generate-job payload and no array value
-	/// representation: the job case goes through
+	/// REDESIGN: the text evaluated comes from [`PLAIN_TEXT_INPUT`] when
+	/// a text layout backend is installed (the structured path) and from
+	/// the legacy [`TEXT_INPUT`] HTML otherwise, so a backend-less build
+	/// keeps the pre-redesign behavior exactly. The C++ builds the layout
+	/// request here (`Texture::job(text_params, job)` carries the
+	/// laid-out document); the Rust job has no payload, so the request is
+	/// built by [`Self::layout_request`] instead and this method only
+	/// decides which text the job describes.
+	///
+	/// REDESIGN (wave 2): with an outline and/or glow pass enabled,
+	/// [`Self::build_post_job`] rasterizes the evaluated text and the
+	/// pushed handle carries the post-process chain instead of the plain
+	/// generate job. Either way the job goes through
 	/// [`crate::nodes::generatorwithmerge::GeneratorWithMerge::push_mergable_job`]
-	/// with a null handle, and the args array resolves to the single row
-	/// value when present (a per-element array model is deferred), so
-	/// `%N` expansion is exercised directly via [`Self::format_string`]
-	/// (`// CPP-PARITY: textv3.cpp` `value()`).
+	/// (with a null handle — the renderer-deferred generate job — when no
+	/// pass is enabled, which is the pre-redesign behavior); the args
+	/// array resolves to the single row value when present (a per-element
+	/// array model is deferred), so `%N` expansion is exercised directly
+	/// via [`Self::format_string`] (`// CPP-PARITY: textv3.cpp` `value()`).
 	fn value(
 		&self,
 		core: &NodeCore,
@@ -303,11 +551,7 @@ impl NodeBehavior for TextGeneratorV3 {
 		time: Rational,
 		table: &mut NodeValueTable,
 	) {
-		let text_val = inputs
-			.get(TEXT_INPUT)
-			.cloned()
-			.unwrap_or_else(|| core.value_at_time(TEXT_INPUT, -1, time));
-		let mut text = to_text(&text_val);
+		let mut text = Self::job_text(Self::plain_text_path(), core, inputs, time);
 
 		let use_args_val = inputs
 			.get(USE_ARGS_INPUT)
@@ -326,12 +570,27 @@ impl NodeBehavior for TextGeneratorV3 {
 		if !text.is_empty() {
 			// C++ `push_mergable_job(value, Texture::job(text_params, job),
 			// table)` — merged over base_in when connected, else pushed
-			// directly. The null handle marks the renderer-deferred
-			// generate job.
+			// directly. An enabled outline/glow pass boxes the post-process
+			// chain (REDESIGN wave 2); with both passes off the plain
+			// raster is the output — the pre-backend deferred null job only
+			// applies when no render backend is installed.
+			let job = match self.build_post_job(core, inputs, &text, time) {
+				Some(job) => job,
+				None => {
+					let size = Self::raster_size(core, inputs, time);
+					let align = Self::alignment_arg(core, inputs);
+					let font_color = Self::color_arg(core, inputs, COLOR_INPUT, time);
+					match Self::rasterize_text(inputs, &text, size, align, font_color) {
+						// The addref runs while the value owns its handle
+						// reference (NodeValue::drop releases it) — taking
+						// the bare handle out first would dangle it.
+						Some(NodeValue::Texture(handle)) => unsafe { handle.addref() },
+						_ => crate::handle::CHandle::null(),
+					}
+				}
+			};
 			crate::nodes::generatorwithmerge::GeneratorWithMerge::push_mergable_job(
-				inputs,
-				crate::handle::CHandle::null(),
-				table,
+				inputs, job, table,
 			);
 		} else if let Some(base @ NodeValue::Texture(_)) =
 			inputs.get(crate::nodes::generatorwithmerge::BASE_INPUT)
@@ -385,12 +644,40 @@ impl NodeBehavior for TextGeneratorV3 {
 	///
 	/// The text gizmo has no Rust model in this crate, so only the
 	/// flag check is represented (`// CPP-PARITY: textv3.cpp`
-	/// `InputValueChangedEvent`).
+	/// `InputValueChangedEvent`). REDESIGN: a change of the legacy
+	/// [`TEXT_INPUT`] HTML also runs the one-shot HTML-to-plain-text
+	/// migration ([`migrate_legacy_html`] — one of its three call
+	/// sites, see the function).
 	fn input_value_changed(&mut self, core: &mut NodeCore, input: &str, element: i32) {
-		let _ = (core, element);
+		let _ = element;
 		if input == VERTICAL_ALIGNMENT_INPUT && !self.dont_emit_valign {
 			// The C++ forwards the new alignment to the text gizmo here.
 		}
+		if input == TEXT_INPUT {
+			migrate_legacy_html(core);
+		}
+	}
+
+	/// Post-load fixups (C++ `PostLoadEvent`): runs the REDESIGN
+	/// HTML-to-plain-text migration ([`migrate_legacy_html`]) for load
+	/// pipelines that call this hook after the inputs are applied.
+	fn post_load(&mut self, core: &mut NodeCore) {
+		migrate_legacy_html(core);
+	}
+
+	/// Custom load (C++ `load_custom()`): consume the `<custom>` segment
+	/// exactly like the default implementation, then run the REDESIGN
+	/// migration. The node-body parser writes the `<input>` values before
+	/// the trailing `<custom>` element, so this is the hook that fires
+	/// with the legacy [`TEXT_INPUT`] value already loaded.
+	fn load_custom(
+		&mut self,
+		core: &mut NodeCore,
+		reader: &mut dyn crate::serializer::XmlRead,
+	) -> bool {
+		reader.skip_current_element();
+		migrate_legacy_html(core);
+		true
 	}
 
 	/// Deep copy (C++ `copy()`).
@@ -412,23 +699,86 @@ impl NodeBehavior for TextGeneratorV3 {
 }
 
 impl TextGeneratorV3 {
-	/// Build the C++ `TextLayoutRequest` (textv3.cpp `generate_frame()`):
-	/// Olive-HTML text, 96 DPI (3780 dots/meter), wrapped to the shape
-	/// size X. Font family/size come from the markup; the backend defaults
-	/// are used when absent.
+	/// Whether the structured plain-text path is active (REDESIGN):
+	/// `true` when a text layout backend is installed. Without a backend
+	/// the node keeps the pre-redesign behavior (the legacy
+	/// [`TEXT_INPUT`] HTML is carried).
+	pub fn plain_text_path() -> bool {
+		super::textbackend::text_measure_backend().is_some()
+	}
+
+	/// The text [`Self::value`] evaluates (REDESIGN split of the C++
+	/// `value()` text extraction): [`PLAIN_TEXT_INPUT`] on the
+	/// `plain_text == true` path, the legacy [`TEXT_INPUT`] HTML
+	/// otherwise. Row values win over the core's value at `time`, like
+	/// the C++ input evaluation.
+	fn job_text(
+		plain_text: bool,
+		core: &NodeCore,
+		inputs: &NodeValueRow,
+		time: Rational,
+	) -> String {
+		let id = if plain_text {
+			PLAIN_TEXT_INPUT
+		} else {
+			TEXT_INPUT
+		};
+		let val = inputs
+			.get(id)
+			.cloned()
+			.unwrap_or_else(|| core.value_at_time(id, -1, time));
+		to_text(&val)
+	}
+
+	/// Build the C++ `TextLayoutRequest` (textv3.cpp `generate_frame()`)
+	/// for the active text path: with a backend installed, the structured
+	/// request — [`PLAIN_TEXT_INPUT`] as [`TextLayoutMode::PlainText`]
+	/// with `font_family_in`/`font_size_in` — else the pre-redesign
+	/// request, Olive-HTML text from [`TEXT_INPUT`] at 96 DPI (3780
+	/// dots/meter) with the font taken from the markup. Both wrap to the
+	/// shape size X; the backend defaults are used when font family/size
+	/// are empty/zero.
 	pub fn layout_request(row: &NodeValueRow) -> TextLayoutRequest {
+		Self::layout_request_path(Self::plain_text_path(), row)
+	}
+
+	/// [`Self::layout_request`] with the path chosen explicitly: the
+	/// backend state is a process-global, so the tests drive both paths
+	/// through this parameter instead of installing hooks.
+	fn layout_request_path(plain_text: bool, row: &NodeValueRow) -> TextLayoutRequest {
 		let size = row
 			.get(crate::nodes::shapenodebase::SIZE_INPUT)
 			.map(to_vec2)
 			.unwrap_or([0.0, 0.0]);
-		TextLayoutRequest {
-			text: row.get(TEXT_INPUT).map(to_text).unwrap_or_else(String::new),
-			mode: TextLayoutMode::OliveHtml,
-			font_family: String::new(),
-			font_size_pt: 0.0,
-			dots_per_meter: 3780,
-			wrap_width: size[0],
-			center_horizontally: false,
+		if plain_text {
+			TextLayoutRequest {
+				text: row
+					.get(PLAIN_TEXT_INPUT)
+					.map(to_text)
+					.unwrap_or_else(String::new),
+				mode: TextLayoutMode::PlainText,
+				font_family: row
+					.get(FONT_FAMILY_INPUT)
+					.map(to_text)
+					.unwrap_or_else(String::new),
+				font_size_pt: row
+					.get(FONT_SIZE_INPUT)
+					.map(|v| v.to_double())
+					.unwrap_or(0.0),
+				dots_per_meter: 3780,
+				wrap_width: size[0],
+				center_horizontally: false,
+			}
+		} else {
+			TextLayoutRequest {
+				text: row.get(TEXT_INPUT).map(to_text).unwrap_or_else(String::new),
+				mode: TextLayoutMode::OliveHtml,
+				font_family: String::new(),
+				font_size_pt: 0.0,
+				dots_per_meter: 3780,
+				wrap_width: size[0],
+				center_horizontally: false,
+			}
 		}
 	}
 
@@ -504,11 +854,435 @@ impl TextGeneratorV3 {
 		};
 		(req, doc)
 	}
+
+	/// Read an input: the row value when present, else the core's value at
+	/// `time` (the row-first lookup [`Self::job_text`] uses).
+	fn input_value(core: &NodeCore, inputs: &NodeValueRow, id: &str, time: Rational) -> NodeValue {
+		inputs
+			.get(id)
+			.cloned()
+			.unwrap_or_else(|| core.value_at_time(id, -1, time))
+	}
+
+	/// Read a float input (REDESIGN post-process inputs).
+	fn float_arg(core: &NodeCore, inputs: &NodeValueRow, id: &str, time: Rational) -> f64 {
+		Self::input_value(core, inputs, id, time).to_double()
+	}
+
+	/// Read a boolean input (REDESIGN post-process inputs).
+	fn bool_arg(core: &NodeCore, inputs: &NodeValueRow, id: &str, time: Rational) -> bool {
+		let val = Self::input_value(core, inputs, id, time);
+		to_bool(&val)
+	}
+
+	/// Read a color input; a mis-typed value falls back to opaque black
+	/// (the same fallback the C++ `Variant::to_color()` callers get for a
+	/// non-color).
+	fn color_arg(core: &NodeCore, inputs: &NodeValueRow, id: &str, time: Rational) -> [f64; 4] {
+		match Self::input_value(core, inputs, id, time) {
+			NodeValue::Color(c) => c,
+			_ => [0.0, 0.0, 0.0, 1.0],
+		}
+	}
+
+	/// The vertical alignment of this evaluation: the row's `valign_in`
+	/// when present, else the standard value (the lookup
+	/// [`Self::vertical_alignment`] documents).
+	fn alignment_arg(core: &NodeCore, inputs: &NodeValueRow) -> VerticalAlignment {
+		match inputs.get(VERTICAL_ALIGNMENT_INPUT) {
+			Some(v) => VerticalAlignment::from_int(v.to_double() as i32),
+			None => Self::vertical_alignment(core),
+		}
+	}
+
+	/// Clamp one raster dimension into `1..=MAX_RASTER_SIZE`; a
+	/// non-finite size falls back to a single pixel.
+	fn clamp_raster(v: f64) -> i32 {
+		if !v.is_finite() {
+			return 1;
+		}
+		(v.round() as i32).clamp(1, MAX_RASTER_SIZE)
+	}
+
+	/// The rasterization size of this evaluation: the shape size
+	/// (`size_in`), rounded and clamped per dimension.
+	fn raster_size(core: &NodeCore, inputs: &NodeValueRow, time: Rational) -> (i32, i32) {
+		let size = to_vec2(&Self::input_value(
+			core,
+			inputs,
+			crate::nodes::shapenodebase::SIZE_INPUT,
+			time,
+		));
+		(Self::clamp_raster(size[0]), Self::clamp_raster(size[1]))
+	}
+
+	/// Box one post-process shader job (REDESIGN, no C++ counterpart):
+	/// this node's type id (the chain is all ours), an invalid node id
+	/// (the jobs are synthetic — no graph node evaluates them) and the
+	/// shader id selecting the pass in [`Self::shader_code`].
+	fn shader_job(
+		time: Rational,
+		type_id: &str,
+		shader_id: &str,
+		effect_input: &str,
+		iterations: i32,
+		params: NodeValueRow,
+	) -> crate::handle::CHandle {
+		crate::handle::make_owned(ShaderJobPayload {
+			node_id: crate::id::NodeId::INVALID,
+			time,
+			iterations,
+			type_id: type_id.to_string(),
+			shader_id: shader_id.to_string(),
+			effect_input: effect_input.to_string(),
+			params,
+			iterative_input: String::new(),
+		})
+	}
+
+	/// Box a `"mrg"` job drawing `blend` (the top layer) over `base` (the
+	/// backdrop): the merge node's premultiplied alpha-over,
+	/// `base = base * (1 - blend.a) + blend`.
+	fn merge_job(
+		time: Rational,
+		type_id: &str,
+		base: &NodeValue,
+		blend: &NodeValue,
+	) -> crate::handle::CHandle {
+		let mut params = NodeValueRow::new();
+		params.insert(crate::nodes::merge::BASE_INPUT.to_string(), base.clone());
+		params.insert(crate::nodes::merge::BLEND_INPUT.to_string(), blend.clone());
+		Self::shader_job(
+			time,
+			type_id,
+			"mrg",
+			crate::nodes::merge::BASE_INPUT,
+			1,
+			params,
+		)
+	}
+
+	/// Rasterize the evaluated `text` into an RGBA premultiplied F32
+	/// coverage texture (REDESIGN, no C++ counterpart — the C++ renders
+	/// straight into the output frame instead): layout the plain-text
+	/// request with `text` substituted for [`PLAIN_TEXT_INPUT`], measure
+	/// it, render into a `size`-sized staging buffer with the crate's
+	/// draw/clip transform, then widen the 8-bit coverage to float.
+	///
+	/// `None` without a render backend (the documented no-backend
+	/// fallback), for an empty raster, or when the staging frame cannot be
+	/// allocated. The white raster is tinted by `color` (the font color,
+	/// [`COLOR_INPUT`]) while widening to float.
+	fn rasterize_text(
+		row: &NodeValueRow,
+		text: &str,
+		size: (i32, i32),
+		align: VerticalAlignment,
+		color: [f64; 4],
+	) -> Option<NodeValue> {
+		let render = super::textbackend::text_render_backend()?;
+		let (width, height) = size;
+		if width <= 0 || height <= 0 {
+			return None;
+		}
+
+		let mut req_row = row.clone();
+		req_row.insert(
+			PLAIN_TEXT_INPUT.to_string(),
+			NodeValue::Text(text.to_string()),
+		);
+		let req = Self::layout_request_path(true, &req_row);
+		let doc = match super::textbackend::text_measure_backend() {
+			Some(measure) => measure(&req),
+			None => TextLayoutSize::default(),
+		};
+
+		// The backend writes 8-bit premultiplied RGBA over the existing
+		// (cleared) rows; the shape-local offsets keep the text rect at
+		// the raster origin, with the vertical alignment applied.
+		let mut rgba = vec![0u8; (width as usize) * (height as usize) * 4];
+		{
+			let target = super::textbackend::TextRenderTarget {
+				data: &mut rgba,
+				width,
+				height,
+				linesize_bytes: width * 4,
+				channel_count: 4,
+			};
+			let draw =
+				Self::draw_offset(align, (0.0, 0.0), [width as f64, height as f64], doc.height);
+			let transform =
+				Self::render_transform(1.0, draw, (0.0, 0.0), [width as f64, height as f64]);
+			render(&req, &transform, target);
+		}
+
+		let mut frame = Frame::new();
+		frame.set_video_params(VideoParamsPod {
+			width,
+			height,
+			..Default::default()
+		});
+		if !frame.allocate() {
+			return None;
+		}
+		for (pixel, coverage) in frame.data.chunks_exact_mut(16).zip(rgba.chunks_exact(4)) {
+			// The backend rasterizes in opaque-premultiplied white; tint by
+			// [`COLOR_INPUT`] per channel (the alpha scales too — a
+			// half-transparent font color stays premultiplied).
+			for (c, (channel, byte)) in pixel.chunks_exact_mut(4).zip(coverage).enumerate() {
+				let v = f32::from(*byte) / 255.0 * color[c] as f32;
+				channel.copy_from_slice(&v.to_le_bytes());
+			}
+		}
+
+		Some(NodeValue::Texture(crate::handle::make_owned(
+			Texture::wrap_frame(frame),
+		)))
+	}
+
+	/// Build the outline/glow post-process chain (REDESIGN, no C++
+	/// counterpart) for the evaluated `text`: rasterize the coverage,
+	/// dilate and colorize it into a stroke when the outline is enabled,
+	/// blur and colorize it into a glow when the glow is enabled, and
+	/// merge the results **beneath** the text (the text stays on top).
+	///
+	/// With both enabled the outline runs first and the glow samples the
+	/// stroke; with both disabled — or without a render backend — `None`,
+	/// so the caller keeps the pre-redesign deferred null job.
+	fn build_post_job(
+		&self,
+		core: &NodeCore,
+		inputs: &NodeValueRow,
+		text: &str,
+		time: Rational,
+	) -> Option<crate::handle::CHandle> {
+		let outline = Self::bool_arg(core, inputs, OUTLINE_ENABLED_INPUT, time);
+		let glow = Self::bool_arg(core, inputs, GLOW_ENABLED_INPUT, time);
+		if !outline && !glow {
+			return None;
+		}
+
+		let type_id = self.type_id();
+		let size = Self::raster_size(core, inputs, time);
+		let align = Self::alignment_arg(core, inputs);
+		let font_color = Self::color_arg(core, inputs, COLOR_INPUT, time);
+		let text_tex = Self::rasterize_text(inputs, text, size, align, font_color)?;
+		let resolution = NodeValue::Vec2([size.0 as f64, size.1 as f64]);
+
+		let mut result = text_tex.clone();
+		let mut stroke: Option<NodeValue> = None;
+
+		if outline {
+			let mut params = NodeValueRow::new();
+			params.insert(POST_TEXTURE_INPUT.to_string(), text_tex.clone());
+			params.insert(
+				OUTLINE_WIDTH_INPUT.to_string(),
+				NodeValue::Float(Self::float_arg(core, inputs, OUTLINE_WIDTH_INPUT, time)),
+			);
+			params.insert(RESOLUTION_INPUT.to_string(), resolution.clone());
+			let dilated = NodeValue::Texture(Self::shader_job(
+				time,
+				type_id,
+				OUTLINE_DILATE_SHADER_ID,
+				POST_TEXTURE_INPUT,
+				1,
+				params,
+			));
+
+			let mut params = NodeValueRow::new();
+			params.insert(POST_TEXTURE_INPUT.to_string(), dilated);
+			params.insert(
+				OUTLINE_COLOR_INPUT.to_string(),
+				NodeValue::Color(Self::color_arg(core, inputs, OUTLINE_COLOR_INPUT, time)),
+			);
+			params.insert(RESOLUTION_INPUT.to_string(), resolution.clone());
+			let colorized = NodeValue::Texture(Self::shader_job(
+				time,
+				type_id,
+				OUTLINE_COLORIZE_SHADER_ID,
+				POST_TEXTURE_INPUT,
+				1,
+				params,
+			));
+
+			// The stroke is the widened, colorized coverage drawn over the
+			// text itself, so the glyphs stay on top of their outline.
+			let stroke_tex =
+				NodeValue::Texture(Self::merge_job(time, type_id, &colorized, &text_tex));
+			stroke = Some(stroke_tex.clone());
+			result = stroke_tex;
+		}
+
+		if glow {
+			let source = stroke.clone().unwrap_or_else(|| text_tex.clone());
+			let mut params = NodeValueRow::new();
+			params.insert(POST_TEXTURE_INPUT.to_string(), source);
+			params.insert(
+				GLOW_RADIUS_INPUT.to_string(),
+				NodeValue::Float(Self::float_arg(core, inputs, GLOW_RADIUS_INPUT, time)),
+			);
+			params.insert(RESOLUTION_INPUT.to_string(), resolution.clone());
+			// Two iterations, one per axis (the shader picks the axis).
+			let blurred = NodeValue::Texture(Self::shader_job(
+				time,
+				type_id,
+				GLOW_BLUR_SHADER_ID,
+				POST_TEXTURE_INPUT,
+				2,
+				params,
+			));
+
+			let mut params = NodeValueRow::new();
+			params.insert(POST_TEXTURE_INPUT.to_string(), blurred);
+			params.insert(
+				GLOW_COLOR_INPUT.to_string(),
+				NodeValue::Color(Self::color_arg(core, inputs, GLOW_COLOR_INPUT, time)),
+			);
+			params.insert(RESOLUTION_INPUT.to_string(), resolution.clone());
+			let glow_tex = NodeValue::Texture(Self::shader_job(
+				time,
+				type_id,
+				GLOW_COLORIZE_SHADER_ID,
+				POST_TEXTURE_INPUT,
+				1,
+				params,
+			));
+
+			// The glow is drawn over the stroke (or the bare text when the
+			// outline is off), which is drawn over the text.
+			let blend = stroke.clone().unwrap_or_else(|| text_tex.clone());
+			result = NodeValue::Texture(Self::merge_job(time, type_id, &glow_tex, &blend));
+		}
+
+		let NodeValue::Texture(handle) = &result else {
+			return None;
+		};
+		Some(unsafe { handle.addref() })
+	}
+}
+
+/// Strip an HTML fragment to plain text (REDESIGN helper, no C++
+/// counterpart): every `<...>` tag is dropped, then the entities
+/// `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&#39;` and `&nbsp;` are decoded
+/// (the latter to a plain space — a non-breaking space is not
+/// representable in the plain-text input, a documented simplification).
+/// Unknown entities and a bare `&` are copied verbatim; an unterminated
+/// `<` swallows the rest of the input.
+///
+/// This is a simple stripper, not a conforming HTML parser: tags are
+/// dropped first and entities decoded afterwards in a single pass (so
+/// `&lt;p&gt;` stays the literal text `<p>`), and whitespace is neither
+/// collapsed nor trimmed (so `<p>a</p><p>b</p>` becomes `ab`). It only
+/// exists to migrate the legacy [`TEXT_INPUT`] payload into
+/// [`PLAIN_TEXT_INPUT`].
+pub fn strip_html_to_plain(html: &str) -> String {
+	/// Whether `chars` starts with the (ASCII) `entity` text.
+	fn starts_with(chars: &[char], entity: &str) -> bool {
+		let mut it = chars.iter();
+		entity.chars().all(|c| it.next() == Some(&c))
+	}
+
+	const ENTITIES: [(&str, &str); 6] = [
+		("&amp;", "&"),
+		("&lt;", "<"),
+		("&gt;", ">"),
+		("&quot;", "\""),
+		("&#39;", "'"),
+		("&nbsp;", " "),
+	];
+
+	let chars: Vec<char> = html.chars().collect();
+	let mut out = String::with_capacity(html.len());
+	let mut i = 0;
+	while i < chars.len() {
+		match chars[i] {
+			'<' => {
+				// Drop up to and including the tag's closing '>'; an
+				// unterminated tag drops the remainder. The tag text is
+				// discarded, never rescanned, so a decoded `&lt;p&gt;`
+				// cannot turn into a tag afterwards.
+				i += 1;
+				while i < chars.len() && chars[i] != '>' {
+					i += 1;
+				}
+				i += 1;
+			}
+			'&' => {
+				let decoded = ENTITIES
+					.iter()
+					.find(|(entity, _)| starts_with(&chars[i..], entity));
+				match decoded {
+					Some((entity, replacement)) => {
+						out.push_str(replacement);
+						i += entity.chars().count();
+					}
+					None => {
+						// Unknown entity (or a bare '&'): keep it as-is.
+						out.push('&');
+						i += 1;
+					}
+				}
+			}
+			c => {
+				out.push(c);
+				i += 1;
+			}
+		}
+	}
+	out
+}
+
+/// One-shot migration of a pre-redesign project's legacy [`TEXT_INPUT`]
+/// HTML into [`PLAIN_TEXT_INPUT`] (REDESIGN helper, no C++
+/// counterpart): when the plain text is still untouched (empty or the
+/// [`DEFAULT_PLAIN_TEXT`] default) and the legacy input holds a
+/// non-empty, non-default HTML value, the stripped plain text is written
+/// to `plain_text_in` and `true` is returned. The legacy value is never
+/// modified, so an old project can still be saved in its original form;
+/// after a successful migration the plain text is no longer the default
+/// and further calls are no-ops (idempotent).
+///
+/// A project created after the redesign serializes `plain_text_in` at
+/// the same default, indistinguishable through the standard values from
+/// a legacy node with an untouched default HTML payload; that case is
+/// left alone (the default HTML is not migrated) rather than replacing
+/// the redesign default with the legacy "Sample Text".
+///
+/// Call sites: [`NodeBehavior::load_custom`] (fires in the node-body
+/// parser after the `<input>` elements — the hook the real load path
+/// reaches), [`NodeBehavior::post_load`] (for load pipelines that call
+/// it after the inputs are applied) and [`NodeBehavior::input_value_changed`]
+/// for the legacy input. The migration only takes effect in the facade
+/// once a loader calls one of them.
+pub fn migrate_legacy_html(core: &mut NodeCore) -> bool {
+	if core.get_input(PLAIN_TEXT_INPUT).is_none() {
+		return false;
+	}
+	let plain_untouched = matches!(
+		&core.standard_value(PLAIN_TEXT_INPUT, -1),
+		NodeValue::Text(s) if s.is_empty() || s == DEFAULT_PLAIN_TEXT
+	);
+	if !plain_untouched {
+		return false;
+	}
+	let plain = match &core.standard_value(TEXT_INPUT, -1) {
+		NodeValue::Text(t) if !t.is_empty() && t != LEGACY_DEFAULT_TEXT_HTML => {
+			strip_html_to_plain(t)
+		}
+		_ => return false,
+	};
+	if plain.is_empty() {
+		return false;
+	}
+	core.set_standard_value(PLAIN_TEXT_INPUT, -1, NodeValue::Text(plain));
+	true
 }
 
 /// Constructor (C++ `TextGeneratorV3::TextGeneratorV3()`): builds the
 /// shape base without its own gizmo behavior (`ShapeNodeBase(false)`),
-/// adds `text_in`, `valign_in`, `use_args_in` and `args_in` with the
+/// adds `text_in` (hidden, REDESIGN), the structured redesign inputs
+/// (`plain_text_in`, `font_family_in`, `font_size_in`, `outline_*`,
+/// `glow_*`), `valign_in`, `use_args_in` and `args_in` with the
 /// defaults, flags and properties documented on the constants, sets the
 /// inherited `size_in` standard value to `(400, 300)`, creates the
 /// `TextGizmo` bound to `text_in`, and initializes
@@ -532,6 +1306,13 @@ pub fn create() -> (NodeCore, Box<dyn NodeBehavior>) {
 	core.add_input(base);
 	core.effect_input = crate::nodes::generatorwithmerge::BASE_INPUT.to_string();
 	core.flags |= crate::node::flags::VIDEO_EFFECT;
+	// REDESIGN (W6): text is a footage entry (the project panel's "add text
+	// footage" button) and a timeline clip, no longer an effect the user
+	// adds to a chain. The flag hides it from the effect library / add
+	// menus only — `VIDEO_EFFECT` stays so text3 nodes already in a project
+	// keep evaluating, and the factory keeps registering the type (the
+	// footage path and old project files create it directly).
+	core.flags |= crate::node::flags::DONT_SHOW_IN_CREATE_MENU;
 
 	// ShapeNodeBase(false): pos/size, no color input.
 	core.add_input(crate::input::Input::new(
@@ -548,14 +1329,81 @@ pub fn create() -> (NodeCore, Box<dyn NodeBehavior>) {
 	core.add_input(size);
 
 	// Own inputs.
+	// REDESIGN: the structured user-facing inputs. `plain_text_in` is the
+	// text laid out when a backend is installed; the legacy `text_in`
+	// stays as the hidden compatibility carrier (see the constants).
+	core.add_input(crate::input::Input::new(
+		PLAIN_TEXT_INPUT,
+		crate::value::ValueType::Text,
+		NodeValue::Text(DEFAULT_PLAIN_TEXT.to_string()),
+	));
+
 	let mut text = crate::input::Input::new(
 		TEXT_INPUT,
 		crate::value::ValueType::Text,
-		NodeValue::Text("<p style='font-size: 72pt; color: white;'>Sample Text</p>".to_string()),
+		NodeValue::Text(LEGACY_DEFAULT_TEXT_HTML.to_string()),
 	);
+	text.flags |= crate::input::flags::HIDDEN;
 	text.properties = vec![("vieweronly".to_string(), NodeValue::Boolean(true))];
 	core.add_input(text);
 
+	core.add_input(crate::input::Input::new(
+		FONT_FAMILY_INPUT,
+		crate::value::ValueType::StrCombo,
+		NodeValue::StrCombo(String::new()),
+	));
+
+	let mut font_size = crate::input::Input::new(
+		FONT_SIZE_INPUT,
+		crate::value::ValueType::Float,
+		NodeValue::Float(72.0),
+	);
+	font_size.properties = vec![("min".to_string(), NodeValue::Float(1.0))];
+	core.add_input(font_size);
+
+	core.add_input(crate::input::Input::new(
+		OUTLINE_ENABLED_INPUT,
+		crate::value::ValueType::Boolean,
+		NodeValue::Boolean(false),
+	));
+	core.add_input(crate::input::Input::new(
+		OUTLINE_COLOR_INPUT,
+		crate::value::ValueType::Color,
+		NodeValue::Color([0.0, 0.0, 0.0, 1.0]),
+	));
+	let mut outline_width = crate::input::Input::new(
+		OUTLINE_WIDTH_INPUT,
+		crate::value::ValueType::Float,
+		NodeValue::Float(2.0),
+	);
+	outline_width.properties = vec![("min".to_string(), NodeValue::Float(0.0))];
+	core.add_input(outline_width);
+
+	core.add_input(crate::input::Input::new(
+		GLOW_ENABLED_INPUT,
+		crate::value::ValueType::Boolean,
+		NodeValue::Boolean(false),
+	));
+	core.add_input(crate::input::Input::new(
+		GLOW_COLOR_INPUT,
+		crate::value::ValueType::Color,
+		NodeValue::Color([1.0, 1.0, 0.0, 1.0]),
+	));
+	let mut glow_radius = crate::input::Input::new(
+		GLOW_RADIUS_INPUT,
+		crate::value::ValueType::Float,
+		NodeValue::Float(8.0),
+	);
+	glow_radius.properties = vec![("min".to_string(), NodeValue::Float(0.0))];
+	core.add_input(glow_radius);
+
+	core.add_input(crate::input::Input::new(
+		COLOR_INPUT,
+		crate::value::ValueType::Color,
+		NodeValue::Color([1.0, 1.0, 1.0, 1.0]),
+	));
+
+	// Hidden alignment / args inputs, unchanged by the redesign.
 	let mut valign = crate::input::Input::new(
 		VERTICAL_ALIGNMENT_INPUT,
 		crate::value::ValueType::Combo,
@@ -610,7 +1458,9 @@ pub fn register(meta: &mut Vec<NodeMeta>) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::handle::CHandle;
 	use crate::node::NodeBehavior;
+	use crate::nodes::textbackend::TextRenderTarget;
 	use crate::value::{NodeValueTable, ValueType};
 	use oak_core::Rational;
 
@@ -620,6 +1470,16 @@ mod tests {
 			dont_emit_valign: false,
 		};
 		assert_eq!(n.input_name(TEXT_INPUT), "Text");
+		// REDESIGN: the plain-text input shares the "Text" display name.
+		assert_eq!(n.input_name(PLAIN_TEXT_INPUT), "Text");
+		assert_eq!(n.input_name(FONT_FAMILY_INPUT), "Font Family");
+		assert_eq!(n.input_name(FONT_SIZE_INPUT), "Font Size");
+		assert_eq!(n.input_name(OUTLINE_ENABLED_INPUT), "Outline");
+		assert_eq!(n.input_name(OUTLINE_COLOR_INPUT), "Outline Color");
+		assert_eq!(n.input_name(OUTLINE_WIDTH_INPUT), "Outline Width");
+		assert_eq!(n.input_name(GLOW_ENABLED_INPUT), "Glow");
+		assert_eq!(n.input_name(GLOW_COLOR_INPUT), "Glow Color");
+		assert_eq!(n.input_name(GLOW_RADIUS_INPUT), "Glow Radius");
 		assert_eq!(n.input_name(VERTICAL_ALIGNMENT_INPUT), "Vertical Alignment");
 		assert_eq!(n.input_name(ARGS_INPUT), "Arguments");
 		assert_eq!(
@@ -664,10 +1524,14 @@ mod tests {
 			.properties
 			.iter()
 			.any(|(k, v)| k == "arraystart" && v == &NodeValue::Int(1)));
-		// No color input (ShapeNodeBase(false)).
-		assert!(core
-			.get_input(crate::nodes::shapenodebase::COLOR_INPUT)
-			.is_none());
+		// The base has no color input of its own (ShapeNodeBase(false));
+		// the font color input (REDESIGN wave 3) takes that exact slot.
+		assert_eq!(
+			core.get_input(crate::nodes::shapenodebase::COLOR_INPUT)
+				.unwrap()
+				.default,
+			NodeValue::Color([1.0, 1.0, 1.0, 1.0])
+		);
 		assert_eq!(
 			core.standard_value(crate::nodes::shapenodebase::SIZE_INPUT, -1),
 			NodeValue::Vec2([400.0, 300.0])
@@ -676,8 +1540,21 @@ mod tests {
 			core.effect_input,
 			crate::nodes::generatorwithmerge::BASE_INPUT
 		);
-		// v3 is shown in the create menu (no DONT_SHOW_IN_CREATE_MENU flag).
-		assert_eq!(core.flags & crate::node::flags::DONT_SHOW_IN_CREATE_MENU, 0);
+		// REDESIGN: v3 left the create menu (text is a footage/clip now), so
+		// this test flipped from the pre-redesign expectation (`== 0`).
+		assert_ne!(core.flags & crate::node::flags::DONT_SHOW_IN_CREATE_MENU, 0);
+		// It stays a video effect: legacy chains must keep evaluating.
+		assert_ne!(core.flags & crate::node::flags::VIDEO_EFFECT, 0);
+	}
+
+	/// The W6 contract: hidden from the add menus, still a working effect
+	/// node for the chains (and the footage path) that create it directly.
+	#[test]
+	fn hidden_from_create_menu_but_still_a_video_effect() {
+		let (core, behavior) = create();
+		assert_eq!(behavior.type_id(), "org.olivevideoeditor.Olive.text3");
+		assert_ne!(core.flags & crate::node::flags::DONT_SHOW_IN_CREATE_MENU, 0);
+		assert_ne!(core.flags & crate::node::flags::VIDEO_EFFECT, 0);
 	}
 
 	#[test]
@@ -763,11 +1640,85 @@ mod tests {
 			crate::nodes::shapenodebase::SIZE_INPUT.to_string(),
 			NodeValue::Vec2([400.0, 300.0]),
 		);
-		let req = TextGeneratorV3::layout_request(&row);
+		// The legacy path is driven explicitly: the backend state is a
+		// process-global that other tests install hooks into.
+		let req = TextGeneratorV3::layout_request_path(false, &row);
 		assert_eq!(req.text, "<p>Hi</p>");
 		assert_eq!(req.mode, TextLayoutMode::OliveHtml);
 		assert_eq!(req.dots_per_meter, 3780);
 		assert_eq!(req.wrap_width, 400.0);
+	}
+
+	#[test]
+	fn layout_request_plain_text_path_uses_structured_inputs() {
+		let mut row = NodeValueRow::default();
+		row.insert(
+			PLAIN_TEXT_INPUT.to_string(),
+			NodeValue::Text("hello".to_string()),
+		);
+		row.insert(
+			FONT_FAMILY_INPUT.to_string(),
+			NodeValue::StrCombo("Noto Sans".to_string()),
+		);
+		row.insert(FONT_SIZE_INPUT.to_string(), NodeValue::Float(48.0));
+		row.insert(
+			crate::nodes::shapenodebase::SIZE_INPUT.to_string(),
+			NodeValue::Vec2([400.0, 300.0]),
+		);
+		// The row also carries legacy HTML: the plain path must ignore it.
+		row.insert(
+			TEXT_INPUT.to_string(),
+			NodeValue::Text("<p>legacy</p>".to_string()),
+		);
+		let req = TextGeneratorV3::layout_request_path(true, &row);
+		assert_eq!(req.text, "hello");
+		assert_eq!(req.mode, TextLayoutMode::PlainText);
+		assert_eq!(req.font_family, "Noto Sans");
+		assert_eq!(req.font_size_pt, 48.0);
+		assert_eq!(req.dots_per_meter, 3780);
+		assert_eq!(req.wrap_width, 400.0);
+	}
+
+	#[test]
+	fn job_text_prefers_the_row_value() {
+		let (core, _behavior) = create();
+		let mut row = NodeValueRow::default();
+		row.insert(
+			PLAIN_TEXT_INPUT.to_string(),
+			NodeValue::Text("row plain".to_string()),
+		);
+		row.insert(
+			TEXT_INPUT.to_string(),
+			NodeValue::Text("row html".to_string()),
+		);
+		assert_eq!(
+			TextGeneratorV3::job_text(true, &core, &row, Rational::new(0, 1)),
+			"row plain"
+		);
+		assert_eq!(
+			TextGeneratorV3::job_text(false, &core, &row, Rational::new(0, 1)),
+			"row html"
+		);
+	}
+
+	#[test]
+	fn job_text_falls_back_to_the_core_value() {
+		let (mut core, _behavior) = create();
+		core.set_standard_value(
+			PLAIN_TEXT_INPUT,
+			-1,
+			NodeValue::Text("core plain".to_string()),
+		);
+		core.set_standard_value(TEXT_INPUT, -1, NodeValue::Text("core html".to_string()));
+		let row = NodeValueRow::default();
+		assert_eq!(
+			TextGeneratorV3::job_text(true, &core, &row, Rational::new(0, 1)),
+			"core plain"
+		);
+		assert_eq!(
+			TextGeneratorV3::job_text(false, &core, &row, Rational::new(0, 1)),
+			"core html"
+		);
 	}
 
 	#[test]
@@ -790,8 +1741,20 @@ mod tests {
 		);
 	}
 
+	/// Serializes the tests that install a process-global text backend.
+	/// (The `textbackend` module's own tests use a different lock, so they
+	/// are not mutually excluded — same exposure as the pre-existing
+	/// `measure_without_backend_returns_zero_size`.)
+	static BACKEND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+	/// Measure hook for tests that only need "a backend is installed".
+	fn noop_measure(_req: &TextLayoutRequest) -> TextLayoutSize {
+		TextLayoutSize::default()
+	}
+
 	#[test]
 	fn measure_without_backend_returns_zero_size() {
+		let _guard = BACKEND_LOCK.lock().unwrap();
 		crate::nodes::textbackend::set_text_backends(None, None);
 		let mut row = NodeValueRow::default();
 		row.insert(
@@ -801,6 +1764,40 @@ mod tests {
 		let (_req, doc) = TextGeneratorV3::measure_and_layout(&row);
 		assert_eq!(doc.width, 0.0);
 		assert_eq!(doc.height, 0.0);
+	}
+
+	#[test]
+	fn value_uses_plain_text_when_a_backend_is_installed() {
+		let _guard = BACKEND_LOCK.lock().unwrap();
+		crate::nodes::textbackend::set_text_backends(Some(noop_measure), None);
+		assert!(TextGeneratorV3::plain_text_path());
+
+		// The row carries an empty legacy HTML only: the non-empty plain
+		// text default is what makes the job push, so this fails on the
+		// legacy path (empty text, no base -> empty table).
+		let (core, behavior) = create();
+		let mut row = NodeValueRow::default();
+		row.insert(TEXT_INPUT.to_string(), NodeValue::Text(String::new()));
+		let mut table = NodeValueTable::default();
+		behavior.value(&core, &row, Rational::new(0, 1), &mut table);
+		assert!(matches!(
+			table.get(ValueType::Texture),
+			Some(NodeValue::Texture(h)) if h.is_null()
+		));
+
+		// The public layout request follows the installed backend.
+		let mut req_row = NodeValueRow::default();
+		req_row.insert(
+			PLAIN_TEXT_INPUT.to_string(),
+			NodeValue::Text("hi".to_string()),
+		);
+		assert_eq!(
+			TextGeneratorV3::layout_request(&req_row).mode,
+			TextLayoutMode::PlainText
+		);
+
+		crate::nodes::textbackend::set_text_backends(None, None);
+		assert!(!TextGeneratorV3::plain_text_path());
 	}
 
 	#[test]
@@ -862,6 +1859,10 @@ mod tests {
 	fn value_pushes_nothing_when_text_empty_and_no_base() {
 		let (core, behavior) = create();
 		let mut row = NodeValueRow::default();
+		// Both text inputs are emptied explicitly: which one `value` reads
+		// depends on the process-global backend state, which the tests that
+		// install one (own lock, and `textbackend`'s) change concurrently.
+		row.insert(PLAIN_TEXT_INPUT.to_string(), NodeValue::Text(String::new()));
 		row.insert(TEXT_INPUT.to_string(), NodeValue::Text(String::new()));
 		let mut table = NodeValueTable::default();
 		behavior.value(&core, &row, Rational::new(0, 1), &mut table);
@@ -920,5 +1921,465 @@ mod tests {
 		let copy = behavior.duplicate(&_core).unwrap();
 		assert_eq!(copy.type_id(), "org.olivevideoeditor.Olive.text3");
 		assert_eq!(copy.name(), "Text");
+	}
+
+	#[test]
+	fn redesign_inputs_have_defaults_and_flags() {
+		let (core, _behavior) = create();
+
+		let plain = core.get_input(PLAIN_TEXT_INPUT).unwrap();
+		assert_eq!(plain.value_type, ValueType::Text);
+		assert_eq!(
+			plain.default,
+			NodeValue::Text(DEFAULT_PLAIN_TEXT.to_string())
+		);
+
+		let family = core.get_input(FONT_FAMILY_INPUT).unwrap();
+		assert_eq!(family.value_type, ValueType::StrCombo);
+		assert_eq!(family.default, NodeValue::StrCombo(String::new()));
+
+		let size = core.get_input(FONT_SIZE_INPUT).unwrap();
+		assert_eq!(size.value_type, ValueType::Float);
+		assert_eq!(size.default, NodeValue::Float(72.0));
+		assert!(size
+			.properties
+			.iter()
+			.any(|(k, v)| k == "min" && v == &NodeValue::Float(1.0)));
+
+		let outline = core.get_input(OUTLINE_ENABLED_INPUT).unwrap();
+		assert_eq!(outline.value_type, ValueType::Boolean);
+		assert_eq!(outline.default, NodeValue::Boolean(false));
+
+		let outline_color = core.get_input(OUTLINE_COLOR_INPUT).unwrap();
+		assert_eq!(outline_color.value_type, ValueType::Color);
+		assert_eq!(
+			outline_color.default,
+			NodeValue::Color([0.0, 0.0, 0.0, 1.0])
+		);
+
+		let outline_width = core.get_input(OUTLINE_WIDTH_INPUT).unwrap();
+		assert_eq!(outline_width.value_type, ValueType::Float);
+		assert_eq!(outline_width.default, NodeValue::Float(2.0));
+		assert!(outline_width
+			.properties
+			.iter()
+			.any(|(k, v)| k == "min" && v == &NodeValue::Float(0.0)));
+
+		let glow = core.get_input(GLOW_ENABLED_INPUT).unwrap();
+		assert_eq!(glow.value_type, ValueType::Boolean);
+		assert_eq!(glow.default, NodeValue::Boolean(false));
+
+		let glow_color = core.get_input(GLOW_COLOR_INPUT).unwrap();
+		assert_eq!(glow_color.value_type, ValueType::Color);
+		assert_eq!(glow_color.default, NodeValue::Color([1.0, 1.0, 0.0, 1.0]));
+
+		let glow_radius = core.get_input(GLOW_RADIUS_INPUT).unwrap();
+		assert_eq!(glow_radius.value_type, ValueType::Float);
+		assert_eq!(glow_radius.default, NodeValue::Float(8.0));
+		assert!(glow_radius
+			.properties
+			.iter()
+			.any(|(k, v)| k == "min" && v == &NodeValue::Float(0.0)));
+
+		// Every redesign input is user-facing (none hidden).
+		for id in [
+			PLAIN_TEXT_INPUT,
+			FONT_FAMILY_INPUT,
+			FONT_SIZE_INPUT,
+			OUTLINE_ENABLED_INPUT,
+			OUTLINE_COLOR_INPUT,
+			OUTLINE_WIDTH_INPUT,
+			GLOW_ENABLED_INPUT,
+			GLOW_COLOR_INPUT,
+			GLOW_RADIUS_INPUT,
+		] {
+			assert_eq!(
+				core.get_input(id).unwrap().flags & crate::input::flags::HIDDEN,
+				0
+			);
+		}
+
+		// The legacy input keeps its default and vieweronly property, and
+		// is now hidden.
+		let legacy = core.get_input(TEXT_INPUT).unwrap();
+		assert_eq!(
+			legacy.default,
+			NodeValue::Text(LEGACY_DEFAULT_TEXT_HTML.to_string())
+		);
+		assert_ne!(legacy.flags & crate::input::flags::HIDDEN, 0);
+		assert!(legacy
+			.properties
+			.iter()
+			.any(|(k, v)| k == "vieweronly" && v == &NodeValue::Boolean(true)));
+
+		// The shape base still has no color input of its own
+		// (ShapeNodeBase(false)); the REDESIGN wave-3 font color input
+		// takes that exact slot (white default).
+		assert_eq!(
+			core.get_input(crate::nodes::shapenodebase::COLOR_INPUT)
+				.unwrap()
+				.default,
+			NodeValue::Color([1.0, 1.0, 1.0, 1.0])
+		);
+	}
+
+	#[test]
+	fn strip_html_to_plain_drops_tags() {
+		assert_eq!(strip_html_to_plain("<p>a</p><p>b</p>"), "ab");
+		assert_eq!(strip_html_to_plain("<br>"), "");
+		assert_eq!(strip_html_to_plain("<p></p>"), "");
+		assert_eq!(strip_html_to_plain("a<br>b"), "ab");
+		// Whitespace is neither collapsed nor trimmed.
+		assert_eq!(strip_html_to_plain("<p>a b</p>"), "a b");
+		// A complete tag drops only itself; the text around it stays.
+		assert_eq!(strip_html_to_plain("<p>abc"), "abc");
+		// An unterminated tag swallows the remainder.
+		assert_eq!(strip_html_to_plain("a<b"), "a");
+		assert_eq!(strip_html_to_plain("<p"), "");
+	}
+
+	#[test]
+	fn strip_html_to_plain_decodes_entities() {
+		assert_eq!(
+			strip_html_to_plain("a &amp;&lt;&gt;&quot;&#39;&nbsp;b"),
+			"a &<>\"' b"
+		);
+		// A bare '&' and unknown entities are kept verbatim, one pass only.
+		assert_eq!(strip_html_to_plain("a & b &fake; c"), "a & b &fake; c");
+		assert_eq!(strip_html_to_plain("&amp;amp;"), "&amp;");
+		// Entities are decoded after tags are dropped: an encoded tag stays
+		// literal text.
+		assert_eq!(strip_html_to_plain("&lt;p&gt;"), "<p>");
+	}
+
+	#[test]
+	fn migrate_legacy_html_moves_stripped_text_once() {
+		let (mut core, _behavior) = create();
+		core.set_standard_value(
+			TEXT_INPUT,
+			-1,
+			NodeValue::Text("<p>Hello <b>World</b></p>".to_string()),
+		);
+		assert!(migrate_legacy_html(&mut core));
+		assert_eq!(
+			core.standard_value(PLAIN_TEXT_INPUT, -1),
+			NodeValue::Text("Hello World".to_string())
+		);
+		// The legacy value is left untouched and further calls are no-ops.
+		assert_eq!(
+			core.standard_value(TEXT_INPUT, -1),
+			NodeValue::Text("<p>Hello <b>World</b></p>".to_string())
+		);
+		assert!(!migrate_legacy_html(&mut core));
+		assert_eq!(
+			core.standard_value(PLAIN_TEXT_INPUT, -1),
+			NodeValue::Text("Hello World".to_string())
+		);
+	}
+
+	#[test]
+	fn migrate_legacy_html_leaves_defaults_and_edits_alone() {
+		let (mut core, _behavior) = create();
+		// A node at its defaults: the legacy default HTML is not migrated
+		// (a new node must keep the redesign default across a save/load).
+		assert!(!migrate_legacy_html(&mut core));
+		assert_eq!(
+			core.standard_value(PLAIN_TEXT_INPUT, -1),
+			NodeValue::Text(DEFAULT_PLAIN_TEXT.to_string())
+		);
+
+		// An edited plain text is never overwritten.
+		core.set_standard_value(PLAIN_TEXT_INPUT, -1, NodeValue::Text("mine".to_string()));
+		core.set_standard_value(TEXT_INPUT, -1, NodeValue::Text("<p>legacy</p>".to_string()));
+		assert!(!migrate_legacy_html(&mut core));
+		assert_eq!(
+			core.standard_value(PLAIN_TEXT_INPUT, -1),
+			NodeValue::Text("mine".to_string())
+		);
+
+		// A legacy HTML with no text content migrates nothing.
+		core.set_standard_value(PLAIN_TEXT_INPUT, -1, NodeValue::Text(String::new()));
+		core.set_standard_value(TEXT_INPUT, -1, NodeValue::Text("<p></p>".to_string()));
+		assert!(!migrate_legacy_html(&mut core));
+		assert_eq!(
+			core.standard_value(PLAIN_TEXT_INPUT, -1),
+			NodeValue::Text(String::new())
+		);
+	}
+
+	#[test]
+	fn migrate_legacy_html_noop_without_plain_text_input() {
+		// A pre-redesign core (no plain_text_in at all) must not panic.
+		let mut core = NodeCore::new();
+		core.add_input(crate::input::Input::new(
+			TEXT_INPUT,
+			ValueType::Text,
+			NodeValue::Text("<p>x</p>".to_string()),
+		));
+		assert!(!migrate_legacy_html(&mut core));
+	}
+
+	/// Render hook for the post-process tests: paints the middle half of
+	/// the target (`x`, `y` in `[dim / 4, 3 * dim / 4)`) solid white — a
+	/// coverage block whose dilation and box blur are exactly computable.
+	fn solid_render(
+		_req: &TextLayoutRequest,
+		_transform: &TextRenderTransform,
+		target: TextRenderTarget,
+	) {
+		if target.channel_count != 4 {
+			return;
+		}
+		let stride = target.linesize_bytes as usize;
+		let (w, h) = (target.width as usize, target.height as usize);
+		for y in h / 4..3 * h / 4 {
+			for x in w / 4..3 * w / 4 {
+				let at = y * stride + x * 4;
+				target.data[at..at + 4].copy_from_slice(&[255; 4]);
+			}
+		}
+	}
+
+	/// The evaluation row of the post-process tests: a 16x16 raster with a
+	/// 2-pixel black outline and/or a 4-pixel yellow glow.
+	fn post_row(outline: bool, glow: bool) -> NodeValueRow {
+		let mut row = NodeValueRow::new();
+		row.insert(
+			PLAIN_TEXT_INPUT.to_string(),
+			NodeValue::Text("X".to_string()),
+		);
+		row.insert(USE_ARGS_INPUT.to_string(), NodeValue::Boolean(false));
+		row.insert(
+			crate::nodes::shapenodebase::SIZE_INPUT.to_string(),
+			NodeValue::Vec2([16.0, 16.0]),
+		);
+		row.insert(
+			OUTLINE_ENABLED_INPUT.to_string(),
+			NodeValue::Boolean(outline),
+		);
+		row.insert(
+			OUTLINE_COLOR_INPUT.to_string(),
+			NodeValue::Color([0.0, 0.0, 0.0, 1.0]),
+		);
+		row.insert(OUTLINE_WIDTH_INPUT.to_string(), NodeValue::Float(2.0));
+		row.insert(GLOW_ENABLED_INPUT.to_string(), NodeValue::Boolean(glow));
+		row.insert(
+			GLOW_COLOR_INPUT.to_string(),
+			NodeValue::Color([1.0, 1.0, 0.0, 1.0]),
+		);
+		row.insert(GLOW_RADIUS_INPUT.to_string(), NodeValue::Float(4.0));
+		row
+	}
+
+	/// Evaluate [`TextGeneratorV3::value`] and return the texture handle it
+	/// pushed.
+	fn push_value(core: &NodeCore, behavior: &dyn NodeBehavior, row: &NodeValueRow) -> CHandle {
+		let mut table = NodeValueTable::default();
+		behavior.value(core, row, Rational::new(0, 1), &mut table);
+		match table.get(ValueType::Texture) {
+			Some(NodeValue::Texture(handle)) => *handle,
+			other => panic!("expected a texture row, got {other:?}"),
+		}
+	}
+
+	/// The job payload boxed by a deferred texture handle.
+	fn job_of(handle: &CHandle) -> &ShaderJobPayload {
+		unsafe { crate::handle::get_checked::<ShaderJobPayload>(handle) }
+			.expect("handle carries a ShaderJobPayload")
+	}
+
+	/// The shader id of the pass a deferred texture handle runs.
+	fn shader_id_of(handle: &CHandle) -> &str {
+		&job_of(handle).shader_id
+	}
+
+	/// A texture-typed job param (the effect input or a merge layer).
+	fn param_texture<'a>(handle: &'a CHandle, input: &str) -> &'a CHandle {
+		match job_of(handle).params.get(input) {
+			Some(NodeValue::Texture(tex)) => tex,
+			other => panic!("param {input:?} is not a texture: {other:?}"),
+		}
+	}
+
+	/// A float job param.
+	fn param_float(handle: &CHandle, input: &str) -> f64 {
+		match job_of(handle).params.get(input) {
+			Some(NodeValue::Float(f)) => *f,
+			other => panic!("param {input:?} is not a float: {other:?}"),
+		}
+	}
+
+	/// A color job param.
+	fn param_color(handle: &CHandle, input: &str) -> [f64; 4] {
+		match job_of(handle).params.get(input) {
+			Some(NodeValue::Color(c)) => *c,
+			other => panic!("param {input:?} is not a color: {other:?}"),
+		}
+	}
+
+	/// A vec2 job param.
+	fn param_vec2(handle: &CHandle, input: &str) -> [f64; 2] {
+		match job_of(handle).params.get(input) {
+			Some(NodeValue::Vec2(v)) => *v,
+			other => panic!("param {input:?} is not a vec2: {other:?}"),
+		}
+	}
+
+	/// Identity of the refcounted box behind a handle: every clone of a
+	/// job param addrefs the same box, so equal pointers mean "the same
+	/// texture was fed to both passes".
+	fn job_ptr(handle: &CHandle) -> usize {
+		handle.ctx as usize
+	}
+
+	/// Assert `handle` boxes the 16x16 CPU coverage frame the rasterizer
+	/// staging-allocates (not a shader job).
+	fn assert_cpu_texture(handle: &CHandle) {
+		match unsafe { crate::handle::get_checked::<Texture>(handle) } {
+			Some(Texture::Cpu(frame)) => assert_eq!((frame.width, frame.height), (16, 16)),
+			other => panic!("expected a CPU coverage frame, got {other:?}"),
+		}
+	}
+
+	/// One pixel of a CPU coverage frame's F32 RGBA data.
+	fn pixel_of(handle: &CHandle, x: usize, y: usize) -> [f32; 4] {
+		let Some(Texture::Cpu(frame)) = (unsafe { crate::handle::get_checked::<Texture>(handle) })
+		else {
+			panic!("expected a CPU coverage frame");
+		};
+		let stride = frame.linesize_bytes() as usize;
+		let at = y * stride + x * 16;
+		let mut out = [0f32; 4];
+		for (c, v) in out.iter_mut().enumerate() {
+			*v = f32::from_le_bytes(frame.data[at + c * 4..at + c * 4 + 4].try_into().unwrap());
+		}
+		out
+	}
+
+	#[test]
+	fn post_job_off_still_rasterizes_the_plain_text() {
+		let _guard = BACKEND_LOCK.lock().unwrap();
+		crate::nodes::textbackend::set_text_backends(Some(noop_measure), Some(solid_render));
+		let (core, behavior) = create();
+		let row = post_row(false, false);
+		let handle = push_value(&core, behavior.as_ref(), &row);
+		crate::nodes::textbackend::set_text_backends(None, None);
+		// Both passes off with a backend installed: the plain (tinted)
+		// raster, not the pre-backend deferred null job.
+		assert_cpu_texture(&handle);
+		assert_eq!(pixel_of(&handle, 8, 8), [1.0, 1.0, 1.0, 1.0]);
+		assert_eq!(pixel_of(&handle, 0, 0), [0.0, 0.0, 0.0, 0.0]);
+	}
+
+	#[test]
+	fn font_color_tints_the_raster_premultiplied() {
+		let _guard = BACKEND_LOCK.lock().unwrap();
+		crate::nodes::textbackend::set_text_backends(Some(noop_measure), Some(solid_render));
+		let (core, behavior) = create();
+		let mut row = post_row(false, false);
+		row.insert(
+			COLOR_INPUT.to_string(),
+			NodeValue::Color([1.0, 0.0, 0.0, 0.5]),
+		);
+		let handle = push_value(&core, behavior.as_ref(), &row);
+		crate::nodes::textbackend::set_text_backends(None, None);
+		assert_cpu_texture(&handle);
+		// The white coverage scales per channel, alpha included.
+		assert_eq!(pixel_of(&handle, 8, 8), [1.0, 0.0, 0.0, 0.5]);
+		assert_eq!(pixel_of(&handle, 0, 0), [0.0, 0.0, 0.0, 0.0]);
+	}
+
+	#[test]
+	fn outline_chain_dilates_then_colorizes_over_the_text() {
+		let _guard = BACKEND_LOCK.lock().unwrap();
+		crate::nodes::textbackend::set_text_backends(Some(noop_measure), Some(solid_render));
+		let (core, behavior) = create();
+		let row = post_row(true, false);
+		let handle = push_value(&core, behavior.as_ref(), &row);
+		crate::nodes::textbackend::set_text_backends(None, None);
+
+		// The pushed chain is the stroke merged with the text on top: the
+		// text is the merge's top (`blend_in`) layer, its CPU coverage
+		// raster the head of that branch.
+		assert_eq!(shader_id_of(&handle), "mrg");
+		let stroke = param_texture(&handle, crate::nodes::merge::BASE_INPUT);
+		let text = param_texture(&handle, crate::nodes::merge::BLEND_INPUT);
+		assert_cpu_texture(text);
+
+		// The stroke is the colorized dilation of the raster.
+		assert_eq!(shader_id_of(stroke), OUTLINE_COLORIZE_SHADER_ID);
+		assert_eq!(
+			param_color(stroke, OUTLINE_COLOR_INPUT),
+			[0.0, 0.0, 0.0, 1.0]
+		);
+		assert_eq!(param_vec2(stroke, RESOLUTION_INPUT), [16.0, 16.0]);
+		let dilated = param_texture(stroke, POST_TEXTURE_INPUT);
+		assert_eq!(shader_id_of(dilated), OUTLINE_DILATE_SHADER_ID);
+		assert_eq!(job_of(dilated).iterations, 1);
+		assert_eq!(param_float(dilated, OUTLINE_WIDTH_INPUT), 2.0);
+		assert_eq!(param_vec2(dilated, RESOLUTION_INPUT), [16.0, 16.0]);
+		assert_eq!(
+			job_ptr(param_texture(dilated, POST_TEXTURE_INPUT)),
+			job_ptr(text)
+		);
+	}
+
+	#[test]
+	fn glow_chain_blurs_once_per_axis_then_colorizes() {
+		let _guard = BACKEND_LOCK.lock().unwrap();
+		crate::nodes::textbackend::set_text_backends(Some(noop_measure), Some(solid_render));
+		let (core, behavior) = create();
+		let row = post_row(false, true);
+		let handle = push_value(&core, behavior.as_ref(), &row);
+		crate::nodes::textbackend::set_text_backends(None, None);
+
+		// Glow only: the glow is merged beneath the bare text.
+		assert_eq!(shader_id_of(&handle), "mrg");
+		let glow = param_texture(&handle, crate::nodes::merge::BASE_INPUT);
+		let text = param_texture(&handle, crate::nodes::merge::BLEND_INPUT);
+		assert_cpu_texture(text);
+
+		assert_eq!(shader_id_of(glow), GLOW_COLORIZE_SHADER_ID);
+		assert_eq!(param_color(glow, GLOW_COLOR_INPUT), [1.0, 1.0, 0.0, 1.0]);
+		assert_eq!(param_vec2(glow, RESOLUTION_INPUT), [16.0, 16.0]);
+		let blurred = param_texture(glow, POST_TEXTURE_INPUT);
+		assert_eq!(shader_id_of(blurred), GLOW_BLUR_SHADER_ID);
+		// Two iterations: one per axis (horizontal, then vertical).
+		assert_eq!(job_of(blurred).iterations, 2);
+		assert_eq!(param_float(blurred, GLOW_RADIUS_INPUT), 4.0);
+		assert_eq!(param_vec2(blurred, RESOLUTION_INPUT), [16.0, 16.0]);
+		assert_eq!(
+			job_ptr(param_texture(blurred, POST_TEXTURE_INPUT)),
+			job_ptr(text)
+		);
+	}
+
+	#[test]
+	fn outline_and_glow_glow_the_stroke() {
+		let _guard = BACKEND_LOCK.lock().unwrap();
+		crate::nodes::textbackend::set_text_backends(Some(noop_measure), Some(solid_render));
+		let (core, behavior) = create();
+		let row = post_row(true, true);
+		let handle = push_value(&core, behavior.as_ref(), &row);
+		crate::nodes::textbackend::set_text_backends(None, None);
+
+		// Both on: the glow is drawn over the stroke (which is drawn over
+		// the text), and it samples the stroke itself — the blur's input
+		// is the stroke's merge job, not the bare coverage raster.
+		assert_eq!(shader_id_of(&handle), "mrg");
+		let glow = param_texture(&handle, crate::nodes::merge::BASE_INPUT);
+		let stroke = param_texture(&handle, crate::nodes::merge::BLEND_INPUT);
+		assert_eq!(shader_id_of(stroke), "mrg");
+
+		let stroke_colorized = param_texture(stroke, crate::nodes::merge::BASE_INPUT);
+		assert_eq!(shader_id_of(stroke_colorized), OUTLINE_COLORIZE_SHADER_ID);
+		assert_cpu_texture(param_texture(stroke, crate::nodes::merge::BLEND_INPUT));
+
+		let blurred = param_texture(glow, POST_TEXTURE_INPUT);
+		assert_eq!(shader_id_of(blurred), GLOW_BLUR_SHADER_ID);
+		assert_eq!(
+			job_ptr(param_texture(blurred, POST_TEXTURE_INPUT)),
+			job_ptr(stroke)
+		);
 	}
 }

@@ -65,6 +65,11 @@ serde_yaml = "0.9"
 # stderr backend (see oakapp::logging) so validation errors and warnings
 # are actually visible (RUST_LOG selects the verbosity).
 log = "0.4"
+# Text shaping/rasterization for the text generator nodes: the app is the
+# facade layer that installs oak-node's text backend hooks (see
+# oakui/textengine.rs). Pinned to the version the gpui_wgpu backend already
+# links so the lockfile keeps a single cosmic-text.
+cosmic-text = "=0.19.0"
 
 # M14 R3: the app is a PURE module-crate consumer — every engine call is a
 # direct Rust call into the oak* rlibs (oak-node for the project graph,

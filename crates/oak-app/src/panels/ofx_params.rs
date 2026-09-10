@@ -26,15 +26,19 @@
 //! - boolean → [`CheckBox`]
 //! - combo → [`ComboBox`] fed from the repeated `("combo_option", _)`
 //!   properties; string-combo values come from `("combo_value", _)`
-//! - text → [`EditableTextState`]
+//! - text → [`EditableTextState`] (`text_input`; the `("multiline", true)`
+//!   property that [`super::effectchain::effect_params`] adds to the v3
+//!   text node's text inputs builds a `text_area` instead)
 //! - vec2 / vec3 → one [`SpinBox`] per component
 //! - color → a swatch + deferred popup picker ([`OfxColorPicker`]:
 //!   R/G/B/A sliders, live preview, hex input, Cancel/OK)
 //! - push button → a clickable button (`AppEngine::effect_push_button`)
 //!
-//! Secret (HIDDEN) inputs never reach the snapshot, so they render
-//! nothing; `ui_group` / `ui_page` become section titles. Every edit is
-//! routed through [`AppEngine::set_effect_param`] (undoable).
+//! Secret (HIDDEN) inputs never reach the snapshot the facade builds, and
+//! the view skips them again on its own (a plugin or mock engine can hand
+//! one over; the inspector must not show a secret input even then).
+//! `ui_group` / `ui_page` become section titles. Every edit is routed
+//! through [`AppEngine::set_effect_param`] (undoable).
 //!
 //! The control set is built once per expanded card — the stack view caches
 //! the params view per effect (recreating it per render would kill
@@ -93,8 +97,13 @@ enum ControlKind {
 	Spin(Vec<(Entity<SpinBox>, usize)>),
 	/// A colour swatch + popup picker (color).
 	Color(Entity<OfxColorPicker>),
-	/// A text field (string).
-	Text(Entity<EditableTextState>),
+	/// A text field: single-line by default, multi-line when the param
+	/// carries the `("multiline", true)` property (the v3 text node's text
+	/// inputs; the inspector then builds a `text_area`).
+	Text {
+		editor: Entity<EditableTextState>,
+		multiline: bool,
+	},
 	/// One curve editor per dimension (parametric parameter).
 	Curve(Vec<Entity<gpui_widgets::curve_editor::CurveEditor>>),
 	/// A push button (rendered inline, no entity).
@@ -122,6 +131,11 @@ impl<E: AppEngine> OfxParamsView<E> {
 		let mut control_id = 0usize;
 		let controls = params
 			.iter()
+			// The built-in facade already drops hidden inputs, but a plugin
+			// or mock engine's snapshot can carry them; a secret input must
+			// never reach the inspector, so filter here as well (the params
+			// view is the last stop before a control is built).
+			.filter(|param| param.flags & oak_node::input::flags::HIDDEN == 0)
 			.map(|param| build_control(param, &mut control_id, window, cx))
 			.collect();
 
@@ -201,7 +215,7 @@ impl<E: AppEngine> OfxParamsView<E> {
 						picker.update(cx, |picker, cx| picker.apply_viewer_pick(color, cx));
 					}
 				}
-				ControlKind::Text(editor) => {
+				ControlKind::Text { editor, .. } => {
 					let text = match &param.value {
 						NodeValue::Text(s) => s.clone(),
 						NodeValue::StrCombo(s) => s.clone(),
@@ -425,6 +439,16 @@ fn curve_points_close(
 		})
 }
 
+/// Whether a parameter asks for a multi-line text field (the
+/// `("multiline", true)` property the facade adds to the v3 text node's
+/// text inputs).
+fn is_multiline(param: &EffectParam) -> bool {
+	param
+		.properties
+		.iter()
+		.any(|(k, v)| k == "multiline" && matches!(v, NodeValue::Boolean(true)))
+}
+
 /// The SliderValue for a param's current value (int → Integer, float →
 /// Float).
 fn slider_value(param: &EffectParam) -> SliderValue {
@@ -435,17 +459,39 @@ fn slider_value(param: &EffectParam) -> SliderValue {
 	}
 }
 
-/// The selected option index of a combo/string-combo parameter. Integer
-/// combos carry the index directly; string combos are matched against the
-/// `("combo_value", _)` (or `("combo_option", _)`) list by value.
-fn combo_index_for(param: &EffectParam) -> usize {
-	if param.value_type == ValueType::StrCombo {
+/// The option list of a combo/string-combo parameter: the
+/// `("combo_value", _)` strings when it has any, else the
+/// `("combo_option", _)` labels. A string combo whose current value is not
+/// in the list (a font family saved on another machine, say) keeps its
+/// value: it goes in front, so the combo shows what the node actually
+/// holds instead of silently falling back to the first option.
+fn combo_haystack(param: &EffectParam) -> Vec<String> {
+	let mut haystack = if param.value_type == ValueType::StrCombo {
 		let values = crate::oakui::effectchain::combo_values(param);
-		let haystack = if values.is_empty() {
+		if values.is_empty() {
 			crate::oakui::effectchain::combo_options(param)
 		} else {
 			values
-		};
+		}
+	} else {
+		crate::oakui::effectchain::combo_options(param)
+	};
+	if param.value_type == ValueType::StrCombo {
+		if let NodeValue::StrCombo(s) | NodeValue::Text(s) = &param.value {
+			if !s.is_empty() && !haystack.iter().any(|v| v == s) {
+				haystack.insert(0, s.clone());
+			}
+		}
+	}
+	haystack
+}
+
+/// The selected option index of a combo/string-combo parameter. Integer
+/// combos carry the index directly; string combos are matched against the
+/// [`combo_haystack`] list by value.
+fn combo_index_for(param: &EffectParam) -> usize {
+	if param.value_type == ValueType::StrCombo {
+		let haystack = combo_haystack(param);
 		match &param.value {
 			NodeValue::StrCombo(s) | NodeValue::Text(s) => {
 				haystack.iter().position(|v| v == s).unwrap_or(0)
@@ -479,25 +525,157 @@ fn default_range(value_type: ValueType) -> (f64, f64) {
 	}
 }
 
-/// The min/max from the parameter's `("min", Float)` / `("max", Float)`
+/// The min/max from the parameter's `("min", _)` / `("max", _)`
 /// properties, falling back to [`default_range`].
 fn numeric_range(param: &EffectParam) -> (f64, f64) {
-	let prop = |key: &str| {
-		param
-			.properties
-			.iter()
-			.find(|(k, _)| k == key)
-			.and_then(|(_, v)| match v {
-				NodeValue::Float(f) => Some(*f),
-				NodeValue::Int(i) => Some(*i as f64),
-				_ => None,
-			})
-	};
 	let (dmin, dmax) = default_range(param.value_type);
 	(
-		prop("min").unwrap_or(dmin),
-		prop("max").unwrap_or(dmax),
+		range_property(param, "min").unwrap_or(dmin),
+		range_property(param, "max").unwrap_or(dmax),
 	)
+}
+
+/// The `("min", _)` / `("max", _)` property of a parameter as a finite
+/// number: a NaN or infinite bound would make the slider's arithmetic
+/// meaningless, so it is ignored.
+fn range_property(param: &EffectParam, key: &str) -> Option<f64> {
+	param
+		.properties
+		.iter()
+		.find(|(k, _)| k == key)
+		.and_then(|(_, v)| match v {
+			NodeValue::Float(f) => Some(*f),
+			NodeValue::Int(i) => Some(*i as f64),
+			_ => None,
+		})
+		.filter(|v| v.is_finite())
+}
+
+/// The slider range and step of an int/float parameter: `(min, max, step)`.
+///
+/// The OFX translation only attaches min/max to colour inputs, but the
+/// built-in nodes attach `("min", _)` to the parameters whose domain has a
+/// floor and no ceiling (font size, outline width, glow radius). A flat
+/// default range then snaps the value onto a coarse grid nowhere near it —
+/// `font_size_in` at 72 showed as 50.995 over a 1..10000 range. Instead the
+/// value itself defines the grid: a "nice" step that divides the value's
+/// distance from its bound, over a range holding 200 of them, so a
+/// min-only parameter slides up from its floor with the handle exactly on
+/// the value. The slider's double-click entry types exact values, so the
+/// range never has to cover everything.
+fn slider_range_and_step(param: &EffectParam) -> (f64, f64, f64) {
+	let value = param.value.to_double();
+	if param.value_type == ValueType::Int {
+		// Integer parameters step by one; only the bounds need ordering
+		// (an inverted range would panic the slider's clamp).
+		let (min, max) = numeric_range(param);
+		let (mut lo, mut hi) = (min.min(max), min.max(max));
+		if value.is_finite() {
+			lo = lo.min(value);
+			hi = hi.max(value);
+		}
+		if hi <= lo {
+			hi = lo + 200.0;
+		}
+		return (lo, hi, 1.0);
+	}
+	match (range_property(param, "min"), range_property(param, "max")) {
+		// A floor but no ceiling.
+		(Some(min), None) => {
+			let v = if value.is_finite() { value.max(min) } else { min };
+			let span = v - min;
+			let step = if span > 0.0 {
+				nice_grid_step(span)
+			} else {
+				1.0
+			};
+			(min, min + 200.0 * step, step)
+		}
+		// A ceiling but no floor: the mirror image.
+		(None, Some(max)) => {
+			let v = if value.is_finite() { value.min(max) } else { max };
+			let span = max - v;
+			let step = if span > 0.0 {
+				nice_grid_step(span)
+			} else {
+				1.0
+			};
+			(max - 200.0 * step, max, step)
+		}
+		// Both bounds, or neither (the wide default range): one step over
+		// the whole range, rounded so the value lands on the grid.
+		(bound_min, bound_max) => {
+			let (dmin, dmax) = default_range(param.value_type);
+			let min = bound_min.unwrap_or(dmin);
+			let max = bound_max.unwrap_or(dmax);
+			let (lo, hi) = (min.min(max), min.max(max));
+			let step0 = ((hi - lo) / 200.0).max(0.001);
+			let span = if value.is_finite() {
+				value.clamp(lo, hi) - lo
+			} else {
+				0.0
+			};
+			let step = if span > 0.0 {
+				span / (span / step0).round().max(1.0)
+			} else {
+				step0
+			};
+			(lo, hi, step)
+		}
+	}
+}
+
+/// A "nice" step for a slider whose value sits `span` above its bound: one
+/// of `1/2/5 × 10^k`, close to a twenty-fifth of the span (a slider wants a
+/// few dozen steps to feel controllable) and dividing the span into a whole
+/// number of them, so the value itself is on the grid.
+fn nice_grid_step(span: f64) -> f64 {
+	let target = span / 25.0;
+	if !(target.is_finite() && target > 0.0) {
+		return 1.0;
+	}
+	let exp = target.log10().floor() as i32;
+	let mut best: Option<f64> = None;
+	for k in -2..=2 {
+		for m in [1.0, 2.0, 5.0] {
+			let step = scale_by_pow10(m, exp + k);
+			if !(step.is_finite() && step > 0.0) || step < span / 100.0 || step > span / 8.0 {
+				continue;
+			}
+			let steps = span / step;
+			if steps < 1.0 || (steps - steps.round()).abs() > 1e-9 * steps.abs().max(1.0) {
+				continue;
+			}
+			let better = match best {
+				Some(b) => (step / target).ln().abs() < (b / target).ln().abs(),
+				None => true,
+			};
+			if better {
+				best = Some(step);
+			}
+		}
+	}
+	best.unwrap_or_else(|| {
+		let steps = (span / target).round().max(1.0);
+		span / steps
+	})
+}
+
+/// `m × 10^exp`, by repeated multiplication rather than `powf`: the
+/// result is then bit-identical to the literal grid values (0.1, 0.01, …)
+/// that a slider step of that size is expected to land on.
+fn scale_by_pow10(m: f64, exp: i32) -> f64 {
+	let mut v = m;
+	if exp >= 0 {
+		for _ in 0..exp {
+			v *= 10.0;
+		}
+	} else {
+		for _ in 0..-exp {
+			v /= 10.0;
+		}
+	}
+	v
 }
 
 /// Builds one [`ParamControl`] for `param`, creating the control entities
@@ -510,16 +688,11 @@ fn build_control<E: AppEngine>(
 ) -> ParamControl {
 	let kind = match param.value_type {
 		ValueType::Int | ValueType::Float => {
-			let (min, max) = numeric_range(param);
+			let (min, max, step) = slider_range_and_step(param);
 			let kind = if param.value_type == ValueType::Int {
 				ValueKind::Integer
 			} else {
 				ValueKind::Float
-			};
-			let step = if param.value_type == ValueType::Int {
-				1.0
-			} else {
-				((max - min) / 200.0).max(0.001)
 			};
 			let default_raw = param.value.to_double().clamp(min, max);
 			let model = SliderModel::new(kind, min, max, step, default_raw);
@@ -537,16 +710,7 @@ fn build_control<E: AppEngine>(
 			ControlKind::CheckBox(check)
 		}
 		ValueType::Combo | ValueType::StrCombo => {
-			let options: Vec<String> = if param.value_type == ValueType::StrCombo {
-				let values = crate::oakui::effectchain::combo_values(param);
-				if values.is_empty() {
-					crate::oakui::effectchain::combo_options(param)
-				} else {
-					values
-				}
-			} else {
-				crate::oakui::effectchain::combo_options(param)
-			};
+			let options = combo_haystack(param);
 			if options.is_empty() {
 				// No option list: show the raw value read-only.
 				let text = if param.value_type == ValueType::Combo {
@@ -579,7 +743,10 @@ fn build_control<E: AppEngine>(
 			let editor = cx.new(|cx| EditableTextState::new(StringStorage::default(), cx));
 			editor.update(cx, |editor, cx| editor.emplace(&text, cx));
 			*next_id += 1;
-			ControlKind::Text(editor)
+			ControlKind::Text {
+				editor,
+				multiline: is_multiline(param),
+			}
 		}
 		ValueType::Vec2 | ValueType::Vec3 => {
 			let components = value_components(&param.value);
@@ -707,12 +874,7 @@ fn wire_controls<E: AppEngine>(view: &OfxParamsView<E>, cx: &mut Context<OfxPara
 						});
 						let nv = match &param {
 							Some(p) if p.value_type == ValueType::StrCombo => {
-								let values = crate::oakui::effectchain::combo_values(p);
-								let haystack = if values.is_empty() {
-									crate::oakui::effectchain::combo_options(p)
-								} else {
-									values
-								};
+								let haystack = combo_haystack(p);
 								NodeValue::StrCombo(
 									haystack.get(*value).cloned().unwrap_or_default(),
 								)
@@ -789,7 +951,7 @@ fn wire_controls<E: AppEngine>(view: &OfxParamsView<E>, cx: &mut Context<OfxPara
 				})
 				.detach();
 			}
-			ControlKind::Text(_editor) => {
+			ControlKind::Text { .. } => {
 				// The text field commits explicitly (the commit button in the
 				// row). No event subscription here: the params view is rebuilt
 				// on every card render, so committing on TextChanged would
@@ -927,12 +1089,37 @@ impl<E: AppEngine> Render for OfxParamsView<E> {
 					ControlKind::Color(picker) => {
 						div().flex_1().child(picker.clone()).into_any_element()
 					}
-					ControlKind::Text(editor) => {
+					ControlKind::Text { editor, multiline } => {
 						let weak = editor.downgrade();
 						let engine = self.engine.clone();
 						let effect = self.effect;
 						let input_id = control.input_id.clone();
 						let editor_commit = editor.clone();
+						let field = if *multiline {
+							// A multi-line field. `text_input` above is
+							// single-line only (and keeps its theme colors
+							// to itself), so the element is built here with
+							// the same colors the component would use, in a
+							// fixed-height box the text scrolls inside.
+							gpui_elements::editable_text::text_area(format!(
+								"ofx-param-{}",
+								control.input_id
+							))
+							.state(weak)
+							.accepts_input(true)
+							.h(px(96.0))
+							.text_color(colors.text)
+							.placeholder_color(colors.disabled.into())
+							.selection_color(colors.selected.into())
+							.caret_color(colors.text.into())
+							.marked_color(colors.text.into())
+							.into_any_element()
+						} else {
+							text_input(format!("ofx-param-{}", control.input_id), cx)
+								.state(weak)
+								.accepts_input(true)
+								.into_any_element()
+						};
 						div()
 							.flex_1()
 							.flex()
@@ -946,7 +1133,7 @@ impl<E: AppEngine> Render for OfxParamsView<E> {
 									.bg(colors.background)
 									.px_2()
 									.py_1()
-									.child(text_input(format!("ofx-param-{}", control.input_id), cx).state(weak).accepts_input(true)),
+									.child(field),
 							)
 							.child(
 								// Explicit commit: reads the field and pushes the
@@ -2691,19 +2878,22 @@ mod tests {
 		cx.run_until_parked();
 		let host = window.root(cx).expect("host root");
 		let view = cx.read(|cx| host.read(cx).view.clone());
+		// Two inputs are text fields: the single-line `args_in` and the
+		// multi-line `plain_text_in`. This test types into the latter.
 		let editor = cx.read(|cx| {
 			view.read(cx)
 				.controls
 				.iter()
-				.find_map(|c| match &c.kind {
-					ControlKind::Text(editor) => Some(editor.clone()),
-					_ => None,
+				.find(|c| c.input_id == "plain_text_in")
+				.map(|c| match &c.kind {
+					ControlKind::Text { editor, .. } => editor.clone(),
+					_ => panic!("plain_text_in should build a text control"),
 				})
-				.expect("a text control")
+				.expect("the plain_text_in control")
 		});
 		assert_eq!(
 			cx.read(|cx| editor.read(cx).as_str().to_string()),
-			"<p>engine text</p>"
+			"文本\nsecond line"
 		);
 
 		// Focus the field and type: the in-progress text must survive the
@@ -2745,9 +2935,343 @@ mod tests {
 		cx.run_until_parked();
 		assert_eq!(
 			cx.read(|cx| editor.read(cx).as_str().to_string()),
-			"<p>engine text</p>",
+			"文本\nsecond line",
 			"the field re-syncs to the engine value on blur"
 		);
+	}
+
+	/// The v3 text node's parameter set renders as one structured control per
+	/// visible input — a multi-line text field, a font-family combo, colour
+	/// pickers, sliders, checkboxes, vec2 spinboxes — and the three hidden
+	/// inputs (the legacy text, the vertical align, the use-args toggle)
+	/// render nothing at all.
+	#[gpui::test]
+	async fn text3_params_render_as_structured_controls(cx: &mut TestAppContext) {
+		use crate::oakui::mock::MockEngine;
+		struct Host {
+			view: Entity<OfxParamsView<MockEngine>>,
+		}
+		impl Render for Host {
+			fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+				div().size_full().child(self.view.clone())
+			}
+		}
+		cx.update(|cx| cx.init_colors());
+		let window = cx.open_window(size(px(400.0), px(600.0)), |window, cx| {
+			let engine = cx.new(|cx| MockEngine::create(cx));
+			let view = cx.new(|cx| OfxParamsView::<MockEngine>::new(EffectId(900), engine, window, cx));
+			Host { view }
+		});
+		cx.run_until_parked();
+		let host = window.root(cx).expect("host root");
+		let view = cx.read(|cx| host.read(cx).view.clone());
+
+		// The mock hands the hidden inputs over (a plugin engine's snapshot
+		// can carry them too); the view must drop them before any control is
+		// built.
+		let raw_ids: Vec<String> = cx.read(|cx| {
+			view.read(cx)
+				.engine
+				.read(cx)
+				.effect_params(EffectId(900))
+				.expect("the mock carries the text3 parameter set")
+				.into_iter()
+				.map(|p| p.input_id)
+				.collect()
+		});
+		for hidden in ["text_in", "valign_in", "use_args_in"] {
+			assert!(
+				raw_ids.iter().any(|id| id == hidden),
+				"the mock snapshot carries {hidden} ({raw_ids:?})"
+			);
+		}
+
+		// Draw once: the render pass is where `sync_values` reapplies the
+		// engine snapshot to the widgets (the sliders snap to their grid).
+		let mut visual = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+		visual.update(|window, cx| {
+			window.draw(cx).clear();
+		});
+
+		/// One plain-data snapshot of the control set (the kinds carry
+		/// entities, so they cannot be compared directly).
+		struct Snapshot {
+			kinds: Vec<(String, &'static str)>,
+			sliders: Vec<(String, f64)>,
+			texts: Vec<(String, String, bool)>,
+			combos: Vec<(String, Option<usize>)>,
+			spins: Vec<(String, Vec<f64>)>,
+			colors: Vec<String>,
+		}
+		let snap = visual.read(|cx| {
+			let view = view.read(cx);
+			let mut snap = Snapshot {
+				kinds: Vec::new(),
+				sliders: Vec::new(),
+				texts: Vec::new(),
+				combos: Vec::new(),
+				spins: Vec::new(),
+				colors: Vec::new(),
+			};
+			for control in &view.controls {
+				let kind = match &control.kind {
+					ControlKind::Slider(slider) => {
+						snap.sliders
+							.push((control.input_id.clone(), slider.read(cx).value().to_f64()));
+						"slider"
+					}
+					ControlKind::CheckBox(_) => "checkbox",
+					ControlKind::Combo(combo) => {
+						snap.combos.push((control.input_id.clone(), combo.read(cx).selected()));
+						"combo"
+					}
+					ControlKind::Spin(spins) => {
+						snap.spins.push((
+							control.input_id.clone(),
+							spins.iter().map(|(spin, _)| spin.read(cx).value().to_f64()).collect(),
+						));
+						"spin"
+					}
+					ControlKind::Color(_) => {
+						snap.colors.push(control.input_id.clone());
+						"color"
+					}
+					ControlKind::Text { editor, multiline } => {
+						snap.texts.push((
+							control.input_id.clone(),
+							editor.read(cx).as_str().to_string(),
+							*multiline,
+						));
+						if *multiline {
+							"text-area"
+						} else {
+							"text"
+						}
+					}
+					ControlKind::Curve(_) => "curve",
+					ControlKind::PushButton => "button",
+					ControlKind::ReadOnly(_) => "readonly",
+				};
+				snap.kinds.push((control.input_id.clone(), kind));
+			}
+			snap
+		});
+
+		let kinds: Vec<(&str, &str)> = snap
+			.kinds
+			.iter()
+			.map(|(id, kind)| (id.as_str(), *kind))
+			.collect();
+		assert_eq!(
+			kinds,
+			vec![
+				("pos_in", "spin"),
+				("size_in", "spin"),
+				("plain_text_in", "text-area"),
+				("font_family_in", "combo"),
+				("font_size_in", "slider"),
+				("outline_enabled_in", "checkbox"),
+				("outline_color_in", "color"),
+				("outline_width_in", "slider"),
+				("glow_enabled_in", "checkbox"),
+				("glow_color_in", "color"),
+				("glow_radius_in", "slider"),
+				("args_in", "text"),
+			],
+			"one control per visible text3 input, hidden inputs and secret textures skipped"
+		);
+
+		// Each numeric widget shows the engine value (not a grid neighbour).
+		let slider_values: Vec<(&str, f64)> = snap
+			.sliders
+			.iter()
+			.map(|(id, value)| (id.as_str(), *value))
+			.collect();
+		for (id, want) in [
+			("font_size_in", 72.0),
+			("outline_width_in", 2.0),
+			("glow_radius_in", 8.0),
+		] {
+			let got = slider_values
+				.iter()
+				.find(|(input_id, _)| *input_id == id)
+				.unwrap_or_else(|| panic!("{id} should be a slider: {slider_values:?}"));
+			assert!(
+				(got.1 - want).abs() <= 1e-9 * want.abs().max(1.0),
+				"{id} shows {} but the engine holds {want}",
+				got.1
+			);
+		}
+
+		assert_eq!(
+			snap.texts
+				.iter()
+				.map(|(id, text, multiline)| (id.as_str(), text.as_str(), *multiline))
+				.collect::<Vec<_>>(),
+			vec![
+				("plain_text_in", "文本\nsecond line", true),
+				("args_in", "", false),
+			],
+			"the editable text is multi-line and holds the node's text verbatim"
+		);
+		assert_eq!(
+			snap.combos,
+			vec![("font_family_in".to_string(), Some(0))],
+			"the font family is a (string) combo"
+		);
+		assert_eq!(
+			snap.colors,
+			vec!["outline_color_in".to_string(), "glow_color_in".to_string()],
+			"both colours get a picker"
+		);
+		assert_eq!(
+			snap.spins,
+			vec![
+				("pos_in".to_string(), vec![0.0, 0.0]),
+				("size_in".to_string(), vec![400.0, 300.0]),
+			],
+			"the vec2 params get one spinbox per component"
+		);
+	}
+
+	/// Every numeric parameter seeds its slider on the step grid, inside the
+	/// range, and a re-sync does not move it: `font_size_in` (72 with a floor
+	/// of 1) used to show 50.995, because the range came from the type
+	/// default and the value snapped onto a coarse grid nowhere near it.
+	#[test]
+	fn numeric_params_stay_on_their_slider_grid() {
+		fn param(
+			value_type: ValueType,
+			value: NodeValue,
+			properties: Vec<(&str, NodeValue)>,
+		) -> EffectParam {
+			EffectParam {
+				input_id: "test_in".to_string(),
+				display_name: "Test".to_string(),
+				value_type,
+				value,
+				flags: 0,
+				properties: properties
+					.into_iter()
+					.map(|(k, v)| (k.to_string(), v))
+					.collect(),
+			}
+		}
+		fn close(got: f64, want: f64) -> bool {
+			(got - want).abs() <= 1e-9 * want.abs().max(1.0)
+		}
+
+		struct Case {
+			label: &'static str,
+			param: EffectParam,
+			want_value: f64,
+			want_range: (f64, f64),
+		}
+		let cases = vec![
+			Case {
+				label: "font size 72 over a floor of 1",
+				param: param(
+					ValueType::Float,
+					NodeValue::Float(72.0),
+					vec![("min", NodeValue::Float(1.0))],
+				),
+				want_value: 72.0,
+				want_range: (1.0, 201.0),
+			},
+			Case {
+				label: "outline width 2 over a floor of 0",
+				param: param(
+					ValueType::Float,
+					NodeValue::Float(2.0),
+					vec![("min", NodeValue::Float(0.0))],
+				),
+				want_value: 2.0,
+				want_range: (0.0, 20.0),
+			},
+			Case {
+				label: "glow radius 8 over a floor of 0",
+				param: param(
+					ValueType::Float,
+					NodeValue::Float(8.0),
+					vec![("min", NodeValue::Float(0.0))],
+				),
+				want_value: 8.0,
+				want_range: (0.0, 100.0),
+			},
+			Case {
+				label: "a value sitting on its floor",
+				param: param(
+					ValueType::Float,
+					NodeValue::Float(1.0),
+					vec![("min", NodeValue::Float(1.0))],
+				),
+				want_value: 1.0,
+				want_range: (1.0, 201.0),
+			},
+			Case {
+				label: "a bounded 0..1 float",
+				param: param(
+					ValueType::Float,
+					NodeValue::Float(0.5),
+					vec![("min", NodeValue::Float(0.0)), ("max", NodeValue::Float(1.0))],
+				),
+				want_value: 0.5,
+				want_range: (0.0, 1.0),
+			},
+			Case {
+				label: "an unbounded float (the wide default range)",
+				param: param(ValueType::Float, NodeValue::Float(0.7234), Vec::new()),
+				want_value: 0.7234,
+				want_range: (-10000.0, 10000.0),
+			},
+			Case {
+				label: "an int over 0..10",
+				param: param(
+					ValueType::Int,
+					NodeValue::Int(5),
+					vec![("min", NodeValue::Int(0)), ("max", NodeValue::Int(10))],
+				),
+				want_value: 5.0,
+				want_range: (0.0, 10.0),
+			},
+		];
+
+		for case in cases {
+			let label = case.label;
+			let (min, max, step) = slider_range_and_step(&case.param);
+			assert!(
+				min.is_finite() && max.is_finite() && step.is_finite() && step > 0.0,
+				"{label}: bad slider geometry ({min}, {max}) step {step}"
+			);
+			assert_eq!((min, max), case.want_range, "{label}: the slider range");
+			let kind = if case.param.value_type == ValueType::Int {
+				ValueKind::Integer
+			} else {
+				ValueKind::Float
+			};
+			let engine_value = case.param.value.to_double();
+			let mut model = SliderModel::new(kind, min, max, step, engine_value.clamp(min, max));
+			assert!(
+				close(model.raw, case.want_value),
+				"{label}: seeded at {} instead of {}",
+				model.raw,
+				case.want_value
+			);
+			// `sync_values` re-applies the engine value on every render: the
+			// snapshot must land back on the same position.
+			model.set_value(SliderValue::Float(engine_value));
+			assert!(
+				close(model.raw, case.want_value),
+				"{label}: a re-sync moved the value to {} (want {})",
+				model.raw,
+				case.want_value
+			);
+			assert!(
+				min <= model.raw && model.raw <= max,
+				"{label}: {} is outside {min}..{max}",
+				model.raw
+			);
+		}
 	}
 }
 

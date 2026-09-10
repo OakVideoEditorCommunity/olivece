@@ -4723,6 +4723,7 @@ dependencies = [
 name = "oak-app"
 version = "0.5.0"
 dependencies = [
+ "cosmic-text",
  "embed-resource",
  "gpui",
  "gpui_elements",
