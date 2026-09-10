@@ -1,0 +1,4 @@
+// Icon resource ID 1 is what gpui_windows' `load_icon` reads for the
+// window/taskbar icon; it is also the exe's Explorer icon. The path is
+// resolved from the crate root (the build script's working directory).
+1 ICON "../../assets/appicon/icon.ico"

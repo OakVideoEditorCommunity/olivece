@@ -28,11 +28,13 @@ mkdir -p "$TOP"/{BUILD,RPMS,SOURCES,SPECS,BUILDROOT}
 
 ROOT="$TOP/BUILDROOT/oak-editor-$VERSION-1.x86_64"
 mkdir -p "$ROOT/usr/bin" "$ROOT/usr/share/applications" \
-	"$ROOT/usr/share/icons/hicolor/512x512/apps" "$ROOT/usr/share/oak/i18n"
+	"$ROOT/usr/share/icons/hicolor/512x512/apps" "$ROOT/usr/share/oak/i18n" \
+	"$ROOT/usr/share/icons/hicolor/scalable/apps"
 install -m755 target/release/oak-editor target/release/oak-cli target/release/oak-worker \
 	"$ROOT/usr/bin/"
 install -m644 packaging/oak.desktop "$ROOT/usr/share/applications/oak.desktop"
 install -m644 icons/icon.png "$ROOT/usr/share/icons/hicolor/512x512/apps/oak.png"
+install -m644 Oak_Icon.svg "$ROOT/usr/share/icons/hicolor/scalable/apps/oak.svg"
 install -m644 assets/i18n/*.yaml "$ROOT/usr/share/oak/i18n/"
 
 rpmbuild -bb \

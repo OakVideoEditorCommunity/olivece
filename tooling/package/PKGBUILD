@@ -36,6 +36,7 @@ package() {
     install -Dm755 "$OAK_BIN/oak-worker" "$pkgdir/usr/bin/oak-worker"
     install -Dm644 "$OAK_ROOT/packaging/oak.desktop" "$pkgdir/usr/share/applications/oak.desktop"
     install -Dm644 "$OAK_ROOT/icons/icon.png" "$pkgdir/usr/share/icons/hicolor/512x512/apps/oak.png"
+    install -Dm644 "$OAK_ROOT/Oak_Icon.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/oak.svg"
     for f in "$OAK_ROOT"/assets/i18n/*.yaml; do
         install -Dm644 "$f" "$pkgdir/usr/share/oak/i18n/$(basename "$f")"
     done

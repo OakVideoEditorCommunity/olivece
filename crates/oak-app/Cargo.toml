@@ -92,6 +92,14 @@ default = []
 # is given at runtime (or this feature is enabled at build time).
 mock-engine = []
 
+# The Windows window/taskbar icon: embeds resources/windows/oak.rc (icon
+# resource ID 1, read by gpui_windows' `load_icon`) into oak-editor.exe.
+# Same crate gpui uses for its Windows manifest (see gpui's build.rs).
+# Unconditional (not target-gated): the build script references it behind
+# a runtime `CARGO_CFG_TARGET_OS` check, so it must resolve on every host.
+[build-dependencies]
+embed-resource = "3.0"
+
 [dev-dependencies]
 # `#[gpui::test]` harness for engine-seam smoke tests (test-support feature).
 gpui = { path = "../../gpui/crates/gpui", features = ["test-support"] }

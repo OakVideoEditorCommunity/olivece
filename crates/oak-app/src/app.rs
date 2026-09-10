@@ -3817,11 +3817,20 @@ fn run_with<E: AppEngine>(args: AppArgs) {
 		let bounds = Bounds::centered(None, size(px(1600.0), px(900.0)), cx);
 		let initial = initial.clone();
 		let show_manager = initial.is_none();
+		// The window/taskbar icon, per platform: X11 takes the pixels up
+		// front (_NET_WM_ICON, decoded here from the embedded PNG);
+		// Wayland resolves the icon from oak.desktop via the app id;
+		// Windows reads it from the exe's icon resource (see build.rs).
+		let icon = image::load_from_memory(include_bytes!("../../../assets/appicon/icon.png"))
+			.expect("the embedded app icon must decode")
+			.into_rgba8();
 		let mut root_slot = None;
 		let window = cx
 			.open_window(
 				WindowOptions {
 					window_bounds: Some(WindowBounds::Windowed(bounds)),
+					app_id: Some("oak".into()),
+					icon: Some(Arc::new(icon)),
 					..Default::default()
 				},
 				|window, cx| {

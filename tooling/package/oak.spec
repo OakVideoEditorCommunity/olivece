@@ -39,6 +39,7 @@ true
 /usr/bin/oak-worker
 /usr/share/applications/oak.desktop
 /usr/share/icons/hicolor/512x512/apps/oak.png
+/usr/share/icons/hicolor/scalable/apps/oak.svg
 /usr/share/oak/i18n/
 
 %changelog

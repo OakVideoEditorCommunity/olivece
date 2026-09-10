@@ -37,6 +37,16 @@ fn main() {
 		// at the real system library.
 		println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib");
 	}
+	if os == "windows" {
+		// The window/taskbar icon on Windows comes from the exe's icon
+		// resource (ID 1 — gpui_windows' `load_icon`); compile it in. The
+		// same resource is the exe's Explorer icon.
+		println!("cargo:rerun-if-changed=resources/windows/oak.rc");
+		println!("cargo:rerun-if-changed=../../assets/appicon/icon.ico");
+		embed_resource::compile("resources/windows/oak.rc", embed_resource::NONE)
+			.manifest_optional()
+			.unwrap();
+	}
 	// --- OFX interact end-to-end test plugin ---------------------------------
 	// The app-side interact tests (src/oakui/ofx.rs) drive the *real*
 	// minimal test plugin (../../crates/oak-plugin/cbits/oak_test_plugin.c) through

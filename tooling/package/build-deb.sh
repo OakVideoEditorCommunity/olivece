@@ -26,12 +26,13 @@ STAGING=target/pkg/deb
 rm -rf "$STAGING"
 mkdir -p "$STAGING/usr/bin" "$STAGING/usr/share/applications" \
 	"$STAGING/usr/share/icons/hicolor/512x512/apps" "$STAGING/usr/share/oak/i18n" \
-	"$STAGING/DEBIAN"
+	"$STAGING/usr/share/icons/hicolor/scalable/apps" "$STAGING/DEBIAN"
 
 install -m755 target/release/oak-editor target/release/oak-cli target/release/oak-worker \
 	"$STAGING/usr/bin/"
 install -m644 packaging/oak.desktop "$STAGING/usr/share/applications/oak.desktop"
 install -m644 icons/icon.png "$STAGING/usr/share/icons/hicolor/512x512/apps/oak.png"
+install -m644 Oak_Icon.svg "$STAGING/usr/share/icons/hicolor/scalable/apps/oak.svg"
 install -m644 assets/i18n/*.yaml "$STAGING/usr/share/oak/i18n/"
 
 # The full shlib dependency set (FFmpeg/OCIO are statically linked, so
