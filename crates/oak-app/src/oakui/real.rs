@@ -3118,7 +3118,16 @@ impl RealEngine {
 			return;
 		};
 		if let Some(m) = RenderManager::global() {
-			let _ = m.set_graph_snapshot(&project, revision);
+			if m.set_graph_snapshot(&project, revision).is_ok() {
+				// Every frame rendered since the edit went through workers
+				// holding the STALE snapshot (the debounce window — the
+				// proxy that just landed in the cache, a full-res fill,
+				// the pre-render window). Drop them so the next paint
+				// re-renders from the fresh snapshot; otherwise a paused
+				// viewer keeps the pre-edit picture until the playhead
+				// moves (the "edits only show during playback" report).
+				self.invalidate_rendered_frames();
+			}
 		}
 		self.last_snapshot_push = Some(std::time::Instant::now());
 		cx.notify();
@@ -8807,6 +8816,110 @@ mod tests {
 			);
 			std::thread::sleep(Duration::from_millis(10));
 		}
+	}
+
+	/// An effect edit must reach the PAUSED display: the debounced
+	/// snapshot upload invalidates the frames rendered through the stale
+	/// snapshot, so a bounded number of engine ticks after the edit the
+	/// program frame shows the new picture — without any playback
+	/// (the "edits only show during playback" report's regression).
+	#[gpui::test]
+	async fn effect_edit_updates_the_paused_frame(cx: &mut gpui::TestAppContext) {
+		let _media = media_lock();
+		let _worker = WorkerBinGuard::set();
+		let engine = cx.update(|cx| cx.new(|cx| RealEngine::create(cx)));
+		cx.update(|app| engine.update(app, |engine, cx| engine.new_project(cx)));
+
+		// A solid green clip on the timeline, selected for the stack.
+		let media = std::env::temp_dir()
+			.join(format!("oakapp_editframe_{}.mp4", std::process::id()));
+		cx.update(|app| {
+			engine.update(app, |engine, _cx| {
+				let project = engine.project.clone().unwrap();
+				let seq = engine.sequence.unwrap();
+				oak_codec::testmedia::write_test_clip_solid(
+					&media,
+					64,
+					64,
+					10,
+					10,
+					[0.0, 1.0, 0.0, 1.0],
+				)
+				.expect("green clip");
+				let footage = graphops::import_footage(&project, &media).expect("import");
+				graphops::place_footage_clip(&project, seq, footage, TrackType::Video, 0, 0, 10, 0)
+					.expect("place the clip");
+				engine.refresh_sequence_info();
+				engine.rebuild_timeline();
+				let clip = engine
+					.tracks
+					.iter()
+					.flat_map(|t| t.clips.iter())
+					.next()
+					.expect("a clip")
+					.id();
+				engine.selected_clip = Some(clip);
+			})
+		});
+
+		let frame_bytes = |cx: &mut gpui::TestAppContext| -> Vec<u8> {
+			cx.read(|app| {
+				engine
+					.read(app)
+					.cpu_frame(Monitor::Program, app)
+					.as_bytes(0)
+					.expect("frame bytes")
+					.to_vec()
+			})
+		};
+		let before = frame_bytes(cx);
+
+		// Insert an opacity effect and crush it to 0 (the frame goes
+		// transparent black) — through the same engine paths the
+		// inspector's add / parameter commit take (the stack appends at
+		// the chain end, like the panel's add button).
+		cx.update(|app| {
+			engine.update(app, |engine, cx| {
+				engine
+					.add_effect(usize::MAX, "org.olivevideoeditor.Olive.opacity", cx)
+					.expect("add opacity");
+				let effect = engine
+					.selected_effect_cards()
+					.last()
+					.expect("the opacity card (closest to the clip)")
+					.id();
+				engine
+					.set_effect_param(
+						EffectId(effect.0),
+						"opacity_in",
+						oak_node::value::NodeValue::Float(0.0),
+						cx,
+					)
+					.expect("set opacity 0");
+			})
+		});
+
+		// The paused picture must catch up without any playback: after the
+		// edit the display caches are invalidated and the debounced
+		// snapshot upload invalidates whatever was rendered through the
+		// stale snapshot, so a bounded number of engine ticks later the
+		// program frame shows the new picture.
+		let mut pumps = 0usize;
+		loop {
+			pumps += 1;
+			cx.update(|app| engine.update(app, |engine, cx| engine.tick(cx)));
+			if frame_bytes(cx) != before {
+				break;
+			}
+			assert!(
+				pumps < 5000,
+				"the paused frame never picked up the effect edit (still the pre-edit pixels after {pumps} ticks)"
+			);
+			std::thread::sleep(Duration::from_millis(10));
+		}
+
+		oak_undo::global::clear().unwrap();
+		let _ = std::fs::remove_file(&media);
 	}
 
 	/// A fresh sequence starts with the default 2 video + 2 audio track
