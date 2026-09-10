@@ -1079,6 +1079,13 @@ pub struct OfxColorPicker {
 	/// Whether the viewer eyedropper is armed (a click on the program
 	/// viewer samples a pixel back into the draft).
 	picking: bool,
+	/// The mouse-up that ends a viewer-pick click must not count as an
+	/// outside-click dismissal: the pick lands (disarming the eyedropper)
+	/// between the button going down on the viewer and coming up, so the
+	/// `picking` guard alone cannot tell the pick's own click apart from
+	/// a later genuine outside click. Set by [`Self::apply_viewer_pick`],
+	/// consumed by the next `on_mouse_up_out`.
+	swallow_next_outside_up: bool,
 }
 
 /// How the primary channel sliders present the colour.
@@ -1113,6 +1120,7 @@ impl OfxColorPicker {
 			a: Self::channel_slider(cx, window, 3, 0.0, 1.0, 0.01, color.a as f64),
 			hex: cx.new(|cx| EditableTextState::new(StringStorage::default(), cx)),
 			picking: false,
+			swallow_next_outside_up: false,
 		};
 		let hex_text = format_hex(color);
 		picker.hex.update(cx, |hex, cx| hex.emplace(&hex_text, cx));
@@ -1330,6 +1338,10 @@ impl OfxColorPicker {
 			self.draft = color;
 			self.picking = false;
 			self.hex_error = false;
+			// The pick's own click is still in flight (the sampled pixel
+			// lands before the button comes back up on the viewer): its
+			// mouse-up must not dismiss the popup as an outside click.
+			self.swallow_next_outside_up = true;
 			self.sync_from_draft(cx);
 			cx.notify();
 		}
@@ -1339,6 +1351,7 @@ impl OfxColorPicker {
 		if !self.open {
 			self.open = true;
 			self.position = position;
+			self.swallow_next_outside_up = false;
 			// Start from the committed colour.
 			self.draft = self.committed;
 			self.hex_error = false;
@@ -1712,8 +1725,12 @@ impl OfxColorPicker {
 							// that follows is a *pick* on the program viewer,
 							// not an outside-click dismissal: the popup must
 							// survive it so the sampled colour lands in the
-							// draft (`apply_viewer_pick` disarms afterwards).
-							if !this.picking {
+							// draft. The pick lands mid-click (before the
+							// button comes up) and disarms the eyedropper, so
+							// its mouse-up is swallowed once explicitly.
+							if this.swallow_next_outside_up {
+								this.swallow_next_outside_up = false;
+							} else if !this.picking {
 								this.close_menu(cx);
 							}
 						}),
@@ -2442,6 +2459,141 @@ mod tests {
 		});
 		assert_eq!(draft, red, "viewer pick should land in the draft");
 		assert!(!picking, "a viewer pick disarms the eyedropper");
+	}
+
+	/// The pick's own click must not close the popup: the sampled colour
+	/// lands (disarming the eyedropper) between the button going down on
+	/// the viewer and coming up, so the trailing mouse-up arrives with
+	/// `picking` already false — without the one-shot swallow it reads as
+	/// an outside click, closes the popup and discards the picked colour
+	/// (the user can never press OK).
+	#[gpui::test]
+	async fn pick_click_mouse_up_does_not_dismiss_popup(cx: &mut TestAppContext) {
+		struct Host {
+			picker: Entity<OfxColorPicker>,
+			events: Arc<Mutex<Vec<OfxColorEvent>>>,
+			_subscription: Subscription,
+		}
+		impl Render for Host {
+			fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+				div().size_full().child(self.picker.clone())
+			}
+		}
+
+		cx.update(|cx| cx.init_colors());
+		let window = cx.open_window(size(px(320.0), px(560.0)), |window, cx| {
+			let picker = cx.new(|cx| {
+				OfxColorPicker::new(
+					1,
+					Rgba {
+						r: 0.4,
+						g: 0.2,
+						b: 0.8,
+						a: 0.5,
+					},
+					window,
+					cx,
+				)
+			});
+			let events = Arc::new(Mutex::new(Vec::new()));
+			let events_sub = events.clone();
+			let _subscription = cx.subscribe(&picker, move |_this, _emitter, event: &OfxColorEvent, _cx| {
+				events_sub.lock().unwrap().push(*event);
+			});
+			Host {
+				picker,
+				events,
+				_subscription,
+			}
+		});
+		cx.run_until_parked();
+
+		let mut visual = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+		visual.update(|window, cx| {
+			window.draw(cx).clear();
+		});
+
+		// Open the popup, re-draw for the deferred layer, arm the eyedropper.
+		let swatch = visual.debug_bounds("ofx-color-swatch").expect("swatch painted");
+		visual.simulate_click(
+			Point::new(
+				swatch.origin.x + swatch.size.width * 0.5,
+				swatch.origin.y + swatch.size.height * 0.5,
+			),
+			Modifiers::default(),
+		);
+		visual.update(|window, cx| {
+			window.draw(cx).clear();
+		});
+		let button = visual
+			.debug_bounds("ofx-color-pick-viewer-1")
+			.expect("pick button painted");
+		visual.simulate_click(
+			Point::new(
+				button.origin.x + button.size.width * 0.5,
+				button.origin.y + button.size.height * 0.5,
+			),
+			Modifiers::default(),
+		);
+		cx.run_until_parked();
+
+		// The pick lands mid-click (the sampled colour arrives while the
+		// button is still down on the viewer), then the button comes up
+		// outside the popup.
+		let red = Rgba {
+			r: 1.0,
+			g: 0.0,
+			b: 0.0,
+			a: 1.0,
+		};
+		let host = window.root(cx).expect("host root");
+		visual.update(|_window, cx| {
+			host.update(cx, |host, cx| {
+				host.picker.update(cx, |picker, cx| picker.apply_viewer_pick(red, cx));
+			});
+		});
+		let popup = visual
+			.debug_bounds("ofx-color-popup")
+			.expect("popup painted");
+		let outside = Point::new(
+			px((f32::from(popup.origin.x) + f32::from(popup.size.width) + 10.0).min(318.0)),
+			px((f32::from(popup.origin.y) + f32::from(popup.size.height) + 10.0).min(399.0)),
+		);
+		visual.simulate_click(outside, Modifiers::default());
+		cx.run_until_parked();
+
+		let (open, draft, cancelled) = cx.read(|cx| {
+			let host = host.read(cx);
+			(
+				host.picker.read(cx).open,
+				host.picker.read(cx).draft,
+				host.events
+					.lock()
+					.unwrap()
+					.iter()
+					.any(|e| matches!(e, OfxColorEvent::Cancelled)),
+			)
+		});
+		assert!(open, "the pick's own mouse-up must not dismiss the popup");
+		assert_eq!(draft, red, "the picked colour survives in the draft");
+		assert!(!cancelled, "no dismissal may be emitted for the pick click");
+
+		// A later genuine outside click still dismisses as usual.
+		visual.simulate_click(outside, Modifiers::default());
+		cx.run_until_parked();
+		let (open, cancelled) = cx.read(|cx| {
+			let host = host.read(cx);
+			(
+				host.picker.read(cx).open,
+				host.events
+					.lock()
+					.unwrap()
+					.iter()
+					.any(|e| matches!(e, OfxColorEvent::Cancelled)),
+			)
+		});
+		assert!(!open, "a later outside click dismisses the popup");
+		assert!(cancelled, "the later dismissal emits Cancelled");
 	}
 
 	/// Known-value checks + round-trips for the RGB↔HSV conversion.
