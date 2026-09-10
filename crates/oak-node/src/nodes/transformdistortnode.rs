@@ -24,9 +24,12 @@
 /// The transform fragment shader: samples the input through the inverse
 /// of the node's pixel-space transform (`transform_in` carries the
 /// CPU-inverted matrix; `resolution_in` is auto-filled by the runner).
-/// The C++ path transforms vertices (`ove_mvpmat` in transform.vert);
-/// an affine transform is equivalently applied fragment-side by
-/// inverse-mapping the sample position — the fixed fullscreen vertex
+/// Pixel space is CENTER-origin (C++ `transform.vert` transforms the
+/// quad in the frame-centered projection): position (0,0) is the frame
+/// center and rotation/scale pivot around the anchor — NOT around the
+/// top-left corner, which is what a top-left-origin pixel space would
+/// pivot on (a corner pivot swings the image off-frame as it rotates,
+/// reading exactly like an unwanted zoom). The fixed fullscreen vertex
 /// stage stays unchanged.
 const TRANSFORM_FRAG: &str = r#"uniform sampler2D tex_in;
 uniform mat4 transform_in;
@@ -36,8 +39,9 @@ in vec2 ove_texcoord;
 out vec4 frag_color;
 
 void main(void) {
-    vec2 px = ove_texcoord * resolution_in;
-    vec2 src = (transform_in * vec4(px, 0.0, 1.0)).xy;
+    vec2 half_res = resolution_in * 0.5;
+    vec2 px = ove_texcoord * resolution_in - half_res;
+    vec2 src = (transform_in * vec4(px, 0.0, 1.0)).xy + half_res;
     frag_color = texture(tex_in, src / resolution_in);
 }
 "#;

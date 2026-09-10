@@ -2935,6 +2935,86 @@ mod tests {
         assert_eq!(pixel_at(&out, 0, 0), [0.0, 0.0, 0.0, 0.0]);
     }
 
+    /// Transform rotation pivots around the FRAME CENTER (the C++
+    /// center-origin pixel space), not the top-left corner: a 90° turn
+    /// moves a pixel sitting 2px right of center to 2px below center,
+    /// with no scaling or smearing (the turn is lossless).
+    #[test]
+    fn gpu_transform_rotates_around_the_frame_center() {
+        if oak_core::backend::GpuContext::shared().is_none() {
+            eprintln!("no adapter; skipping");
+            return;
+        }
+        // 8x8 black frame with one white pixel at (6, 4) — center+(2, 0).
+        let mut frame = generate_frame(Rational::new(0, 1), (8, 8), PixelFormat::F32).unwrap();
+        let at = (4 * 8 + 6) * 16;
+        for (c, v) in [1.0f32, 1.0, 1.0, 1.0].iter().enumerate() {
+            frame.data[at + c * 4..at + c * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        let mut inputs = NodeValueRow::new();
+        inputs.insert("tex_in".into(), texture_value(Texture::wrap_frame(frame)));
+        inputs.insert("rot_in".into(), NodeValue::Float(90.0));
+
+        let out = eval_node_row("org.olivevideoeditor.Olive.transform", inputs, None);
+        assert_eq!(pixel_at(&out, 6, 4), [0.0, 0.0, 0.0, 0.0], "source spot vacated");
+        assert_eq!(
+            pixel_at(&out, 3, 6),
+            [1.0, 1.0, 1.0, 1.0],
+            "90° around (4,4) maps texel center (6.5,4.5) -> (3.5,6.5)"
+        );
+        let lit = out
+            .data
+            .chunks_exact(16)
+            .filter(|px| f32::from_le_bytes(px[12..16].try_into().unwrap()) > 0.01)
+            .count();
+        assert_eq!(lit, 1, "a pure rotation neither scales nor smears: {lit} lit pixels");
+    }
+
+    /// Transform scale pivots around the frame center too: a center 2x2
+    /// block at 2x uniform scale grows into the surrounding 4x4 (a
+    /// corner pivot would drag it toward the bottom-right instead).
+    #[test]
+    fn gpu_transform_scales_around_the_frame_center() {
+        if oak_core::backend::GpuContext::shared().is_none() {
+            eprintln!("no adapter; skipping");
+            return;
+        }
+        // 8x8 black frame with a white 2x2 block at texels (3..4, 3..4).
+        let mut frame = generate_frame(Rational::new(0, 1), (8, 8), PixelFormat::F32).unwrap();
+        for (x, y) in [(3usize, 3usize), (4, 3), (3, 4), (4, 4)] {
+            let at = (y * 8 + x) * 16;
+            for (c, v) in [1.0f32, 1.0, 1.0, 1.0].iter().enumerate() {
+                frame.data[at + c * 4..at + c * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        let mut inputs = NodeValueRow::new();
+        inputs.insert("tex_in".into(), texture_value(Texture::wrap_frame(frame)));
+        inputs.insert("scale_in".into(), NodeValue::Vec2([2.0, 2.0]));
+
+        let out = eval_node_row("org.olivevideoeditor.Olive.transform", inputs, None);
+        // Pivot check via the alpha distribution: the block [3,5] scaled
+        // 2x around (4,4) grows symmetrically to [2,6] — the centroid
+        // stays at the frame center. A corner pivot would drag the block
+        // to [6,10], shifting the centroid off-center and clipping the
+        // block against the frame edge.
+        let mut total = 0.0f32;
+        let mut cx = 0.0f32;
+        let mut cy = 0.0f32;
+        for y in 0..8usize {
+            for x in 0..8usize {
+                let a = pixel_at(&out, x, y)[3];
+                total += a;
+                cx += (x as f32 + 0.5) * a;
+                cy += (y as f32 + 0.5) * a;
+            }
+        }
+        let (cx, cy) = (cx / total, cy / total);
+        assert!(
+            (cx - 4.0).abs() < 0.2 && (cy - 4.0).abs() < 0.2,
+            "the block grows around the frame center, centroid ({cx}, {cy})"
+        );
+    }
+
     /// Shape generator over the real GPU path: a centered 8x8 rectangle
     /// on a 16x16 frame fills exactly the middle block (pixel centers
     /// with texcoord in [0.25, 0.75)), everything outside stays
