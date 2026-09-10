@@ -953,6 +953,15 @@ impl ResourceSet {
 				};
 				let src = external.target_url();
 				if self.asset_ids.contains_key(src) {
+					// Already registered from another track: union the
+					// stream flags so a file used on both a video and an
+					// audio track declares hasVideo AND hasAudio (the
+					// first registration's track kind must not hide the
+					// other stream from the importer).
+					if let Some(existing) = self.assets.iter_mut().find(|a| a.src == src) {
+						existing.has_video |= is_video;
+						existing.has_audio |= is_audio;
+					}
 					continue;
 				}
 				let (asset_format_id, asset_duration) = match external.available_range() {

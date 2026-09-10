@@ -472,6 +472,19 @@ pub fn footage_video_params(
 	f.video_params(index).map(common_from_node_video)
 }
 
+/// The footage's first audio stream's sample rate (`oaknode_footage_get_
+/// audio_params`), `None` when unprobed or the file has no audio stream.
+pub fn footage_audio_sample_rate(project: &ProjectRef, footage: NodeId) -> Option<i32> {
+	let guard = lock_project(project);
+	let f = guard
+		.graph
+		.get(footage)?
+		.behavior
+		.as_any()?
+		.downcast_ref::<FootageBehavior>()?;
+	f.audio_params(0).map(|a| a.sample_rate)
+}
+
 /// Overwrite (or create) the footage's `index`th video stream parameters
 /// (`oaknode_footage_set_video_params`).
 pub fn footage_set_video_params(

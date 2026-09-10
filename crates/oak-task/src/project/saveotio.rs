@@ -188,30 +188,42 @@ impl SaveOTIOTask {
 
 					let media = nodeops::node_find_input_footage(project, block);
 					if let Some(media) = media {
+						// The available range covers the WHOLE media: start
+						// 0, duration = the media length in the reference's
+						// own time base (the video rate for video clips, the
+						// sample rate for audio clips — OTIO's External-
+						// Reference convention). A zero duration declares
+						// the media unusable and DaVinci Resolve rejects
+						// every clip whose source range falls outside it.
+						let duration_seconds = nodeops::node_length(project, media).to_f64();
 						let available_range = if track_type == TrackType::Video {
-							// OTIO ExternalReference uses the source clips
-							// frame rate (or sample rate) as opposed to the
-							// sequences rate.
-							let (source_frame_rate, duration) =
-								nodeops::footage_video_params(project, media, 0)
-									.map(|vp| {
-										let (num, den) = vp.frame_rate();
-										let rate = if den != 0 {
-											num as f64 / den as f64
-										} else {
-											0.0
-										};
-										(rate, vp.duration() as f64)
-									})
-									.unwrap_or((0.0, 0.0));
+							let source_frame_rate = nodeops::footage_video_params(project, media, 0)
+								.map(|vp| {
+									let (num, den) = vp.frame_rate();
+									if den != 0 {
+										num as f64 / den as f64
+									} else {
+										0.0
+									}
+								})
+								.filter(|rate| *rate > 0.0)
+								.unwrap_or(sequence_rate);
 							TimeRange::new(
 								RationalTime::new(0.0, source_frame_rate),
-								RationalTime::new(duration, source_frame_rate),
+								RationalTime::new(
+									(duration_seconds * source_frame_rate).round(),
+									source_frame_rate,
+								),
 							)
 						} else {
+							let sample_rate = nodeops::footage_audio_sample_rate(project, media)
+								.unwrap_or(48000) as f64;
 							TimeRange::new(
-								RationalTime::new(0.0, 48000.0),
-								RationalTime::new(0.0, 48000.0),
+								RationalTime::new(0.0, sample_rate),
+								RationalTime::new(
+									(duration_seconds * sample_rate).round(),
+									sample_rate,
+								),
 							)
 						};
 
@@ -226,9 +238,12 @@ impl SaveOTIOTask {
 					Some(Composable::Clip(otio_clip))
 				}
 				nodeops::BlockKind::Gap => Some(Composable::Gap(Gap::new(
+					// Gaps live in timeline time: the SEQUENCE rate, for both
+					// fields — a TimeRange mixing bases (a 24 fps start with
+					// a 1.0 duration) is unreadable to strict importers.
 					TimeRange::new(
-						RationalTime::from_rational(block_in_of(project, block), 24.0),
-						RationalTime::from_rational(block_length_of(project, block), 24.0),
+						RationalTime::from_rational(block_in_of(project, block), sequence_rate),
+						RationalTime::from_rational(block_length_of(project, block), sequence_rate),
 					),
 					nodeops::node_label(project, block),
 				))),
@@ -256,14 +271,18 @@ impl SaveOTIOTask {
 		}
 
 		// All OTIO tracks must have the same duration so we add a Gap to
-		// fill the remaining time.
+		// fill the remaining time. Like the gap blocks above, the range
+		// stays in the sequence's time base (duration in whole frames).
 		let duration = track_duration(&otio_track);
 		let duration_seconds = duration.clone().to_seconds();
 		if duration_seconds < max_track_length.to_f64() {
 			let time_left = max_track_length.to_f64() - duration_seconds;
 
 			let gap = Gap::new(
-				TimeRange::new(duration, RationalTime::new(time_left, 1.0)),
+				TimeRange::new(
+					RationalTime::new(0.0, sequence_rate),
+					RationalTime::new((time_left * sequence_rate).round(), sequence_rate),
+				),
 				"",
 			);
 			otio_track.append_child(Composable::Gap(gap));
@@ -351,6 +370,25 @@ impl TaskBehavior for SaveOTIOTask {
 					return Err(Error::Failed("Failed to serialize sequence".to_string()));
 				}
 			}
+		}
+
+		// Drop timelines with no clips at all (an empty sequence the user
+		// never touched): DaVinci Resolve's OTIO import expects a single
+		// Timeline root and chokes on a SerializableCollection — skipping
+		// the empty ones lets a lone edited sequence export as a bare
+		// Timeline. FCPXML benefits the same way (no empty <project>s).
+		serialized.retain(|timeline| {
+			timeline.tracks().children().iter().any(|child| {
+				child
+					.as_track()
+					.is_some_and(|track| track.children().iter().any(|b| b.as_clip().is_some()))
+			})
+		});
+		if serialized.is_empty() {
+			task.set_error("Project contains no edited sequences to export.");
+			return Err(Error::Failed(
+				"Project contains no edited sequences to export.".to_string(),
+			));
 		}
 
 		// Write the serialized timelines, dispatching on the format: OTIO
