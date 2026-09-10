@@ -118,6 +118,7 @@ fn main() {
 				cache_timebase: None,
 				footage: None,
 				montage: Vec::new(),
+				adjustments: Vec::new(),
 			}),
 			audio: None,
 			// Never invoked on the process backend (workers render from the

@@ -141,6 +141,27 @@ pub fn tr(key: &'static str) -> &'static str {
 	key
 }
 
+/// Translates a key built at runtime — the built-in effect and parameter
+/// names, whose keys are `node.<type-id suffix>.name` and
+/// `node.<type-id suffix>.input.<input id>` (see
+/// [`oakui::effectchain::addable_effects`](crate::oakui::effectchain::addable_effects)).
+///
+/// Same lookup as [`tr`] — the active language, then `en-US` — with the
+/// node layer's own English name as the last resort: `tr` takes
+/// `&'static str` keys and returns the key itself on a miss, which for a
+/// formatted key would put a raw `node.…` identifier in the UI.
+pub fn tr_or(key: &str, fallback: &str) -> String {
+	let tables = tables().read().unwrap_or_else(|e| e.into_inner());
+	let current = language_code();
+	if let Some(value) = tables.get(&current).and_then(|t| t.get(key)) {
+		return value.to_string();
+	}
+	if let Some(value) = tables.get(FALLBACK_CODE).and_then(|t| t.get(key)) {
+		return value.to_string();
+	}
+	fallback.to_string()
+}
+
 /// The keys the gpui widget crates localize through
 /// `gpui_widgets::i18n` (viewer transport labels, effect-stack empty state).
 pub const WIDGET_KEYS: &[&str] = &[
@@ -356,6 +377,41 @@ mod tests {
 				panic!("key {key} has identical en-US and zh-CN values ({en_value:?})");
 			}
 		}
+	}
+
+	/// Every built-in node type the factory registers carries a
+	/// `node.<type-id suffix>.name` entry in the reference pack *and* in
+	/// the translation: the effect library and the inspector build that key
+	/// at runtime, so a node without an entry would show its English name
+	/// in every language — and one whose zh value repeats the English name
+	/// was never translated at all. The matching parameter keys are held by
+	/// `effectchain`'s own test against the live parameter list.
+	#[test]
+	fn every_builtin_node_name_is_translated() {
+		let tables = tables().read().unwrap_or_else(|e| e.into_inner());
+		let en = tables.get("en-US").expect("en-US pack");
+		let zh = tables.get("zh-CN").expect("zh-CN pack");
+		let mut nodes = 0usize;
+		for meta in oak_node::factory::Factory::global().entries() {
+			let suffix = meta.type_id.rsplit('.').next().unwrap_or(meta.type_id);
+			let key = format!("node.{suffix}.name");
+			let en_value = en
+				.get(&key)
+				.unwrap_or_else(|| panic!("{key} missing from the en-US pack"));
+			assert_eq!(
+				*en_value, meta.name,
+				"{key} does not carry the node's English name"
+			);
+			let zh_value = zh
+				.get(&key)
+				.unwrap_or_else(|| panic!("{key} missing from the zh-CN pack"));
+			assert_ne!(zh_value, en_value, "{key} is not translated ({en_value:?})");
+			nodes += 1;
+		}
+		assert!(
+			nodes >= 60,
+			"the factory registers the built-in node types ({nodes})"
+		);
 	}
 
 	/// `tr` falls back from the active language to English and then to

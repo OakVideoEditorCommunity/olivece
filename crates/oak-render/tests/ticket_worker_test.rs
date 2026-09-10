@@ -67,6 +67,7 @@ fn params(time: Rational) -> VideoTicketParams {
 		cache_timebase: None,
 		footage: None,
 		montage: Vec::new(),
+		adjustments: Vec::new(),
 	}
 }
 

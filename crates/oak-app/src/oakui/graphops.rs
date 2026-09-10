@@ -33,10 +33,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use oak_core::{Rational, TimeRange};
-use oak_node::block::ClipBlockBehavior;
+use oak_node::block::{AdjustmentBlockBehavior, BlockCore, ClipBlockBehavior};
 use oak_node::folder::FolderBehavior;
 use oak_node::footage::FootageBehavior;
-use oak_node::graph::Graph;
+use oak_node::graph::{Graph, NodeEntry};
 use oak_node::id::NodeId;
 use oak_node::project::Project;
 use oak_node::sequence::SequenceBehavior;
@@ -296,6 +296,96 @@ pub fn create_folder(project: &ProjectRef, name: &str) -> Result<NodeId, String>
 	Ok(id)
 }
 
+/// The stable type id of the text generator node (the redesigned `textv3`,
+/// "org.olivevideoeditor.Olive.text3"): the bin entry the project panel's
+/// "添加文本素材" action creates, and the type the timeline drop routes to
+/// the generator-clip path instead of the footage path.
+pub const TEXT_FOOTAGE_TYPE_ID: &str = "org.olivevideoeditor.Olive.text3";
+
+/// The bin label a created text generator starts with (the plan's "文本"
+/// entry name). Fixed, not localized at creation time: it is the node's
+/// label, which the user renames like any other bin entry.
+pub const TEXT_FOOTAGE_LABEL: &str = "文本";
+
+/// Create a text generator in the project's root folder (the project
+/// panel's "添加文本素材" action). ONE undo row covers the node AND its
+/// mount: the undo detaches the node from the root folder and removes it
+/// from the graph (its entry stays inside the command), so no orphan node
+/// outlives the undo — unlike [`create_folder`], which leaves its node in
+/// the graph and only undoes the mount. The redo re-inserts the entry,
+/// which keeps its stable id while its slot is free (the
+/// [`Graph::add_entry`] contract).
+pub fn create_text_footage_node(project: &ProjectRef) -> Result<NodeId, String> {
+	let root = {
+		let guard = lock(project);
+		if !guard.root.valid() {
+			return Err("the project has no root folder".to_string());
+		}
+		guard.root
+	};
+	let Some((mut core, behavior)) =
+		oak_node::factory::Factory::global().create_any(TEXT_FOOTAGE_TYPE_ID)
+	else {
+		return Err(format!(
+			"the text node \"{TEXT_FOOTAGE_TYPE_ID}\" is not registered"
+		));
+	};
+	core.label = TEXT_FOOTAGE_LABEL.to_string();
+	// The eager insert gives the caller an id for the bin entry before the
+	// command is built; the undo parks the entry here between runs.
+	let id = {
+		let mut guard = lock(project);
+		guard.graph.add_node(core, behavior)
+	};
+	let detached: Arc<Mutex<Option<NodeEntry>>> = Arc::new(Mutex::new(None));
+	let (redo_detached, undo_detached) = (detached.clone(), detached.clone());
+	let (redo_project, undo_project) = (project.clone(), project.clone());
+	let redo = move || {
+		let mut guard = lock(&redo_project);
+		if !guard.graph.is_valid(id) {
+			let entry = redo_detached
+				.lock()
+				.unwrap_or_else(|e| e.into_inner())
+				.take();
+			if let Some(entry) = entry {
+				guard.graph.add_entry(entry, id);
+			}
+		}
+		if let Some(entry) = guard.graph.get_mut(id) {
+			entry.core.bin_folder = Some(root);
+		}
+		if let Some(entry) = guard.graph.get_mut(root) {
+			if let Some(folder) = entry
+				.behavior
+				.as_any_mut()
+				.and_then(|a| a.downcast_mut::<FolderBehavior>())
+			{
+				folder.add_child(id);
+			}
+		}
+	};
+	let undo = move || {
+		let mut guard = lock(&undo_project);
+		if let Some(entry) = guard.graph.get_mut(root) {
+			if let Some(folder) = entry
+				.behavior
+				.as_any_mut()
+				.and_then(|a| a.downcast_mut::<FolderBehavior>())
+			{
+				folder.remove_child(id);
+			}
+		}
+		if let Some(entry) = guard.graph.get_mut(id) {
+			entry.core.bin_folder = None;
+		}
+		let taken = guard.graph.take_node(id);
+		*undo_detached.lock().unwrap_or_else(|e| e.into_inner()) = taken;
+	};
+	let cmd = oak_undo::undocommand::UndoCommand::from_closures(redo, undo);
+	push_command(cmd, "Add Text Footage")?;
+	Ok(id)
+}
+
 /// Every folder node in the graph, in arena order.
 pub fn folder_ids(p: &Project) -> Vec<NodeId> {
 	p.graph
@@ -455,7 +545,7 @@ pub fn sequence_length(g: &Graph, seq: NodeId) -> Rational {
 }
 
 /// Borrow a block's core (any block kind).
-fn block_core(entry: &oak_node::graph::NodeEntry) -> Option<&oak_node::block::BlockCore> {
+fn block_core(entry: &oak_node::graph::NodeEntry) -> Option<&BlockCore> {
 	let any = entry.behavior.as_any()?;
 	if let Some(c) = any.downcast_ref::<ClipBlockBehavior>() {
 		return Some(&c.core);
@@ -463,8 +553,77 @@ fn block_core(entry: &oak_node::graph::NodeEntry) -> Option<&oak_node::block::Bl
 	if let Some(g) = any.downcast_ref::<oak_node::block::GapBlockBehavior>() {
 		return Some(&g.core);
 	}
-	any.downcast_ref::<oak_node::block::TransitionBlockBehavior>()
-		.map(|t| &t.core)
+	if let Some(t) = any.downcast_ref::<oak_node::block::TransitionBlockBehavior>() {
+		return Some(&t.core);
+	}
+	any.downcast_ref::<AdjustmentBlockBehavior>()
+		.map(|a| &a.core)
+}
+
+/// Borrow a block's core mutably (any block kind).
+fn block_core_mut(entry: &mut oak_node::graph::NodeEntry) -> Option<&mut BlockCore> {
+	let any = entry.behavior.as_any_mut()?;
+	if any.is::<ClipBlockBehavior>() {
+		Some(
+			&mut any
+				.downcast_mut::<ClipBlockBehavior>()
+				.expect("checked above")
+				.core,
+		)
+	} else if any.is::<oak_node::block::GapBlockBehavior>() {
+		Some(
+			&mut any
+				.downcast_mut::<oak_node::block::GapBlockBehavior>()
+				.expect("checked above")
+				.core,
+		)
+	} else if any.is::<oak_node::block::TransitionBlockBehavior>() {
+		Some(
+			&mut any
+				.downcast_mut::<oak_node::block::TransitionBlockBehavior>()
+				.expect("checked above")
+				.core,
+		)
+	} else if any.is::<AdjustmentBlockBehavior>() {
+		Some(
+			&mut any
+				.downcast_mut::<AdjustmentBlockBehavior>()
+				.expect("checked above")
+				.core,
+		)
+	} else {
+		None
+	}
+}
+
+/// Borrow the block core at `node` (any block kind).
+pub fn block_core_of(g: &Graph, node: NodeId) -> Option<&BlockCore> {
+	block_core(g.get(node)?)
+}
+
+/// Mutate the block core at `node` (any block kind). Returns `false` and
+/// leaves the graph untouched when `node` is not a block.
+fn with_block_core_mut(g: &mut Graph, node: NodeId, f: impl FnOnce(&mut BlockCore)) -> bool {
+	let Some(entry) = g.get_mut(node) else {
+		return false;
+	};
+	let Some(core) = block_core_mut(entry) else {
+		return false;
+	};
+	f(core);
+	true
+}
+
+/// Whether `node` is a clip-class block: a clip or an adjustment layer.
+/// Gaps and transitions are blocks too, but not clips.
+fn is_timeline_clip(g: &Graph, node: NodeId) -> bool {
+	let Some(entry) = g.get(node) else {
+		return false;
+	};
+	let Some(any) = entry.behavior.as_any() else {
+		return false;
+	};
+	any.is::<ClipBlockBehavior>() || any.is::<AdjustmentBlockBehavior>()
 }
 
 /// The sequence playhead (rational seconds).
@@ -592,28 +751,29 @@ pub fn track_ids(g: &Graph, seq: NodeId, kind: TrackType) -> Vec<NodeId> {
 		.unwrap_or_default()
 }
 
-/// The clip blocks of a track (gaps skipped), in timeline order.
+/// The clip blocks of a track, in timeline order. Gaps and transitions are
+/// not clips and are skipped; adjustment layers are.
 pub fn clip_ids(g: &Graph, track: NodeId) -> Vec<NodeId> {
 	track_behavior(g, track)
 		.map(|t| {
 			t.blocks
 				.iter()
 				.copied()
-				.filter(|&b| clip_behavior(g, b).is_some())
+				.filter(|&b| is_timeline_clip(g, b))
 				.collect()
 		})
 		.unwrap_or_default()
 }
 
-/// A clip's timeline range and media in-point (rational seconds).
+/// A block's timeline range and media in-point (rational seconds).
 pub fn clip_range(g: &Graph, clip: NodeId) -> Option<(Rational, Rational, Rational)> {
-	let c = clip_behavior(g, clip)?;
-	Some((c.core.in_(), c.core.out(), c.core.media_in))
+	let c = block_core_of(g, clip)?;
+	Some((c.in_(), c.out(), c.media_in))
 }
 
-/// The clip's owning track.
+/// The block's owning track.
 pub fn clip_track(g: &Graph, clip: NodeId) -> Option<NodeId> {
-	clip_behavior(g, clip)?.core.track
+	block_core_of(g, clip)?.track
 }
 
 /// The first footage node feeding `id` (upstream BFS over input edges),
@@ -1505,6 +1665,401 @@ pub fn place_footage_clip(
 	Ok(clip)
 }
 
+/// Add an adjustment layer to `track` spanning `[in_ts, out_ts)` (frame
+/// timestamps in the sequence's timebase): an [`AdjustmentBlockBehavior`]
+/// block with no footage, so it renders its effect chain over the clips
+/// underneath it. Only video tracks take adjustment layers.
+///
+/// Undoable "Add Adjustment Layer" (the block is created in the project
+/// and placed by the module's `TrackPlaceBlockCommand`); on undo the
+/// block is detached from the track but left as an orphan node in the
+/// project graph (the module command's documented behavior, same as
+/// [`place_footage_clip`]).
+pub fn create_adjustment_layer(
+	p: &ProjectRef,
+	seq: NodeId,
+	track: NodeId,
+	in_ts: i64,
+	out_ts: i64,
+) -> Result<NodeId, String> {
+	if in_ts < 0 || out_ts <= in_ts {
+		return Err("invalid adjustment layer range (need 0 <= in < out)".to_string());
+	}
+	let (list, track_index, in_r, out_r) = {
+		let g = lock(p);
+		let behavior = track_behavior(&g.graph, track)
+			.ok_or_else(|| "the track is not in the project".to_string())?;
+		if behavior.kind != TrackType::Video {
+			return Err("adjustment layers are only supported on video tracks".to_string());
+		}
+		let tb = sequence_time_base(&g.graph, seq)
+			.ok_or_else(|| "sequence has no valid frame rate".to_string())?;
+		let list = behavior
+			.track_list
+			.ok_or_else(|| "the track is not in a track list".to_string())?;
+		let index = track_list_behavior(&g.graph, list)
+			.and_then(|l| l.tracks.iter().position(|&t| t == track))
+			.ok_or_else(|| "the track is not in its list".to_string())?;
+		(list, index, ts_to_rational(in_ts, tb), ts_to_rational(out_ts, tb))
+	};
+
+	// The block itself: no label, no color override, no media wiring —
+	// just its timeline span. Its placement below is the undoable part.
+	let block = {
+		let mut g = lock(p);
+		let (core, behavior) = oak_node::block::adjustment_create();
+		let block = g.graph.add_node(core, behavior);
+		with_block_core_mut(&mut g.graph, block, |core| {
+			core.range = TimeRange::new(in_r, out_r);
+		});
+		block
+	};
+
+	push(
+		oak_timeline::undopointer::TrackPlaceBlockCommand::new(
+			node_ref(p, list),
+			track_index as i32,
+			node_ref(p, block),
+			in_r,
+		)
+		.to_command(),
+		"Add Adjustment Layer",
+	)?;
+	Ok(block)
+}
+
+/// The transition block joining `prev` to `next` on `track`, when one is
+/// already wired between them.
+fn transition_between(g: &Graph, track: NodeId, prev: NodeId, next: NodeId) -> Option<NodeId> {
+	track_behavior(g, track)
+		.map(|t| t.blocks.clone())
+		.unwrap_or_default()
+		.into_iter()
+		.find(|&b| {
+			g.get(b)
+				.and_then(|e| e.behavior.as_any())
+				.map(|a| a.is::<oak_node::block::TransitionBlockBehavior>())
+				.unwrap_or(false)
+				&& g.connected_output(b, oak_node::block::transition_input::OUT_BLOCK, -1)
+					== Some(prev)
+				&& g.connected_output(b, oak_node::block::transition_input::IN_BLOCK, -1)
+					== Some(next)
+		})
+}
+
+/// Build (without pushing) the commands that create a transition block at
+/// the seam between `prev` and `next` and wire both sides into it.
+///
+/// The block covers `[out(prev) - half, out(prev) + half]`: `in_offset`
+/// reaches into `prev` and `out_offset` into `next` (the module's
+/// transition geometry), both `half` for a symmetric default transition.
+/// `prev` and `next` must be clip blocks listed back to back on one track
+/// and must touch exactly. Everything is validated before the block node
+/// is created, so a rejected seam leaves the graph untouched.
+///
+/// The block enters the track through the module's non-destructive
+/// `TrackInsertBlockAfterCommand`; `TrackPlaceBlockCommand` is unusable
+/// here because its redo ripple-removes the span the new block covers,
+/// which would trim away both clips the transition straddles.
+fn transition_commands(
+	p: &ProjectRef,
+	prev: NodeId,
+	next: NodeId,
+	half: Rational,
+) -> Result<(NodeId, Vec<oak_undo::undocommand::UndoCommand>), String> {
+	if half <= Rational::new(0, 1) {
+		return Err("transition: the length must be positive".to_string());
+	}
+	let (seam, owner) = {
+		let g = lock(p);
+		if clip_behavior(&g.graph, prev).is_none() {
+			return Err("transition: the outgoing block is not a clip".to_string());
+		}
+		if clip_behavior(&g.graph, next).is_none() {
+			return Err("transition: the incoming block is not a clip".to_string());
+		}
+		let Some(prev_core) = block_core_of(&g.graph, prev) else {
+			return Err("transition: the outgoing clip has no block core".to_string());
+		};
+		let Some(next_core) = block_core_of(&g.graph, next) else {
+			return Err("transition: the incoming clip has no block core".to_string());
+		};
+		if next_core.in_() != prev_core.out() {
+			return Err("transition: the clips are not contiguous at the seam".to_string());
+		}
+		let Some(track) = prev_core.track else {
+			return Err("transition: the outgoing clip is not on a track".to_string());
+		};
+		if next_core.track != Some(track) {
+			return Err("transition: the clips are not on the same track".to_string());
+		}
+		let Some(blocks) = track_behavior(&g.graph, track).map(|t| t.blocks.clone()) else {
+			return Err("transition: the track is not in the project".to_string());
+		};
+		let adjacent = blocks
+			.iter()
+			.position(|&b| b == prev)
+			.and_then(|i| blocks.get(i + 1).copied())
+			== Some(next);
+		if !adjacent {
+			return Err("transition: the clips are not adjacent on the track".to_string());
+		}
+		if transition_between(&g.graph, track, prev, next).is_some() {
+			return Err("transition: the seam already carries a transition".to_string());
+		}
+		(prev_core.out(), track)
+	};
+
+	let block = {
+		let mut g = lock(p);
+		let (core, behavior) = oak_node::block::transition_create();
+		let id = g.graph.add_node(core, behavior);
+		let Some(t) = g
+			.graph
+			.get_mut(id)
+			.and_then(|e| e.behavior.as_any_mut())
+			.and_then(|a| a.downcast_mut::<oak_node::block::TransitionBlockBehavior>())
+		else {
+			return Err("transition: could not create the block".to_string());
+		};
+		t.core.range = TimeRange::new(seam - half, seam + half);
+		t.in_offset = half;
+		t.out_offset = half;
+		id
+	};
+	let insert = oak_timeline::undotrack::TrackInsertBlockAfterCommand::new(
+		node_ref(p, owner),
+		node_ref(p, block),
+		Some(node_ref(p, prev)),
+	)
+	.to_command();
+	let from = connect_command(p, prev, block, oak_node::block::transition_input::OUT_BLOCK)?;
+	let to = connect_command(p, next, block, oak_node::block::transition_input::IN_BLOCK)?;
+	Ok((block, vec![insert, from, to]))
+}
+
+/// Create a transition at the seam between two contiguous clips and push
+/// it as one "Add Transition" undo row (the timeline's wedge drag path).
+pub fn add_transition_at_seam(
+	p: &ProjectRef,
+	prev: NodeId,
+	next: NodeId,
+	half: Rational,
+) -> Result<NodeId, String> {
+	let (block, commands) = transition_commands(p, prev, next, half)?;
+	push_multi(commands, "Add Transition")?;
+	Ok(block)
+}
+
+/// Add a default transition at every contiguous seam around the selected
+/// clips (the Ctrl+Shift+D action / the timeline clip-menu item).
+///
+/// `half` is half of the default transition length: the transition spans
+/// `half` on either side of its seam. Every selected clip contributes the
+/// seam before it and the seam after it; a neighbor only counts when it is
+/// a clip block (not a gap, a transition or an adjustment layer) that
+/// touches the clip exactly, and a seam shared by two selected clips is
+/// built once. Seams that cannot take a transition (an existing
+/// transition, a non-contiguous neighbor) are skipped. The whole batch is
+/// one "Add Transition" undo row; a batch that builds nothing is an error,
+/// so the action never leaves an empty row. Returns the number of
+/// transitions created.
+///
+/// `seq` scopes the action: a selected block whose track list belongs to
+/// another sequence is ignored.
+pub fn add_default_transition(
+	p: &ProjectRef,
+	seq: NodeId,
+	clip_blocks: &[NodeId],
+	half: Rational,
+) -> Result<usize, String> {
+	let lists = {
+		let g = lock(p);
+		let Some(s) = sequence_behavior(&g.graph, seq) else {
+			return Err("transition: the sequence is not in the project".to_string());
+		};
+		s.track_lists.clone()
+	};
+
+	let mut seams: Vec<(NodeId, NodeId)> = Vec::new();
+	for &clip in clip_blocks {
+		let candidates: Vec<(NodeId, NodeId)> = {
+			let g = lock(p);
+			if clip_behavior(&g.graph, clip).is_none() {
+				continue;
+			}
+			let Some(track) = clip_track(&g.graph, clip) else {
+				continue;
+			};
+			let Some(list) = track_behavior(&g.graph, track).and_then(|t| t.track_list) else {
+				continue;
+			};
+			if !lists.contains(&list) {
+				continue;
+			}
+			let Some(blocks) = track_behavior(&g.graph, track).map(|t| t.blocks.clone()) else {
+				continue;
+			};
+			let Some(index) = blocks.iter().position(|&b| b == clip) else {
+				continue;
+			};
+			let range = block_core_of(&g.graph, clip).map(|c| (c.in_(), c.out()));
+			let mut sides = Vec::new();
+			if let Some(&prev) = index.checked_sub(1).and_then(|i| blocks.get(i)) {
+				if clip_behavior(&g.graph, prev).is_some()
+					&& block_core_of(&g.graph, prev).map(|c| c.out()) == range.map(|r| r.0)
+				{
+					sides.push((prev, clip));
+				}
+			}
+			if let Some(&next) = blocks.get(index + 1) {
+				if clip_behavior(&g.graph, next).is_some()
+					&& block_core_of(&g.graph, next).map(|c| c.in_()) == range.map(|r| r.1)
+				{
+					sides.push((clip, next));
+				}
+			}
+			sides
+		};
+		for seam in candidates {
+			if !seams.contains(&seam) {
+				seams.push(seam);
+			}
+		}
+	}
+	if seams.is_empty() {
+		return Err("transition: no selected clip borders another clip".to_string());
+	}
+
+	let mut commands = Vec::new();
+	let mut created = 0usize;
+	for (prev, next) in seams {
+		if let Ok((_, children)) = transition_commands(p, prev, next, half) {
+			commands.extend(children);
+			created += 1;
+		}
+	}
+	if created == 0 {
+		return Err("transition: no contiguous seam accepts a transition".to_string());
+	}
+	push_multi(commands, "Add Transition")?;
+	Ok(created)
+}
+
+/// The transition block drawn on one edge of `clip`, when its neighbour on
+/// that side is a transition wired into the clip.
+///
+/// The timeline widget addresses a wedge through the clip it is drawn on:
+/// the start wedge belongs to the transition *before* the clip (the clip
+/// feeds its `in_block_in`) and the end wedge to the one *after* it
+/// (`out_block_in`).
+pub fn transition_of_clip(g: &Graph, clip: NodeId, start_edge: bool) -> Option<NodeId> {
+	let track = clip_track(g, clip)?;
+	let blocks = track_behavior(g, track)?.blocks.clone();
+	let index = blocks.iter().position(|&b| b == clip)?;
+	let candidate = if start_edge {
+		blocks.get(index.checked_sub(1)?).copied()?
+	} else {
+		blocks.get(index + 1).copied()?
+	};
+	let input = if start_edge {
+		oak_node::block::transition_input::IN_BLOCK
+	} else {
+		oak_node::block::transition_input::OUT_BLOCK
+	};
+	if g.connected_output(candidate, input, -1) == Some(clip) {
+		Some(candidate)
+	} else {
+		None
+	}
+}
+
+/// Resize one wedge of the transition attached to `clip` (the timeline
+/// widget's wedge drag, its `TransitionChanged` event).
+///
+/// `start_edge` names the wedge by the clip it is drawn on: the start wedge
+/// is the incoming transition's `out_offset`, the end wedge the outgoing
+/// one's `in_offset`. The width is clamped to `frame..=clip length` — one
+/// frame at the smallest, and never wider than the clip it eats into — and
+/// written through [`oak_timeline::undogeneral::TransitionSetOffsetsCommand`],
+/// so one "Transition Length" undo row covers the drag. The seam does not
+/// move. Returns the width actually written.
+pub fn set_transition_length(
+	p: &ProjectRef,
+	clip: NodeId,
+	start_edge: bool,
+	frame: Rational,
+	new_length: Rational,
+) -> Result<Rational, String> {
+	let (transition, clip_length) = {
+		let g = lock(p);
+		let Some(transition) = transition_of_clip(&g.graph, clip, start_edge) else {
+			return Err("transition: the clip has no transition on that edge".to_string());
+		};
+		let Some(core) = block_core_of(&g.graph, clip) else {
+			return Err("transition: the clip has no block core".to_string());
+		};
+		(transition, core.length())
+	};
+	let clamped = new_length.max(frame).min(clip_length);
+	push_command(
+		oak_timeline::undogeneral::TransitionSetOffsetsCommand::new(
+			node_ref(p, transition),
+			if start_edge { None } else { Some(clamped) },
+			if start_edge { Some(clamped) } else { None },
+		)
+		.to_command(),
+		"Transition Length",
+	)?;
+	Ok(clamped)
+}
+
+/// The transition wedges of every clip on `track`, keyed by clip:
+/// `(start, end)` are the widths of the transition before the clip (drawn
+/// on its head) and after it (drawn on its tail); `None` when that side has
+/// no transition. Gaps and transitions themselves are not keyed.
+pub fn clip_transition_widths(
+	g: &Graph,
+	track: NodeId,
+) -> std::collections::HashMap<NodeId, (Option<Rational>, Option<Rational>)> {
+	let mut widths: std::collections::HashMap<NodeId, (Option<Rational>, Option<Rational>)> =
+		std::collections::HashMap::new();
+	let Some(blocks) = track_behavior(g, track).map(|t| t.blocks.clone()) else {
+		return widths;
+	};
+	for &block in &blocks {
+		if is_timeline_clip(g, block) {
+			widths.insert(block, (None, None));
+		}
+	}
+	for &block in &blocks {
+		let Some(transition) = g
+			.get(block)
+			.and_then(|e| e.behavior.as_any())
+			.and_then(|a| a.downcast_ref::<oak_node::block::TransitionBlockBehavior>())
+		else {
+			continue;
+		};
+		// A transition overlaps its neighbours: it reaches `in_offset` into
+		// the block before it and `out_offset` into the block after it.
+		if let Some(prev) =
+			g.connected_output(block, oak_node::block::transition_input::OUT_BLOCK, -1)
+		{
+			if let Some(pair) = widths.get_mut(&prev) {
+				pair.1 = Some(transition.in_offset);
+			}
+		}
+		if let Some(next) =
+			g.connected_output(block, oak_node::block::transition_input::IN_BLOCK, -1)
+		{
+			if let Some(pair) = widths.get_mut(&next) {
+				pair.0 = Some(transition.out_offset);
+			}
+		}
+	}
+	widths
+}
+
 /// Places ONE video clip fed by a sequence node — a nested-sequence clip
 /// (drag a sequence entry from the project explorer onto the timeline).
 /// The clip reads the sequence's output during playback; the sequence's
@@ -1581,6 +2136,85 @@ pub fn place_nested_sequence_clip(
 		clip,
 		oak_node::block::clip_input::TEXTURE_INPUT,
 	)?;
+	push_multi(vec![place, edge], "Add Clip")?;
+	Ok(clip)
+}
+
+/// Places ONE video clip fed by the text generator `text` (drag a text
+/// entry from the project explorer onto the timeline) — a generator clip,
+/// not a decode of media: the clip reads the generator's output through
+/// `tex_in`, so the text re-renders at whatever time the clip spans.
+/// Undoable as one "Add Clip". `in_ts`/`out_ts` are frame timestamps in
+/// the host sequence's frame-rate timebase; a clip dragged shorter or
+/// longer than the drop's default simply re-spans the same generator.
+pub fn place_text_clip(
+	p: &ProjectRef,
+	host_seq: NodeId,
+	text: NodeId,
+	track_index: usize,
+	in_ts: i64,
+	out_ts: i64,
+) -> Result<NodeId, String> {
+	if in_ts < 0 || out_ts <= in_ts {
+		return Err("invalid clip range (need 0 <= in < out)".to_string());
+	}
+	let (tb, list, label) = {
+		let g = lock(p);
+		if node_type_id(&g.graph, text) != TEXT_FOOTAGE_TYPE_ID {
+			return Err("the text entry is not in the project".to_string());
+		}
+		let tb = sequence_time_base(&g.graph, host_seq)
+			.ok_or_else(|| "host sequence has no valid frame rate".to_string())?;
+		let list = track_list_of(&g.graph, host_seq, TrackType::Video)
+			.ok_or_else(|| "host sequence has no video track list".to_string())?;
+		let label = node_label(&g.graph, text);
+		(tb, list, label)
+	};
+	let track_count = {
+		let g = lock(p);
+		track_list_behavior(&g.graph, list)
+			.map(|l| l.tracks.len())
+			.unwrap_or(0)
+	};
+	if track_index >= track_count {
+		return Err(format!(
+			"track index {track_index} out of range ({track_count} tracks)"
+		));
+	}
+
+	let in_r = ts_to_rational(in_ts, tb);
+	let out_r = ts_to_rational(out_ts, tb);
+	let length = out_r - in_r;
+
+	// The clip block, labelled after its generator and stamped with its
+	// creation-time color (the footage-clip convention). A generator has no
+	// media, so only the length is written; `TrackPlaceBlockCommand` sets
+	// the in-point from the drop.
+	let clip = oak_timeline::util::block_clip_create(p).id;
+	{
+		let mut g = lock(p);
+		let Some(entry) = g.graph.get_mut(clip) else {
+			return Err("clip node is not in the project".to_string());
+		};
+		entry.core.override_color = clip_color_index(clip);
+		entry.core.label = label;
+		if let Some(c) = entry
+			.behavior
+			.as_any_mut()
+			.and_then(|a| a.downcast_mut::<ClipBlockBehavior>())
+		{
+			c.core.set_length_and_media_in(length);
+		}
+	}
+
+	let place = oak_timeline::undopointer::TrackPlaceBlockCommand::new(
+		node_ref(p, list),
+		track_index as i32,
+		node_ref(p, clip),
+		in_r,
+	)
+	.to_command();
+	let edge = connect_command(p, text, clip, oak_node::block::clip_input::TEXTURE_INPUT)?;
 	push_multi(vec![place, edge], "Add Clip")?;
 	Ok(clip)
 }
@@ -1762,38 +2396,27 @@ pub(crate) fn trim_command(
 	old: Rational,
 	new: Rational,
 ) -> oak_undo::undocommand::UndoCommand {
-	use oak_node::block::BlockCore;
 	let (p1, p2) = (p.clone(), p.clone());
 	oak_undo::undocommand::UndoCommand::from_closures(
 		move || {
-			let mut g = lock(&p1);
-			if let Some(c) = g
-				.graph
-				.get_mut(clip)
-				.and_then(|e| e.behavior.as_any_mut())
-				.and_then(|a| a.downcast_mut::<ClipBlockBehavior>())
-			{
+			let mut guard = lock(&p1);
+			with_block_core_mut(&mut guard.graph, clip, |core| {
 				if out_anchored {
-					BlockCore::set_length_and_media_out(&mut c.core, new);
+					core.set_length_and_media_out(new);
 				} else {
-					BlockCore::set_length_and_media_in(&mut c.core, new);
+					core.set_length_and_media_in(new);
 				}
-			}
+			});
 		},
 		move || {
-			let mut g = lock(&p2);
-			if let Some(c) = g
-				.graph
-				.get_mut(clip)
-				.and_then(|e| e.behavior.as_any_mut())
-				.and_then(|a| a.downcast_mut::<ClipBlockBehavior>())
-			{
+			let mut guard = lock(&p2);
+			with_block_core_mut(&mut guard.graph, clip, |core| {
 				if out_anchored {
-					BlockCore::set_length_and_media_out(&mut c.core, old);
+					core.set_length_and_media_out(old);
 				} else {
-					BlockCore::set_length_and_media_in(&mut c.core, old);
+					core.set_length_and_media_in(old);
 				}
-			}
+			});
 		},
 	)
 }
@@ -2164,26 +2787,12 @@ fn move_clip_to_track_commands(
 	let (p1, p2) = (p.clone(), p.clone());
 	let rehome = oak_undo::undocommand::UndoCommand::from_closures(
 		move || {
-			let mut g = lock(&p1);
-			if let Some(c) = g
-				.graph
-				.get_mut(clip)
-				.and_then(|e| e.behavior.as_any_mut())
-				.and_then(|a| a.downcast_mut::<ClipBlockBehavior>())
-			{
-				c.core.set_in(in_r);
-			}
+			let mut guard = lock(&p1);
+			with_block_core_mut(&mut guard.graph, clip, |core| core.set_in(in_r));
 		},
 		move || {
-			let mut g = lock(&p2);
-			if let Some(c) = g
-				.graph
-				.get_mut(clip)
-				.and_then(|e| e.behavior.as_any_mut())
-				.and_then(|a| a.downcast_mut::<ClipBlockBehavior>())
-			{
-				c.core.set_in(old_in);
-			}
+			let mut guard = lock(&p2);
+			with_block_core_mut(&mut guard.graph, clip, |core| core.set_in(old_in));
 		},
 	);
 	let place = oak_timeline::undopointer::TrackPlaceBlockCommand::new(
@@ -3389,5 +3998,617 @@ mod undo_cycle_ops_tests {
 			.interlaced;
 		assert!(interlaced, "the interlaced flag updates too");
 		oak_undo::global::clear().unwrap();
+	}
+
+	// ---- adjustment layers ------------------------------------------------
+
+	/// Drop a fresh adjustment-layer block onto `track` spanning
+	/// `[in_ts, out_ts)` (timeline frames) and return its node id.
+	fn add_adjustment_layer(
+		p: &ProjectRef,
+		seq: NodeId,
+		track: NodeId,
+		in_ts: i64,
+		out_ts: i64,
+	) -> NodeId {
+		let tb = {
+			let g = lock(p);
+			sequence_time_base(&g.graph, seq).expect("the sequence has a timebase")
+		};
+		let in_r = ts_to_rational(in_ts, tb);
+		let block = {
+			let mut g = lock(p);
+			let (core, behavior) = oak_node::block::adjustment_create();
+			let id = g.graph.add_node(core, behavior);
+			let entry = g.graph.get_mut(id).expect("the new block");
+			let a = entry
+				.behavior
+				.as_any_mut()
+				.and_then(|a| a.downcast_mut::<AdjustmentBlockBehavior>())
+				.expect("an adjustment behavior");
+			a.core.range = TimeRange::new(in_r, ts_to_rational(out_ts, tb));
+			id
+		};
+		let (list, index) = {
+			let g = lock(p);
+			let list = track_behavior(&g.graph, track)
+				.and_then(|t| t.track_list)
+				.expect("the track has a list");
+			let index = track_list_behavior(&g.graph, list)
+				.and_then(|l| l.tracks.iter().position(|&t| t == track))
+				.expect("the track is in its list") as i32;
+			(list, index)
+		};
+		push(
+			oak_timeline::undopointer::TrackPlaceBlockCommand::new(
+				node_ref(p, list),
+				index,
+				node_ref(p, block),
+				in_r,
+			)
+			.to_command(),
+			"Add Adjustment Layer",
+		)
+		.expect("place the adjustment layer");
+		block
+	}
+
+	/// An adjustment layer is a timeline block: the generic clip queries
+	/// see it, its length counts toward the track, and the generic trim /
+	/// delete operations apply to it with converging undo-redo cycles.
+	#[test]
+	fn adjustment_layer_trim_and_delete_cycles_converge() {
+		let _g = test_lock();
+		oak_undo::global::clear().unwrap();
+		let project = create_project();
+		let seq = create_sequence(&project, "Adjustment Ops");
+		add_track(&project, seq, TrackType::Video).expect("add video track");
+		let track = {
+			let g = lock(&project);
+			track_ids(&g.graph, seq, TrackType::Video)[0]
+		};
+		let tb = {
+			let g = lock(&project);
+			sequence_time_base(&g.graph, seq).expect("timebase")
+		};
+		let adj = add_adjustment_layer(&project, seq, track, 50, 125);
+
+		{
+			let g = lock(&project);
+			assert!(
+				clip_ids(&g.graph, track).contains(&adj),
+				"an adjustment layer counts as a timeline block"
+			);
+			assert_eq!(
+				clip_range(&g.graph, adj),
+				Some((
+					ts_to_rational(50, tb),
+					ts_to_rational(125, tb),
+					Rational::new(0, 1)
+				)),
+				"the block reports its timeline range and a zero media in"
+			);
+			assert_eq!(
+				clip_track(&g.graph, adj),
+				Some(track),
+				"the block knows its track"
+			);
+		}
+		assert_eq!(
+			oak_timeline::util::track_length(&node_ref(&project, track)),
+			ts_to_rational(125, tb),
+			"the track length counts the leading gap plus the adjustment layer"
+		);
+
+		// Out-trim: the in point stays, the out point moves.
+		trim_clip(&project, adj, 50, 100).expect("trim the adjustment layer");
+		{
+			let g = lock(&project);
+			let (in_r, out_r, _) = clip_range(&g.graph, adj).expect("range");
+			assert_eq!(in_r, ts_to_rational(50, tb));
+			assert_eq!(
+				out_r,
+				ts_to_rational(100, tb),
+				"the out-trim lands on the adjustment layer"
+			);
+		}
+		let post = snapshot(&project, seq);
+		cycle_assert(&project, seq, &post, "adjustment trim");
+		oak_undo::global::clear().unwrap();
+
+		// Delete: the block leaves the track (and the clip list), and the
+		// replaced span is a gap, not a block.
+		delete_clip(&project, adj).expect("delete the adjustment layer");
+		{
+			let g = lock(&project);
+			assert!(
+				!clip_ids(&g.graph, track).contains(&adj),
+				"the deleted block leaves the clip list"
+			);
+			assert_eq!(
+				clip_track(&g.graph, adj),
+				None,
+				"the removed block no longer names a track"
+			);
+			let blocks = track_behavior(&g.graph, track)
+				.map(|t| t.blocks.clone())
+				.unwrap_or_default();
+			assert_eq!(
+				blocks.len(),
+				0,
+				"the trailing block and the gap that preceded it are gone: {blocks:?}"
+			);
+		}
+		let post = snapshot(&project, seq);
+		cycle_assert(&project, seq, &post, "adjustment delete");
+		oak_undo::global::clear().unwrap();
+	}
+
+	/// The production entry point ([`create_adjustment_layer`]) lands the
+	/// block on the video track with the requested span (nothing wired to
+	/// it), the undo detaches it without removing the node and the redo
+	/// re-places the same block.
+	#[test]
+	fn create_adjustment_layer_places_on_video_track_and_undoes() {
+		let _g = test_lock();
+		oak_undo::global::clear().unwrap();
+		let project = create_project();
+		let seq = create_sequence(&project, "Adjustment UI");
+		add_track(&project, seq, TrackType::Video).expect("add video track");
+		let track = {
+			let g = lock(&project);
+			track_ids(&g.graph, seq, TrackType::Video)[0]
+		};
+		let tb = {
+			let g = lock(&project);
+			sequence_time_base(&g.graph, seq).expect("timebase")
+		};
+
+		let adj = create_adjustment_layer(&project, seq, track, 50, 125).expect("create");
+		{
+			let g = lock(&project);
+			assert_eq!(
+				clip_ids(&g.graph, track),
+				vec![adj],
+				"the adjustment layer is the track's only block"
+			);
+			assert_eq!(
+				clip_range(&g.graph, adj),
+				Some((
+					ts_to_rational(50, tb),
+					ts_to_rational(125, tb),
+					Rational::new(0, 1)
+				)),
+				"the block spans the requested range with a zero media in"
+			);
+			assert_eq!(
+				clip_track(&g.graph, adj),
+				Some(track),
+				"the block knows its track"
+			);
+			assert!(
+				g.graph
+					.get(adj)
+					.and_then(|e| e.behavior.as_any())
+					.map(|a| a.is::<AdjustmentBlockBehavior>())
+					.unwrap_or(false),
+				"the new block is an adjustment layer, not a clip"
+			);
+		}
+		assert_eq!(
+			oak_timeline::util::track_length(&node_ref(&project, track)),
+			ts_to_rational(125, tb),
+			"the track length counts the leading gap plus the layer"
+		);
+		let post = snapshot(&project, seq);
+		cycle_assert(&project, seq, &post, "create adjustment");
+
+		oak_undo::global::undo().unwrap();
+		{
+			let g = lock(&project);
+			assert_eq!(
+				clip_track(&g.graph, adj),
+				None,
+				"the undo detaches the block from its track"
+			);
+			assert!(
+				g.graph.is_valid(adj),
+				"the detached block stays in the graph as an orphan"
+			);
+		}
+		oak_undo::global::redo().unwrap();
+		{
+			let g = lock(&project);
+			assert_eq!(
+				clip_track(&g.graph, adj),
+				Some(track),
+				"the redo re-places the same block"
+			);
+		}
+		oak_undo::global::clear().unwrap();
+	}
+
+	/// Only video tracks take adjustment layers, and the span must be a
+	/// forward range of non-negative frames; a rejected call creates no
+	/// node and leaves the undo stack untouched.
+	#[test]
+	fn create_adjustment_layer_rejects_audio_tracks_and_bad_ranges() {
+		let _g = test_lock();
+		oak_undo::global::clear().unwrap();
+		let project = create_project();
+		let seq = create_sequence(&project, "Adjustment Rejects");
+		add_track(&project, seq, TrackType::Video).expect("add video track");
+		add_track(&project, seq, TrackType::Audio).expect("add audio track");
+		let (video, audio) = {
+			let g = lock(&project);
+			(
+				track_ids(&g.graph, seq, TrackType::Video)[0],
+				track_ids(&g.graph, seq, TrackType::Audio)[0],
+			)
+		};
+		let before = oak_undo::global::count().unwrap();
+
+		assert!(
+			create_adjustment_layer(&project, seq, audio, 0, 25).is_err(),
+			"an audio track takes no adjustment layer"
+		);
+		assert!(
+			create_adjustment_layer(&project, seq, video, 25, 25).is_err(),
+			"an empty range is rejected"
+		);
+		assert!(
+			create_adjustment_layer(&project, seq, video, 50, 25).is_err(),
+			"a reversed range is rejected"
+		);
+		assert!(
+			create_adjustment_layer(&project, seq, video, -1, 25).is_err(),
+			"a negative in point is rejected"
+		);
+		assert_eq!(
+			oak_undo::global::count().unwrap(),
+			before,
+			"a rejected call leaves the undo stack untouched"
+		);
+		{
+			let g = lock(&project);
+			assert!(
+				clip_ids(&g.graph, video).is_empty(),
+				"no block was created for the rejected calls"
+			);
+		}
+		oak_undo::global::clear().unwrap();
+	}
+
+	/// 添加文本素材: the helper creates a text generator mounted under the
+	/// root as ONE undoable row. The undo detaches it from the folder AND
+	/// removes the node from the graph (not a bare unmount), and the redo
+	/// restores it under the same id.
+	#[test]
+	fn create_text_footage_mounts_under_root_and_undoes() {
+		let _g = test_lock();
+		oak_undo::global::clear().unwrap();
+		let project = create_project();
+		let before = oak_undo::global::count().unwrap();
+		let text = create_text_footage_node(&project).expect("create text footage");
+		assert_eq!(
+			oak_undo::global::count().unwrap(),
+			before + 1,
+			"the whole creation is one undo row"
+		);
+		let root = {
+			let g = lock(&project);
+			assert_eq!(node_type_id(&g.graph, text), TEXT_FOOTAGE_TYPE_ID);
+			assert_eq!(node_label(&g.graph, text), TEXT_FOOTAGE_LABEL);
+			assert_eq!(
+				g.graph.get(text).map(|e| e.core.bin_folder),
+				Some(Some(g.root)),
+				"the text node names the root as its bin folder"
+			);
+			g.root
+		};
+		assert!(
+			root_children(&project).contains(&text),
+			"the text entry mounts under the root folder"
+		);
+
+		oak_undo::global::undo().unwrap();
+		assert!(
+			!root_children(&project).contains(&text),
+			"the undo unmounts the entry"
+		);
+		assert!(
+			!lock(&project).graph.is_valid(text),
+			"the undo removes the node itself — no orphan outlives it"
+		);
+
+		oak_undo::global::redo().unwrap();
+		assert!(
+			root_children(&project).contains(&text),
+			"the redo remounts the entry"
+		);
+		let g = lock(&project);
+		assert_eq!(
+			node_type_id(&g.graph, text),
+			TEXT_FOOTAGE_TYPE_ID,
+			"the restored node keeps its id and type"
+		);
+		assert_eq!(
+			g.graph.get(text).map(|e| e.core.bin_folder),
+			Some(Some(root)),
+			"the restored node names the root again"
+		);
+		drop(g);
+		oak_undo::global::clear().unwrap();
+	}
+
+	/// The text drop places a GENERATOR clip: the block spans the dropped
+	/// range on the target track and its `tex_in` reads the text node
+	/// instead of a decode. Non-text entries and out-of-range tracks are
+	/// rejected.
+	#[test]
+	fn place_text_clip_wires_the_generator_and_spans_the_range() {
+		let _g = test_lock();
+		oak_undo::global::clear().unwrap();
+		let project = create_project();
+		let seq = create_sequence(&project, "Text Drop");
+		let text = create_text_footage_node(&project).expect("create text footage");
+		let (tb, track) = {
+			let g = lock(&project);
+			let tb = sequence_time_base(&g.graph, seq).expect("time base");
+			let track = track_ids(&g.graph, seq, TrackType::Video)[0];
+			(tb, track)
+		};
+		let clip = place_text_clip(&project, seq, text, 0, 12, 137).expect("place the text clip");
+		{
+			let g = lock(&project);
+			let (in_r, out_r, _) = clip_range(&g.graph, clip).expect("clip range");
+			assert_eq!(in_r, ts_to_rational(12, tb));
+			assert_eq!(
+				out_r,
+				ts_to_rational(137, tb),
+				"the clip spans the dropped frames"
+			);
+			assert_eq!(
+				g.graph
+					.connected_output(clip, oak_node::block::clip_input::TEXTURE_INPUT, -1),
+				Some(text),
+				"the clip reads the generator through tex_in"
+			);
+			assert_eq!(
+				clip_track(&g.graph, clip),
+				Some(track),
+				"the clip lands on the target video track"
+			);
+		}
+		// Only the text generator takes the generator-clip path: a folder
+		// entry on the same call is rejected.
+		let folder = create_folder(&project, "Not Text").expect("create folder");
+		assert!(
+			place_text_clip(&project, seq, folder, 0, 0, 10).is_err(),
+			"a non-text node is not placeable as a text clip"
+		);
+		assert!(
+			place_text_clip(&project, seq, text, 9, 0, 10).is_err(),
+			"a track index past the video tracks is rejected"
+		);
+		oak_undo::global::clear().unwrap();
+	}
+
+	// ---- default transitions (Ctrl+Shift+D / clip menu) ---------------------
+
+	/// Two touching clips on the video track of a fresh project, plus the
+	/// track, the time base and the symmetric half length the transition
+	/// tests use.
+	fn two_touching_clips(
+		media: &std::path::Path,
+	) -> (ProjectRef, NodeId, NodeId, NodeId, NodeId, (i64, i64), Rational) {
+		let project = create_project();
+		let seq = create_sequence(&project, "Default Transition");
+		let footage = import_footage(&project, media).expect("import");
+		let a = place_footage_clip(&project, seq, footage, TrackType::Video, 0, 0, 10, 0)
+			.expect("place a");
+		let b = place_footage_clip(&project, seq, footage, TrackType::Video, 0, 10, 20, 0)
+			.expect("place b");
+		let (tb, track) = {
+			let g = lock(&project);
+			(
+				sequence_time_base(&g.graph, seq).expect("time base"),
+				track_ids(&g.graph, seq, TrackType::Video)[0],
+			)
+		};
+		let half = ts_to_rational(3, tb);
+		(project, seq, track, a, b, tb, half)
+	}
+
+	/// 编辑 → 设为默认转场: one transition per contiguous seam around the
+	/// selection — the single seam here, built once even though both clips
+	/// are selected — wired onto both clips as ONE undo row.
+	#[test]
+	fn default_transition_covers_the_selected_seams() {
+		let _g = test_lock();
+		oak_undo::global::clear().unwrap();
+		let media = std::env::temp_dir()
+			.join(format!("oak_default_transition_{}.mp4", std::process::id()));
+		oak_codec::testmedia::write_test_clip(&media, 64, 64, 10, 10).expect("generate");
+		let (project, seq, track, a, b, tb, half) = two_touching_clips(&media);
+
+		let before = oak_undo::global::count().unwrap();
+		let created = add_default_transition(&project, seq, &[a, b], half).expect("add transition");
+		assert_eq!(
+			created, 1,
+			"both clips name the same seam; it is built once"
+		);
+		assert_eq!(
+			oak_undo::global::count().unwrap(),
+			before + 1,
+			"the whole batch is one undo row"
+		);
+
+		let transition = {
+			let g = lock(&project);
+			let blocks = track_behavior(&g.graph, track)
+				.map(|t| t.blocks.clone())
+				.unwrap_or_default();
+			assert_eq!(blocks.len(), 3, "the transition joins the track: {blocks:?}");
+			let t = blocks[1];
+			let seam = ts_to_rational(10, tb);
+			let core = block_core_of(&g.graph, t).expect("transition core");
+			assert_eq!(
+				(core.in_(), core.out()),
+				(seam - half, seam + half),
+				"the transition straddles the seam"
+			);
+			let behavior = g
+				.graph
+				.get(t)
+				.and_then(|e| e.behavior.as_any())
+				.and_then(|a| a.downcast_ref::<oak_node::block::TransitionBlockBehavior>())
+				.expect("transition behavior");
+			assert_eq!(
+				(behavior.in_offset, behavior.out_offset),
+				(half, half),
+				"a default transition is symmetric"
+			);
+			assert_eq!(
+				g.graph.connected_output(t, oak_node::block::transition_input::OUT_BLOCK, -1),
+				Some(a),
+				"the previous clip feeds out_block_in"
+			);
+			assert_eq!(
+				g.graph.connected_output(t, oak_node::block::transition_input::IN_BLOCK, -1),
+				Some(b),
+				"the next clip feeds in_block_in"
+			);
+			// The wedges the widget paints: the earlier clip's tail is the
+			// transition's in_offset, the later clip's head its out_offset.
+			let widths = clip_transition_widths(&g.graph, track);
+			assert_eq!(
+				widths.get(&a),
+				Some(&(None, Some(half))),
+				"the head clip's tail wedge"
+			);
+			assert_eq!(
+				widths.get(&b),
+				Some(&(Some(half), None)),
+				"the tail clip's head wedge"
+			);
+			assert_eq!(transition_of_clip(&g.graph, b, true), Some(t));
+			assert_eq!(transition_of_clip(&g.graph, a, false), Some(t));
+			assert_eq!(
+				transition_of_clip(&g.graph, a, true),
+				None,
+				"the first clip has nothing before it"
+			);
+			assert_eq!(
+				transition_of_clip(&g.graph, b, false),
+				None,
+				"the last clip has nothing after it"
+			);
+			t
+		};
+
+		let post = snapshot(&project, seq);
+		cycle_assert(&project, seq, &post, "add default transition");
+
+		// The seam carries a transition now: nothing left to build, and the
+		// refused batch leaves no empty undo row behind.
+		let rows = oak_undo::global::count().unwrap();
+		assert!(
+			add_default_transition(&project, seq, &[a, b], half).is_err(),
+			"a seam that already carries a transition is skipped"
+		);
+		assert_eq!(oak_undo::global::count().unwrap(), rows);
+		{
+			let g = lock(&project);
+			assert!(g.graph.is_valid(transition), "the refused batch changed nothing");
+		}
+
+		oak_undo::global::clear().unwrap();
+		let _ = std::fs::remove_file(&media);
+	}
+
+	/// The wedge drag (`TransitionChanged`): the later clip's head wedge
+	/// resizes the transition's out_offset, the earlier clip's tail wedge its
+	/// in_offset, the seam stays put, and a too-long request is clamped to
+	/// the dragged clip's length.
+	#[test]
+	fn transition_length_drag_moves_one_wedge_and_keeps_the_seam() {
+		let _g = test_lock();
+		oak_undo::global::clear().unwrap();
+		let media =
+			std::env::temp_dir().join(format!("oak_transition_drag_{}.mp4", std::process::id()));
+		oak_codec::testmedia::write_test_clip(&media, 64, 64, 10, 10).expect("generate");
+		let (project, seq, track, a, b, tb, half) = two_touching_clips(&media);
+		add_default_transition(&project, seq, &[a, b], half).expect("add transition");
+
+		let frame = ts_to_rational(1, tb);
+		let seam = ts_to_rational(10, tb);
+		let offsets = |p: &ProjectRef, t: NodeId| {
+			let g = lock(p);
+			g.graph
+				.get(t)
+				.and_then(|e| e.behavior.as_any())
+				.and_then(|a| a.downcast_ref::<oak_node::block::TransitionBlockBehavior>())
+				.map(|t| (t.in_offset, t.out_offset))
+				.expect("transition behavior")
+		};
+		let transition = {
+			let g = lock(&project);
+			transition_of_clip(&g.graph, b, true).expect("the head transition of b")
+		};
+
+		// Growing the head wedge of the later clip (edge = Start) only
+		// touches the out offset.
+		let longer = ts_to_rational(5, tb);
+		let applied = set_transition_length(&project, b, true, frame, longer).expect("grow");
+		assert_eq!(applied, longer);
+		assert_eq!(offsets(&project, transition), (half, longer));
+		{
+			let g = lock(&project);
+			let core = block_core_of(&g.graph, transition).expect("transition core");
+			assert_eq!((core.in_(), core.out()), (seam - half, seam + longer));
+			assert_eq!(
+				clip_range(&g.graph, a).map(|r| r.1),
+				Some(seam),
+				"the seam does not move"
+			);
+		}
+		let post = snapshot(&project, seq);
+		cycle_assert(&project, seq, &post, "transition length");
+
+		// A request longer than the dragged clip is clamped to its length.
+		let applied =
+			set_transition_length(&project, b, true, frame, ts_to_rational(9_999, tb)).expect("clamp");
+		assert_eq!(
+			applied,
+			ts_to_rational(10, tb),
+			"clamped to the later clip's length"
+		);
+
+		// The other side: the earlier clip's tail wedge (edge = End) drives
+		// the in offset.
+		let applied = set_transition_length(&project, a, false, frame, ts_to_rational(6, tb))
+			.expect("grow in");
+		assert_eq!(applied, ts_to_rational(6, tb));
+		assert_eq!(
+			offsets(&project, transition),
+			(ts_to_rational(6, tb), ts_to_rational(10, tb))
+		);
+		let post = snapshot(&project, seq);
+		cycle_assert(&project, seq, &post, "transition length (in side)");
+
+		// A clip without a transition on that edge is rejected, not silently
+		// rewired.
+		assert!(
+			set_transition_length(&project, b, false, frame, half).is_err(),
+			"the last clip has no tail transition"
+		);
+		assert!(
+			set_transition_length(&project, a, true, frame, half).is_err(),
+			"the first clip has no head transition"
+		);
+
+		oak_undo::global::clear().unwrap();
+		let _ = std::fs::remove_file(&media);
 	}
 }

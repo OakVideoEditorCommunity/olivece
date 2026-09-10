@@ -82,6 +82,34 @@ pub struct MontageClip {
 	pub effects: Vec<MontageEffect>,
 }
 
+/// One adjustment layer of a sequence montage (M14 W3): a time range
+/// whose effect stack applies to everything composited below it.
+///
+/// The montage is a flat list, so the layer's position is expressed as a
+/// boundary into that list rather than as a track index: the renderer
+/// applies the span's effects once the accumulated frame holds
+/// `track_index` clips — i.e. before compositing the clip at that index
+/// (a `track_index` equal to the montage length applies after the last
+/// clip, the topmost adjustment layer). Spans arrive ordered
+/// bottom-up (non-decreasing `track_index`), matching the order the
+/// builder walks the track list in.
+#[derive(Clone, Debug)]
+pub struct AdjustmentSpan {
+	/// Adjustment in point (sequence time).
+	pub in_time: Rational,
+	/// Adjustment out point (sequence time).
+	pub out_time: Rational,
+	/// Montage-list boundary: the number of clips already composited
+	/// below this layer. Effects apply to the accumulated frame just
+	/// before the clip at this index is composited; `montage.len()`
+	/// means "after every clip".
+	pub track_index: usize,
+	/// The adjustment's effect stack (source-first; empty for a bare
+	/// adjustment layer, which passes the accumulated frame through
+	/// unchanged).
+	pub effects: Vec<MontageEffect>,
+}
+
 /// Audio ticket parameters (M12 P1): the output format plus the audio
 /// montage to mix over the requested range.
 #[derive(Clone, Debug)]
@@ -129,6 +157,10 @@ pub struct VideoTicketParams {
 	/// Sequence montage (ordered topmost-last; M12 P0). When set, the
 	/// footage field is ignored.
 	pub montage: Vec<MontageClip>,
+	/// Adjustment layers over the montage (M14 W3; montage twin of the
+	/// graph path's adjustment sweep). Ordered bottom-up; empty means the
+	/// sequence has no enabled adjustment layer over the rendered time.
+	pub adjustments: Vec<AdjustmentSpan>,
 }
 
 impl VideoTicketParams {
@@ -574,6 +606,7 @@ impl TicketArena {
 					cache_timebase: None,
 					footage: None,
 					montage: Vec::new(),
+					adjustments: Vec::new(),
 				}),
 				audio: Some(ap_job),
 				produce: producer,
@@ -744,6 +777,7 @@ mod tests {
 				cache_timebase: None,
 				footage: None,
 				montage: Vec::new(),
+				adjustments: Vec::new(),
 			},
 			Box::new(move |r| {
 				let _ = tx.send(r.is_ok());
@@ -795,6 +829,7 @@ mod tests {
 				cache_timebase: None,
 				footage: None,
 				montage: Vec::new(),
+				adjustments: Vec::new(),
 			},
 			Box::new(move |r| {
 				let _ = tx.send(r);
@@ -881,6 +916,7 @@ mod tests {
 				cache_timebase: None,
 				footage: None,
 				montage: Vec::new(),
+				adjustments: Vec::new(),
 			},
 			Box::new(|_| {}),
 		);
@@ -897,6 +933,7 @@ mod tests {
 				cache_timebase: None,
 				footage: None,
 				montage: Vec::new(),
+				adjustments: Vec::new(),
 			},
 			Box::new(|_| {}),
 		);

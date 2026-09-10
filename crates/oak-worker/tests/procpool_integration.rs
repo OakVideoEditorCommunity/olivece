@@ -89,6 +89,7 @@ fn params(time: Rational, footage: Option<(String, i32)>) -> Arc<VideoTicketPara
 		cache_timebase: None,
 		footage,
 		montage: Vec::new(),
+		adjustments: Vec::new(),
 	})
 }
 
@@ -537,6 +538,7 @@ fn submit_audio(
 			cache_timebase: None,
 			footage: None,
 			montage: Vec::new(),
+			adjustments: Vec::new(),
 		}),
 		audio: Some(audio),
 		// Never invoked on the process backend (the worker renders audio
@@ -755,6 +757,7 @@ fn oversized_audio_ticket_is_refused_by_process_backend() {
 			cache_timebase: None,
 			footage: None,
 			montage: Vec::new(),
+			adjustments: Vec::new(),
 		}),
 		audio: Some(audio),
 		produce: Arc::new(|_, _| {
@@ -817,6 +820,7 @@ fn f32_ticket_gets_f32_slot_and_bgra8_stays_bgra8() {
 				cache_timebase: None,
 				footage: None,
 				montage: Vec::new(),
+				adjustments: Vec::new(),
 			}),
 			audio: None,
 			produce: Arc::new(|_, _| {
@@ -961,6 +965,7 @@ fn post_graph_job(
 			cache_timebase: None,
 			footage: None,
 			montage: Vec::new(),
+			adjustments: Vec::new(),
 		}),
 		audio: None,
 		produce: Arc::new(|_, _| {

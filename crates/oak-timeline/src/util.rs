@@ -33,7 +33,10 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use oak_core::Rational;
-use oak_node::block::{BlockCore, ClipBlockBehavior, GapBlockBehavior, TransitionBlockBehavior};
+use oak_node::block::{
+	AdjustmentBlockBehavior, BlockCore, ClipBlockBehavior, GapBlockBehavior,
+	TransitionBlockBehavior,
+};
 use oak_node::graph::{Graph, NodeEntry};
 use oak_node::id::NodeId;
 use oak_node::node::NodeCore;
@@ -122,6 +125,8 @@ fn block_core_of(project: &Project, id: NodeId) -> Option<&BlockCore> {
 			Some(&gap.core)
 		} else if let Some(transition) = a.downcast_ref::<TransitionBlockBehavior>() {
 			Some(&transition.core)
+		} else if let Some(adjustment) = a.downcast_ref::<AdjustmentBlockBehavior>() {
+			Some(&adjustment.core)
 		} else {
 			None
 		}
@@ -140,6 +145,13 @@ fn block_core_of_mut(project: &mut Project, id: NodeId) -> Option<&mut BlockCore
 		Some(
 			&mut a
 				.downcast_mut::<TransitionBlockBehavior>()
+				.expect("checked above")
+				.core,
+		)
+	} else if a.is::<AdjustmentBlockBehavior>() {
+		Some(
+			&mut a
+				.downcast_mut::<AdjustmentBlockBehavior>()
 				.expect("checked above")
 				.core,
 		)
@@ -213,6 +225,8 @@ impl oak_node::track::BlockRange for GraphBlockRange<'_> {
 					a.downcast_ref::<GapBlockBehavior>().map(|b| &b.core),
 					a.downcast_ref::<TransitionBlockBehavior>()
 						.map(|b| &b.core),
+					a.downcast_ref::<AdjustmentBlockBehavior>()
+						.map(|b| &b.core),
 				]
 				.into_iter()
 				.flatten()
@@ -232,6 +246,8 @@ impl oak_node::track::BlockRange for GraphBlockRange<'_> {
 						.map(|b| &b.core),
 					a.downcast_ref::<GapBlockBehavior>().map(|b| &b.core),
 					a.downcast_ref::<TransitionBlockBehavior>()
+						.map(|b| &b.core),
+					a.downcast_ref::<AdjustmentBlockBehavior>()
 						.map(|b| &b.core),
 				]
 				.into_iter()
@@ -337,6 +353,76 @@ pub fn clip_set_media_in(b: &NodeRef, media_in: Rational) {
 	if let Some(core) = block_core_of_mut(&mut p, b.id) {
 		core.media_in = media_in;
 	}
+}
+
+/// The block's stored timeline range (`None` for a stale/non-block node).
+pub fn block_range(b: &NodeRef) -> Option<oak_core::TimeRange> {
+	let p = b.lock();
+	block_core_of(&p, b.id).map(|c| c.range)
+}
+
+/// Set the block's stored timeline range (a no-op for a stale/non-block
+/// node). The range is written whole, so the caller can move the in/out
+/// pair together without a media-in side effect (unlike
+/// [`block_set_length_and_media_out`] / [`block_set_length_and_media_in`]).
+pub fn block_set_range(b: &NodeRef, range: oak_core::TimeRange) {
+	let mut p = b.lock();
+	if let Some(core) = block_core_of_mut(&mut p, b.id) {
+		core.range = range;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Transition blocks
+// ---------------------------------------------------------------------------
+
+/// The transition block's `(in_offset, out_offset)` — the two wedges that
+/// reach into its neighbours — or `None` for a non-transition node.
+pub fn transition_offsets(t: &NodeRef) -> Option<(Rational, Rational)> {
+	let p = t.lock();
+	let a = p.graph.get(t.id)?.behavior.as_any()?;
+	let transition = a.downcast_ref::<TransitionBlockBehavior>()?;
+	Some((transition.in_offset, transition.out_offset))
+}
+
+/// Set the transition block's offsets (a no-op for a non-transition node).
+pub fn transition_set_offsets(t: &NodeRef, in_offset: Rational, out_offset: Rational) {
+	let mut p = t.lock();
+	if let Some(a) = p.graph.get_mut(t.id).and_then(|e| e.behavior.as_any_mut()) {
+		if let Some(transition) = a.downcast_mut::<TransitionBlockBehavior>() {
+			transition.in_offset = in_offset;
+			transition.out_offset = out_offset;
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Graph edges (the transition block's two sides)
+// ---------------------------------------------------------------------------
+
+/// The node feeding `b`'s `input` (the input's connected source), or `None`
+/// when the input is unconnected or the node is stale.
+pub fn block_connected_input(b: &NodeRef, input: &str) -> Option<NodeRef> {
+	let p = b.lock();
+	p.graph
+		.connected_output(b.id, input, -1)
+		.map(|id| NodeRef::new(b.project.clone(), id))
+}
+
+/// Connect `from`'s output into `to`'s `input`. No undo row of its own: the
+/// calling command owns its undo/redo semantics.
+pub fn block_connect(from: &NodeRef, to: &NodeRef, input: &str) {
+	let mut p = from.lock();
+	let _ = p.graph.connect(from.id, to.id, input, -1);
+}
+
+/// Disconnect `to`'s `input`, returning the node that fed it (`None` when
+/// nothing was connected).
+pub fn block_disconnect_input(to: &NodeRef, input: &str) -> Option<NodeRef> {
+	let mut p = to.lock();
+	p.graph
+		.disconnect_input(to.id, input, -1)
+		.map(|id| NodeRef::new(to.project.clone(), id))
 }
 
 // ---------------------------------------------------------------------------

@@ -25,7 +25,8 @@
 //! pointers (see `undocommon`). Detached blocks are held as owned arena
 //! entries on the command that detached them.
 
-use oak_core::Rational;
+use oak_core::{Rational, TimeRange};
+use oak_node::block::transition_input::{IN_BLOCK, OUT_BLOCK};
 use oak_node::graph::NodeEntry;
 use oak_node::track::TrackType;
 use oak_undo::undocommand::UndoCommand;
@@ -33,13 +34,15 @@ use oak_undo::undocommand::UndoCommand;
 use crate::undocommon::{box_command, create_block_remove_command, Command};
 use crate::undosplit::BlockSplitPreservingLinksCommand;
 use crate::util::{
-	block_add_to_graph, block_enabled, block_gap_create, block_in, block_kind, block_length,
-	block_next, block_out, block_previous, block_remove_from_graph, block_set_enabled,
-	block_set_in, block_set_length_and_media_in, block_set_length_and_media_out, block_track,
+	block_add_to_graph, block_connect, block_connected_input, block_disconnect_input,
+	block_enabled, block_gap_create, block_in, block_kind, block_length, block_next, block_out,
+	block_previous, block_range, block_remove_from_graph, block_set_enabled, block_set_in,
+	block_set_length_and_media_in, block_set_length_and_media_out, block_set_range, block_track,
 	clip_media_in, clip_set_media_in, same_block, track_append_block, track_create,
 	track_insert_block_after, track_insert_block_before, track_replace_block,
 	track_ripple_remove_block, tracklist_append, tracklist_remove, tracklist_remove_last,
-	tracklist_track_at, tracklist_track_count, tracklist_type, BlockKind, NodeRef,
+	tracklist_track_at, tracklist_track_count, tracklist_type, transition_offsets,
+	transition_set_offsets, BlockKind, NodeRef,
 };
 
 // `oaknode/sequence.h` element input ids (the C++ automerge branch).
@@ -540,6 +543,104 @@ impl Command for TimelineRemoveTrackCommand {
 	}
 }
 
+/// `TransitionSetOffsetsCommand` — change a transition block's two wedge
+/// offsets, keeping the block pinned to the same seam.
+///
+/// The C++ timeline has no equivalent (a transition's offsets are written
+/// once, at creation); the Rust port needs one so the timeline's wedge drag
+/// (`TransitionChanged`) can resize a transition undoably. A transition spans
+/// `seam - in_offset .. seam + out_offset`, so the stored range follows the
+/// offsets — growing one wedge without moving the matching range end would
+/// drift the block off its seam.
+pub struct TransitionSetOffsetsCommand {
+	/// Transition block to change.
+	block: NodeRef,
+	/// New in offset (`None` keeps the current one).
+	new_in_offset: Option<Rational>,
+	/// New out offset (`None` keeps the current one).
+	new_out_offset: Option<Rational>,
+	/// Whether the pre-change state has been captured.
+	captured: bool,
+	/// In offset captured at `redo` time, restored by `undo`.
+	old_in_offset: Rational,
+	/// Out offset captured at `redo` time, restored by `undo`.
+	old_out_offset: Rational,
+	/// Stored range captured at `redo` time, restored by `undo`.
+	old_range: TimeRange,
+	/// The seam the offsets straddle, captured at `redo` time.
+	seam: Rational,
+}
+
+impl TransitionSetOffsetsCommand {
+	/// Construct from a transition block and the offsets to set (`None`
+	/// leaves that side as it is).
+	///
+	/// New signature (single-lib): `pub fn new(block: NodeRef, new_in_offset: Option<Rational>, new_out_offset: Option<Rational>) -> TransitionSetOffsetsCommand`
+	pub fn new(
+		block: NodeRef,
+		new_in_offset: Option<Rational>,
+		new_out_offset: Option<Rational>,
+	) -> Self {
+		Self {
+			block,
+			new_in_offset,
+			new_out_offset,
+			captured: false,
+			old_in_offset: Rational::new(0, 1),
+			old_out_offset: Rational::new(0, 1),
+			old_range: TimeRange::default(),
+			seam: Rational::new(0, 1),
+		}
+	}
+
+	/// `redo`: capture the offsets/range once, then write the new offsets
+	/// and move the range with them.
+	pub fn redo(&mut self) {
+		if !self.captured {
+			if let Some((in_offset, out_offset)) = transition_offsets(&self.block) {
+				self.old_in_offset = in_offset;
+				self.old_out_offset = out_offset;
+			}
+			if let Some(range) = block_range(&self.block) {
+				self.old_range = range;
+			}
+			self.seam = block_in(&self.block) + self.old_in_offset;
+			self.captured = true;
+		}
+
+		let in_offset = self.new_in_offset.unwrap_or(self.old_in_offset);
+		let out_offset = self.new_out_offset.unwrap_or(self.old_out_offset);
+		transition_set_offsets(&self.block, in_offset, out_offset);
+		block_set_range(
+			&self.block,
+			TimeRange::new(self.seam - in_offset, self.seam + out_offset),
+		);
+	}
+
+	/// `undo`: restore the captured offsets and range.
+	pub fn undo(&mut self) {
+		transition_set_offsets(&self.block, self.old_in_offset, self.old_out_offset);
+		block_set_range(&self.block, self.old_range);
+	}
+
+	/// Wrap as an oakundo command value.
+	pub fn to_command(self) -> UndoCommand {
+		box_command(self)
+	}
+}
+
+impl Command for TransitionSetOffsetsCommand {
+	/// `Command::redo` — the inherent method takes precedence.
+	fn redo(&mut self) {
+		self.redo();
+	}
+
+	/// `Command::undo` — the inherent method takes precedence.
+	fn undo(&mut self) {
+		self.undo();
+	}
+}
+
 /// `TransitionRemoveCommand` — detach a transition block from its neighbours,
 /// optionally removing it from the whole graph (timelineundogeneral.h).
 pub struct TransitionRemoveCommand {
@@ -553,6 +654,20 @@ pub struct TransitionRemoveCommand {
 	out_block: Option<NodeRef>,
 	/// Block before the transition.
 	in_block: Option<NodeRef>,
+	/// Whether the pre-removal state has been captured.
+	captured: bool,
+	/// In offset captured before removal, restored by `undo`.
+	in_offset: Rational,
+	/// Out offset captured before removal, restored by `undo`.
+	out_offset: Rational,
+	/// Stored range captured before removal, restored by `undo`.
+	range: TimeRange,
+	/// Node feeding the transition's `out_block_in` input (the outgoing
+	/// clip), captured before removal and restored by `undo`.
+	connected_out: Option<NodeRef>,
+	/// Node feeding the transition's `in_block_in` input (the incoming
+	/// clip), captured before removal and restored by `undo`.
+	connected_in: Option<NodeRef>,
 	/// Graph-removal command built at `redo` time.
 	remove_command: Option<UndoCommand>,
 }
@@ -568,19 +683,41 @@ impl TransitionRemoveCommand {
 			track: None,
 			out_block: None,
 			in_block: None,
+			captured: false,
+			in_offset: Rational::new(0, 1),
+			out_offset: Rational::new(0, 1),
+			range: TimeRange::default(),
+			connected_out: None,
+			connected_in: None,
 			remove_command: None,
 		}
 	}
 
-	/// `redo`: relink neighbours around the transition and remove it.
+	/// `redo`: unlink the transition from its neighbours and remove it.
 	pub fn redo(&mut self) {
 		self.track = block_track(&self.block);
 		self.out_block = block_next(&self.block);
 		self.in_block = block_previous(&self.block);
-		// NOTE: the C++ extends the neighbouring blocks by the transition
-		// offsets and disconnects the transition's inputs; the Rust block
-		// model has no transition edges, so only the ripple-remove is
-		// performed.
+		// The C++ also extends the neighbouring blocks by the transition's
+		// offsets; the Rust blocks already meet at the seam once the
+		// transition leaves the track (a transition's span overlaps its
+		// neighbours instead of filling a gap of its own), so only the detach
+		// is performed. The offsets, the stored range and both input edges
+		// are captured first so `undo` can put the block back as it was.
+		if !self.captured {
+			if let Some((in_offset, out_offset)) = transition_offsets(&self.block) {
+				self.in_offset = in_offset;
+				self.out_offset = out_offset;
+			}
+			if let Some(range) = block_range(&self.block) {
+				self.range = range;
+			}
+			self.connected_out = block_connected_input(&self.block, OUT_BLOCK);
+			self.connected_in = block_connected_input(&self.block, IN_BLOCK);
+			self.captured = true;
+		}
+		block_disconnect_input(&self.block, OUT_BLOCK);
+		block_disconnect_input(&self.block, IN_BLOCK);
 		if let Some(track) = &self.track {
 			track_ripple_remove_block(track, &self.block);
 		}
@@ -594,22 +731,26 @@ impl TransitionRemoveCommand {
 		}
 	}
 
-	/// `undo`: restore the transition between its neighbours.
+	/// `undo`: restore the transition, its offsets and its two edges.
 	pub fn undo(&mut self) {
 		if self.remove_from_graph {
 			if let Some(c) = self.remove_command.as_mut() {
 				c.undo_now();
 			}
 		}
-		// NOTE: the C++ re-inserts the transition between its former
-		// neighbours, reconnects them and restores the offsets; the
-		// re-insert is real, the offset/connection restoration is not
-		// modelled (no transition edges in the Rust block model).
 		if let Some(track) = &self.track {
 			match &self.in_block {
 				Some(before) => track_insert_block_after(track, &self.block, Some(before)),
 				None => track_insert_block_after(track, &self.block, None),
 			}
+		}
+		transition_set_offsets(&self.block, self.in_offset, self.out_offset);
+		block_set_range(&self.block, self.range);
+		if let Some(source) = &self.connected_out {
+			block_connect(source, &self.block, OUT_BLOCK);
+		}
+		if let Some(source) = &self.connected_in {
+			block_connect(source, &self.block, IN_BLOCK);
 		}
 	}
 
@@ -831,9 +972,10 @@ impl TrackReplaceBlockWithGapCommand {
 		}
 		// NOTE: the C++ checks whether the transition is connected only to this
 		// block (via `oaknode_transition_get_connected_out_block`/`_in_block` +
-		// `same_block`) before adding a `TransitionRemoveCommand`; the Rust
-		// block model has no transition edges, so a command removing the
-		// transition outright is produced.
+		// `same_block`) before adding a `TransitionRemoveCommand`; that guard is
+		// still not ported (the inputs are reachable through
+		// `util::block_connected_input`), so a command removing the transition
+		// outright is produced.
 		self.transition_remove_commands
 			.push(TransitionRemoveCommand::new(relevant, true));
 	}

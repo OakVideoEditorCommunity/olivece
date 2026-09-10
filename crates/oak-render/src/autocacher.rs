@@ -153,6 +153,7 @@ impl PreviewAutoCacher {
 				cache_timebase: None,
 				footage: None,
 				montage: Vec::new(),
+				adjustments: Vec::new(),
 			},
 			Box::new(|_| {}),
 		);
@@ -191,6 +192,7 @@ impl PreviewAutoCacher {
 				cache_timebase: None,
 				footage: None,
 				montage: Vec::new(),
+				adjustments: Vec::new(),
 			},
 			done,
 		);

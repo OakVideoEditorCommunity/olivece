@@ -737,6 +737,7 @@ fn create_timeline_type(
 		"org.olivevideoeditor.Olive.transitionblock" => {
 			Some(crate::block::transition_create())
 		}
+		"org.olivevideoeditor.Olive.adjustment" => Some(crate::block::adjustment_create()),
 		_ => None,
 	}
 }
@@ -985,6 +986,12 @@ fn resolve_timeline_refs(graph: &mut Graph, id_map: &std::collections::HashMap<u
 		{
 			t.core.track = t.core.track.and_then(|r| resolve(&r));
 			t.core.links = entry.core.links.clone();
+		} else if let Some(a) = behavior
+			.as_any_mut()
+			.and_then(|a| a.downcast_mut::<crate::block::AdjustmentBlockBehavior>())
+		{
+			a.core.track = a.core.track.and_then(|r| resolve(&r));
+			a.core.links = entry.core.links.clone();
 		} else if let Some(f) = behavior
 			.as_any_mut()
 			.and_then(|a| a.downcast_mut::<crate::footage::FootageBehavior>())

@@ -57,7 +57,7 @@ use serde_json::{json, Value};
 use oak_core::backend::{BackendKind, DisplayRenderer};
 use oak_core::{PixelFormat, Rational};
 use oak_render::eval;
-use oak_render::ticket::{AudioTicketParams, MontageClip, VideoTicketParams};
+use oak_render::ticket::{AdjustmentSpan, AudioTicketParams, MontageClip, VideoTicketParams};
 
 use crate::framecache::FrameCache;
 use crate::ipc::{
@@ -1204,6 +1204,11 @@ impl WorkerSession {
 				effects: c.effects.iter().map(crate::ipc::montage_effect_from).collect(),
 			})
 			.collect();
+		let adjustments: Vec<AdjustmentSpan> = spec
+			.adjustments
+			.iter()
+			.map(oak_render::ipc::adjustment_from_wire)
+			.collect();
 		VideoTicketParams {
 			viewer: if spec.viewer_node != 0 {
 				spec.viewer_node
@@ -1223,6 +1228,7 @@ impl WorkerSession {
 			cache_timebase: None,
 			footage,
 			montage,
+			adjustments,
 		}
 	}
 }

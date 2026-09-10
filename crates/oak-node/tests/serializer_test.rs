@@ -229,7 +229,10 @@ fn golden_project_with_footage_loads() {
 /// chain with keyframes, plus settings and a link.
 fn build_full_project() -> std::sync::Arc<std::sync::Mutex<oak_node::project::Project>> {
 	use oak_core::{Rational, TimeRange};
-	use oak_node::block::{clip_create, gap_create, ClipBlockBehavior, GapBlockBehavior};
+	use oak_node::block::{
+		adjustment_create, clip_create, gap_create, AdjustmentBlockBehavior, ClipBlockBehavior,
+		GapBlockBehavior,
+	};
 	use oak_node::folder::FolderBehavior;
 	use oak_node::footage::{FootageBehavior, StreamInfo};
 	use oak_node::keyframe::{Interpolation, Keyframe};
@@ -425,6 +428,18 @@ fn build_full_project() -> std::sync::Arc<std::sync::Mutex<oak_node::project::Pr
 		p.graph.add_node(core, behavior)
 	};
 
+	// A standalone adjustment layer at the end of the video track.
+	let adj_id = {
+		let (core, mut behavior) = adjustment_create();
+		let a = behavior
+			.as_any_mut()
+			.and_then(|a| a.downcast_mut::<AdjustmentBlockBehavior>())
+			.unwrap();
+		a.core.range = TimeRange::new(Rational::new(220, 25), Rational::new(260, 25));
+		a.core.track = Some(vtrack_id);
+		p.graph.add_node(core, behavior)
+	};
+
 	// Wire the hierarchy (behavior fields, the Rust model).
 	{
 		let entry = p.graph.get_mut(seq_id).unwrap();
@@ -463,7 +478,7 @@ fn build_full_project() -> std::sync::Arc<std::sync::Mutex<oak_node::project::Pr
 			.as_any_mut()
 			.and_then(|a| a.downcast_mut::<TrackBehavior>())
 			.unwrap();
-		t.blocks = vec![clip1_id, gap1_id, clip2_id];
+		t.blocks = vec![clip1_id, gap1_id, clip2_id, adj_id];
 	}
 	{
 		let entry = p.graph.get_mut(alist_id).unwrap();
@@ -675,9 +690,11 @@ fn assert_full_roundtrip_fields(orig: &oak_node::project::Project, loaded: &oak_
 	let o_clip1 = o_t.blocks[0];
 	let o_gap1 = o_t.blocks[1];
 	let o_clip2 = o_t.blocks[2];
+	let o_adj = o_t.blocks[3];
 	let l_clip1 = l_t.blocks[0];
 	let l_gap1 = l_t.blocks[1];
 	let l_clip2 = l_t.blocks[2];
+	let l_adj = l_t.blocks[3];
 
 	// Clip 1: range/media_in/speed/reversed/enabled/pitch/loop, track
 	// and footage backrefs, and the effect connection.
@@ -753,6 +770,31 @@ fn assert_full_roundtrip_fields(orig: &oak_node::project::Project, loaded: &oak_
 	assert_eq!(l_c2.core.reversed, o_c2.core.reversed, "clip2 reversed");
 	assert_eq!(l_c2.core.loop_mode, o_c2.core.loop_mode, "clip2 loop");
 	assert_eq!(l_c2.footage, Some(l_footage), "clip2 footage backref");
+
+	// Adjustment layer: type, range and track backref.
+	let o_a = orig
+		.graph
+		.get(o_adj)
+		.unwrap()
+		.behavior
+		.as_any()
+		.and_then(|a| a.downcast_ref::<oak_node::block::AdjustmentBlockBehavior>())
+		.unwrap();
+	let l_a = loaded
+		.graph
+		.get(l_adj)
+		.unwrap()
+		.behavior
+		.as_any()
+		.and_then(|a| a.downcast_ref::<oak_node::block::AdjustmentBlockBehavior>())
+		.unwrap();
+	assert_eq!(
+		loaded.graph.get(l_adj).unwrap().behavior.type_id(),
+		"org.olivevideoeditor.Olive.adjustment",
+		"adjustment type id"
+	);
+	assert_eq!(l_a.core.range, o_a.core.range, "adjustment range");
+	assert_eq!(l_a.core.track, Some(l_vtrack), "adjustment track backref");
 
 	// Audio track + clip 3.
 	let o_at = orig

@@ -25,22 +25,26 @@
 use std::sync::{Arc, Mutex};
 
 use oak_core::{Rational, TimeRange};
-use oak_node::block::{ClipBlockBehavior, GapBlockBehavior};
+use oak_node::block::{
+	transition_input::{IN_BLOCK, OUT_BLOCK},
+	ClipBlockBehavior, GapBlockBehavior, TransitionBlockBehavior,
+};
 use oak_node::project::Project;
 use oak_node::sequence::SequenceBehavior;
 use oak_node::track::{TrackBehavior, TrackListBehavior, TrackType};
 use oak_timeline::undocommon::Command;
 use oak_timeline::undogeneral::{
 	BlockResizeCommand, TimelineAddTrackCommand, TimelineRemoveTrackCommand,
-	TrackReplaceBlockWithGapCommand,
+	TrackReplaceBlockWithGapCommand, TransitionRemoveCommand, TransitionSetOffsetsCommand,
 };
 use oak_timeline::undopointer::TrackMoveBlockCommand;
 use oak_timeline::undoripple::TrackRippleRemoveAreaCommand;
 use oak_timeline::undosplit::BlockSplitCommand;
 use oak_timeline::util::{
-	block_clip_create, block_gap_create, block_in, block_length, block_out, block_track,
-	track_append_block, track_block_at, track_block_count, track_length, track_ripple_remove_block,
-	tracklist_track_count, NodeRef,
+	block_clip_create, block_connect, block_connected_input, block_gap_create, block_in,
+	block_length, block_out, block_range, block_track, track_append_block, track_block_at,
+	track_block_count, track_length, track_ripple_remove_block, tracklist_track_count,
+	transition_offsets, transition_set_offsets, NodeRef,
 };
 
 /// A project with one sequence owning one (video) track list.
@@ -132,6 +136,32 @@ fn add_gap(track: &NodeRef, in_: Rational, out: Rational) -> NodeRef {
 	}
 	track_append_block(track, &gap);
 	gap
+}
+
+/// Add a transition block spanning `[in, out)` with the given wedge
+/// offsets to `track`.
+fn add_transition(
+	track: &NodeRef,
+	in_: Rational,
+	out: Rational,
+	in_offset: Rational,
+	out_offset: Rational,
+) -> NodeRef {
+	let (core, behavior) = oak_node::block::transition_create();
+	let transition = {
+		let mut p = track.project.lock().unwrap();
+		let id = p.graph.add_node(core, behavior);
+		if let Some(a) = p.graph.get_mut(id).and_then(|e| e.behavior.as_any_mut()) {
+			if let Some(t) = a.downcast_mut::<TransitionBlockBehavior>() {
+				t.core.range = TimeRange::new(in_, out);
+				t.in_offset = in_offset;
+				t.out_offset = out_offset;
+			}
+		}
+		NodeRef::new(track.project.clone(), id)
+	};
+	track_append_block(track, &transition);
+	transition
 }
 
 /// The block span of `block` (`None` for a stale node).
@@ -478,5 +508,195 @@ fn insert_gaps_round_trip() {
 	assert_eq!(
 		span_of(&clip),
 		Some((Rational::new(0, 1), Rational::new(100, 1)))
+	);
+}
+
+/// `TransitionSetOffsetsCommand` rewrites the wedge offsets and moves the
+/// stored range with them so the block stays pinned to its seam; undo
+/// restores both.
+#[test]
+fn transition_set_offsets_round_trip() {
+	let project = make_project();
+	let (_seq, list) = sequence_and_list(&project);
+	let track = TimelineAddTrackCommand::run_immediately(list);
+	add_clip(&track, Rational::new(0, 1), Rational::new(50, 1));
+	// The transition overlaps both neighbours around the seam at 50.
+	let transition = add_transition(
+		&track,
+		Rational::new(40, 1),
+		Rational::new(60, 1),
+		Rational::new(10, 1),
+		Rational::new(10, 1),
+	);
+	add_clip(&track, Rational::new(50, 1), Rational::new(100, 1));
+
+	assert_eq!(
+		transition_offsets(&transition),
+		Some((Rational::new(10, 1), Rational::new(10, 1)))
+	);
+
+	// The helper writes both offsets directly.
+	transition_set_offsets(&transition, Rational::new(12, 1), Rational::new(8, 1));
+	assert_eq!(
+		transition_offsets(&transition),
+		Some((Rational::new(12, 1), Rational::new(8, 1)))
+	);
+	transition_set_offsets(&transition, Rational::new(10, 1), Rational::new(10, 1));
+
+	let mut cmd = TransitionSetOffsetsCommand::new(
+		transition.clone(),
+		Some(Rational::new(5, 1)),
+		Some(Rational::new(20, 1)),
+	);
+	cmd.redo();
+	assert_eq!(
+		transition_offsets(&transition),
+		Some((Rational::new(5, 1), Rational::new(20, 1)))
+	);
+	// Range follows the offsets: [seam - in, seam + out), seam = 40 + 10.
+	assert_eq!(
+		block_range(&transition),
+		Some(TimeRange::new(Rational::new(45, 1), Rational::new(70, 1)))
+	);
+
+	cmd.undo();
+	assert_eq!(
+		transition_offsets(&transition),
+		Some((Rational::new(10, 1), Rational::new(10, 1)))
+	);
+	assert_eq!(
+		block_range(&transition),
+		Some(TimeRange::new(Rational::new(40, 1), Rational::new(60, 1)))
+	);
+
+	// `None` keeps the offset on that side.
+	let mut partial =
+		TransitionSetOffsetsCommand::new(transition.clone(), Some(Rational::new(7, 1)), None);
+	partial.redo();
+	assert_eq!(
+		transition_offsets(&transition),
+		Some((Rational::new(7, 1), Rational::new(10, 1)))
+	);
+	assert_eq!(
+		block_range(&transition),
+		Some(TimeRange::new(Rational::new(43, 1), Rational::new(60, 1)))
+	);
+
+	partial.undo();
+	assert_eq!(
+		transition_offsets(&transition),
+		Some((Rational::new(10, 1), Rational::new(10, 1)))
+	);
+	assert_eq!(
+		block_range(&transition),
+		Some(TimeRange::new(Rational::new(40, 1), Rational::new(60, 1)))
+	);
+}
+
+/// `TransitionRemoveCommand` unlinks the transition from its neighbours and
+/// its two node inputs; undo puts it back between them with the offsets,
+/// the range and both edges restored.
+#[test]
+fn transition_remove_restores_offsets_and_edges() {
+	let project = make_project();
+	let (_seq, list) = sequence_and_list(&project);
+	let track = TimelineAddTrackCommand::run_immediately(list);
+	let a = add_clip(&track, Rational::new(0, 1), Rational::new(50, 1));
+	let transition = add_transition(
+		&track,
+		Rational::new(40, 1),
+		Rational::new(60, 1),
+		Rational::new(10, 1),
+		Rational::new(10, 1),
+	);
+	let b = add_clip(&track, Rational::new(50, 1), Rational::new(100, 1));
+	block_connect(&a, &transition, OUT_BLOCK);
+	block_connect(&b, &transition, IN_BLOCK);
+	assert_eq!(
+		block_connected_input(&transition, OUT_BLOCK).map(|n| n.id),
+		Some(a.id)
+	);
+	assert_eq!(track_block_count(&track), 3);
+
+	let mut cmd = TransitionRemoveCommand::new(transition.clone(), false);
+	cmd.redo();
+	// The transition left the track and both clips remain; the edges are
+	// gone too.
+	assert_eq!(track_block_count(&track), 2);
+	assert_eq!(track_block_at(&track, 0).unwrap().id, a.id);
+	assert_eq!(track_block_at(&track, 1).unwrap().id, b.id);
+	assert!(block_track(&transition).is_none());
+	assert!(block_connected_input(&transition, OUT_BLOCK).is_none());
+	assert!(block_connected_input(&transition, IN_BLOCK).is_none());
+
+	cmd.undo();
+	assert_eq!(track_block_count(&track), 3);
+	assert_eq!(track_block_at(&track, 0).unwrap().id, a.id);
+	assert_eq!(track_block_at(&track, 1).unwrap().id, transition.id);
+	assert_eq!(track_block_at(&track, 2).unwrap().id, b.id);
+	assert_eq!(block_track(&transition).map(|t| t.id), Some(track.id));
+	assert_eq!(
+		transition_offsets(&transition),
+		Some((Rational::new(10, 1), Rational::new(10, 1)))
+	);
+	assert_eq!(
+		block_range(&transition),
+		Some(TimeRange::new(Rational::new(40, 1), Rational::new(60, 1)))
+	);
+	assert_eq!(
+		block_connected_input(&transition, OUT_BLOCK).map(|n| n.id),
+		Some(a.id)
+	);
+	assert_eq!(
+		block_connected_input(&transition, IN_BLOCK).map(|n| n.id),
+		Some(b.id)
+	);
+}
+
+/// `TransitionRemoveCommand` with `remove_from_graph` detaches the node
+/// from the project graph as well; undo re-attaches it with the same
+/// identity, track slot, offsets and edges.
+#[test]
+fn transition_remove_from_graph_round_trip() {
+	let project = make_project();
+	let (_seq, list) = sequence_and_list(&project);
+	let track = TimelineAddTrackCommand::run_immediately(list);
+	let a = add_clip(&track, Rational::new(0, 1), Rational::new(50, 1));
+	let transition = add_transition(
+		&track,
+		Rational::new(40, 1),
+		Rational::new(60, 1),
+		Rational::new(10, 1),
+		Rational::new(10, 1),
+	);
+	let b = add_clip(&track, Rational::new(50, 1), Rational::new(100, 1));
+	block_connect(&a, &transition, OUT_BLOCK);
+	block_connect(&b, &transition, IN_BLOCK);
+
+	let mut cmd = TransitionRemoveCommand::new(transition.clone(), true);
+	cmd.redo();
+	assert_eq!(track_block_count(&track), 2);
+	assert!(block_track(&transition).is_none());
+	assert!(project.lock().unwrap().graph.get(transition.id).is_none());
+
+	cmd.undo();
+	assert!(project.lock().unwrap().graph.get(transition.id).is_some());
+	assert_eq!(track_block_count(&track), 3);
+	assert_eq!(track_block_at(&track, 1).unwrap().id, transition.id);
+	assert_eq!(
+		transition_offsets(&transition),
+		Some((Rational::new(10, 1), Rational::new(10, 1)))
+	);
+	assert_eq!(
+		block_range(&transition),
+		Some(TimeRange::new(Rational::new(40, 1), Rational::new(60, 1)))
+	);
+	assert_eq!(
+		block_connected_input(&transition, OUT_BLOCK).map(|n| n.id),
+		Some(a.id)
+	);
+	assert_eq!(
+		block_connected_input(&transition, IN_BLOCK).map(|n| n.id),
+		Some(b.id)
 	);
 }

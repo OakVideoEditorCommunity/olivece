@@ -22,6 +22,7 @@
 pub mod blur;
 mod chromakey;
 mod colordifferencekey;
+pub mod compositesource;
 mod cornerpindistortnode;
 mod cropdistortnode;
 mod despill;
@@ -52,7 +53,7 @@ mod shapenodebase;
 mod solid;
 mod stroke;
 mod swirldistortnode;
-mod textbackend;
+pub mod textbackend;
 mod textv1;
 mod textv2;
 mod textv3;
@@ -62,12 +63,35 @@ mod timeformat;
 mod timeinput;
 mod timeoffsetnode;
 mod timeremap;
+pub mod transitionfx;
+pub mod transitions;
 mod transformdistortnode;
 mod trigonometry;
 mod valuenode;
 mod volume;
 mod wavedistortnode;
 mod whitebalance;
+mod colormatrix;
+mod dilate;
+mod edgedetect;
+mod erode;
+mod colorcorrect;
+mod gamma;
+mod saturation;
+mod invert;
+mod clamp;
+mod grade;
+mod dirblur;
+mod sharpen;
+mod dissolve;
+mod keymix;
+mod premult;
+mod unpremult;
+mod position;
+mod mirror;
+mod checkerboard;
+mod colorbars;
+mod ramp;
 
 use crate::node::{NodeBehavior, NodeCore};
 
@@ -123,6 +147,8 @@ pub fn register_all() {
 	flipdistortnode::register(&mut meta);
 	noise::register(&mut meta);
 	timeoffsetnode::register(&mut meta);
+	transitions::register(&mut meta);
+	transitionfx::register(&mut meta);
 	cornerpindistortnode::register(&mut meta);
 	displaytransform::register(&mut meta);
 	ociogradingtransformlinear::register(&mut meta);
@@ -138,6 +164,30 @@ pub fn register_all() {
 	tiledistortnode::register(&mut meta);
 	swirldistortnode::register(&mut meta);
 	rippledistortnode::register(&mut meta);
+	colormatrix::register(&mut meta);
+	dilate::register(&mut meta);
+	edgedetect::register(&mut meta);
+	erode::register(&mut meta);
+	// The OpenFX-Misc cleanroom GPU ports (see
+	// docs/zh/plans/ofx-misc-gpu-cleanroom.md), registered after the C++
+	// menu order ends and before multicam.
+	colorcorrect::register(&mut meta);
+	gamma::register(&mut meta);
+	saturation::register(&mut meta);
+	invert::register(&mut meta);
+	clamp::register(&mut meta);
+	grade::register(&mut meta);
+	dirblur::register(&mut meta);
+	sharpen::register(&mut meta);
+	dissolve::register(&mut meta);
+	keymix::register(&mut meta);
+	premult::register(&mut meta);
+	unpremult::register(&mut meta);
+	position::register(&mut meta);
+	mirror::register(&mut meta);
+	checkerboard::register(&mut meta);
+	colorbars::register(&mut meta);
+	ramp::register(&mut meta);
 	multicamnode::register(&mut meta);
 
 	// OpenFX plugins have no static type ids (C++

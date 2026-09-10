@@ -35,7 +35,9 @@ use oak_node::id::NodeId;
 use oak_node::track::TrackType;
 use oak_render::manager::RenderManager;
 use oak_render::procpool::ShmFrameRef;
-use oak_render::ticket::{AudioTicketParams, MontageClip, TicketPayload, VideoTicketParams};
+use oak_render::ticket::{
+	AdjustmentSpan, AudioTicketParams, MontageClip, TicketPayload, VideoTicketParams,
+};
 
 use super::engine::{ExportEvent, ExportSession};
 use super::frames::{bgra_bytes_to_render_image, f32_rgba_to_bgra_image};
@@ -240,17 +242,29 @@ fn clip_effects(g: &oak_node::graph::Graph, block_id: NodeId) -> Vec<oak_render:
 		.collect()
 }
 
-/// The video montage at sequence time `time`: every clip covering `time`
+/// The video montage at sequence time `time`, together with the
+/// adjustment layers over that time (M14 W3): every clip covering `time`
 /// on video tracks, ordered bottom-to-top (the highest-numbered track —
 /// the list's last — is topmost, so it is composited last; NLE stacking
 /// matches the timeline UI, which shows the highest-numbered track on
 /// top). Hidden tracks (the muted flag doubles as the video visibility
 /// toggle, Olive parity) contribute nothing.
-pub fn video_montage(p: &ProjectRef, seq: NodeId, time: Rational) -> Vec<MontageClip> {
+///
+/// The adjustment spans come out in the same bottom-up walk order (their
+/// `track_index` boundaries are therefore non-decreasing) and, exactly
+/// like the graph path, an enabled adjustment block covering `time`
+/// takes over its track: the span is emitted and the track's own clips
+/// are skipped, whether or not the adjustment's chain has any effects.
+pub fn video_montage_with_adjustments(
+	p: &ProjectRef,
+	seq: NodeId,
+	time: Rational,
+) -> (Vec<MontageClip>, Vec<AdjustmentSpan>) {
 	let g = lock(p);
 	let mut clips = Vec::new();
+	let mut adjustments = Vec::new();
 	let Some(s) = sequence_behavior(&g.graph, seq) else {
-		return clips;
+		return (clips, adjustments);
 	};
 	for &list_id in &s.track_lists {
 		let Some(list) = track_list_behavior(&g.graph, list_id) else {
@@ -264,6 +278,13 @@ pub fn video_montage(p: &ProjectRef, seq: NodeId, time: Rational) -> Vec<Montage
 				continue;
 			};
 			if track.muted {
+				continue;
+			}
+			// Everything composited so far sits under this track, so the
+			// span's boundary is the clip count before the track's own
+			// clips join the list.
+			if let Some(span) = covering_adjustment(&g.graph, &track.blocks, time, clips.len()) {
+				adjustments.push(span);
 				continue;
 			}
 			for &block_id in &track.blocks {
@@ -305,7 +326,51 @@ pub fn video_montage(p: &ProjectRef, seq: NodeId, time: Rational) -> Vec<Montage
 			}
 		}
 	}
-	clips
+	(clips, adjustments)
+}
+
+/// The video montage at sequence time `time`. The adjustment layers are
+/// dropped; callers that render (as opposed to previewing the clip list)
+/// want [`video_montage_with_adjustments`].
+pub fn video_montage(p: &ProjectRef, seq: NodeId, time: Rational) -> Vec<MontageClip> {
+	video_montage_with_adjustments(p, seq, time).0
+}
+
+/// The adjustment span `blocks` contributes at `time`, if any: the first
+/// enabled adjustment block covering `time` — the graph path's track
+/// takeover rule (`render_graph_frame`), so both paths agree on which
+/// blocks are layers and which track each takes over. `below` is the
+/// number of clips already composited from the tracks underneath (the
+/// span's montage-list boundary).
+fn covering_adjustment(
+	g: &oak_node::graph::Graph,
+	blocks: &[NodeId],
+	time: Rational,
+	below: usize,
+) -> Option<AdjustmentSpan> {
+	for &block_id in blocks {
+		let Some(block) = g.get(block_id) else {
+			continue;
+		};
+		let Some(adjustment) = block
+			.behavior
+			.as_any()
+			.and_then(|a| a.downcast_ref::<oak_node::block::AdjustmentBlockBehavior>())
+		else {
+			continue;
+		};
+		let in_ = adjustment.core.in_();
+		let out = adjustment.core.out();
+		if adjustment.core.enabled && time >= in_ && time < out {
+			return Some(AdjustmentSpan {
+				in_time: in_,
+				out_time: out,
+				track_index: below,
+				effects: clip_effects(g, block_id),
+			});
+		}
+	}
+	None
 }
 
 /// The video montage at sequence time `time` containing ONLY the clip on
@@ -403,6 +468,7 @@ pub fn multicam_angle_frame_params(
 		cache_timebase: None,
 		footage: None,
 		montage: single_track_video_montage(p, seq, track, time),
+		adjustments: Vec::new(),
 	})
 }
 
@@ -810,9 +876,10 @@ pub fn sequence_frame_params(
 	// 720p proxy up to a 1080p target.
 	let (width, height) = clamp_render_size(width, height, &proxy_limits_at(p, seq, time));
 	// Bind the uuid before the literal: an inline `lock(p)` temporary in the
-	// block-tail struct expression would still be alive when `video_montage`
-	// re-locks the project, deadlocking the same thread.
+	// block-tail struct expression would still be alive when the montage
+	// builder re-locks the project, deadlocking the same thread.
 	let project = lock(p).uuid.clone();
+	let (montage, adjustments) = video_montage_with_adjustments(p, seq, time);
 	Ok(VideoTicketParams {
 		viewer: seq.identity(),
 		project,
@@ -824,7 +891,8 @@ pub fn sequence_frame_params(
 		cache_id: None,
 		cache_timebase: None,
 		footage: None,
-		montage: video_montage(p, seq, time),
+		montage,
+		adjustments,
 	})
 }
 
@@ -891,6 +959,7 @@ pub fn footage_frame_params(
 		cache_timebase: None,
 		footage: Some((filename, stream_index)),
 		montage: Vec::new(),
+		adjustments: Vec::new(),
 	})
 }
 
@@ -1412,6 +1481,7 @@ mod tests {
 			cache_timebase: None,
 			footage: None,
 			montage,
+			adjustments: Vec::new(),
 		};
 		let mut dst = vec![0u8; 64 * 64 * 16];
 		oak_render::eval::render_montage_frame_into(time, &params, (64, 64), &mut dst, 64 * 16)
@@ -1488,6 +1558,7 @@ mod tests {
 				cache_timebase: None,
 				footage: None,
 				montage,
+				adjustments: Vec::new(),
 			};
 			let mut dst = vec![0u8; 64 * 64 * 16];
 			oak_render::eval::render_montage_frame_into(time, &params, (64, 64), &mut dst, 64 * 16)
@@ -1553,6 +1624,349 @@ mod tests {
 
 		oak_undo::global::clear().unwrap();
 		let _ = std::fs::remove_file(&media);
+	}
+
+	/// An adjustment-layer block spanning `[in_ts, out_ts)` on `track`
+	/// carrying one Opacity effect at `opacity` — the timeline's
+	/// adjustment-layer drop plus the effect library's append, wired the
+	/// way the inspector does it. Returns `(block, effect)`.
+	fn adjustment_layer_with_opacity(
+		p: &ProjectRef,
+		seq: NodeId,
+		track: NodeId,
+		in_ts: i64,
+		out_ts: i64,
+		opacity: f64,
+	) -> (NodeId, NodeId) {
+		let (tb, in_r) = {
+			let g = lock(p);
+			let tb = graphops::sequence_time_base(&g.graph, seq).expect("the sequence has a timebase");
+			(tb, graphops::ts_to_rational(in_ts, tb))
+		};
+		let block = {
+			let mut g = lock(p);
+			let (core, behavior) = oak_node::block::adjustment_create();
+			let id = g.graph.add_node(core, behavior);
+			let entry = g.graph.get_mut(id).expect("the new block");
+			let adjustment = entry
+				.behavior
+				.as_any_mut()
+				.and_then(|a| a.downcast_mut::<oak_node::block::AdjustmentBlockBehavior>())
+				.expect("an adjustment behavior");
+			adjustment.core.range = TimeRange::new(in_r, graphops::ts_to_rational(out_ts, tb));
+			id
+		};
+		let (list, index) = {
+			let g = lock(p);
+			let list = graphops::track_behavior(&g.graph, track)
+				.and_then(|t| t.track_list)
+				.expect("the track has a list");
+			let index = graphops::track_list_behavior(&g.graph, list)
+				.and_then(|l| l.tracks.iter().position(|&t| t == track))
+				.expect("the track is in its list") as i32;
+			(list, index)
+		};
+		graphops::push_command(
+			oak_timeline::undopointer::TrackPlaceBlockCommand::new(
+				graphops::node_ref(p, list),
+				index,
+				graphops::node_ref(p, block),
+				in_r,
+			)
+			.to_command(),
+			"Add Adjustment Layer",
+		)
+		.expect("place the adjustment layer");
+		let fx = crate::oakui::effectchain::insert(
+			p,
+			block,
+			usize::MAX,
+			"org.olivevideoeditor.Olive.opacity",
+		)
+		.expect("append the opacity effect");
+		crate::oakui::effectchain::set_input_value(
+			p,
+			fx,
+			"opacity_in",
+			oak_node::value::NodeValue::Float(opacity),
+		)
+		.expect("set the opacity value");
+		(block, fx)
+	}
+
+	/// M14 W3 montage path: an adjustment layer ABOVE the clip stack
+	/// grades the frame accumulated underneath it — a 50% Opacity on the
+	/// layer halves every channel (alpha included) of the accumulated
+	/// composite, and only inside the layer's range.
+	#[test]
+	fn montage_adjustment_span_halves_the_accumulated_frame() {
+		let _media = media_lock();
+		// Pin the legacy sRGB pass-through (see the effect-stack test) so the
+		// pixel assertions below do not depend on the ACEScg default.
+		oak_core::color::set_pipeline_color_settings(
+			oak_core::colormath::WorkingColorSpace::SrgbLegacy,
+			oak_core::colormath::OutputColorSpec::default(),
+		);
+		oak_undo::global::clear().unwrap();
+		let red = std::env::temp_dir().join(format!("oakapp_adj_red_{}.mp4", std::process::id()));
+		let blue = std::env::temp_dir().join(format!("oakapp_adj_blue_{}.mp4", std::process::id()));
+		oak_codec::testmedia::write_test_clip_solid(&red, 64, 64, 10, 10, [0.9, 0.1, 0.1, 1.0])
+			.expect("generate the red media");
+		oak_codec::testmedia::write_test_clip_solid(&blue, 64, 64, 10, 10, [0.1, 0.1, 0.9, 1.0])
+			.expect("generate the blue media");
+
+		let project = graphops::create_project();
+		let seq = graphops::create_sequence(&project, "Adjustment Montage");
+		let red_footage = graphops::import_footage(&project, &red).expect("import the red media");
+		let blue_footage = graphops::import_footage(&project, &blue).expect("import the blue media");
+		graphops::place_footage_clip(&project, seq, red_footage, TrackType::Video, 0, 0, 10, 0)
+			.expect("place the V1 (red) clip");
+		graphops::place_footage_clip(&project, seq, blue_footage, TrackType::Video, 1, 0, 10, 0)
+			.expect("place the V2 (blue) clip");
+		// A third video track (V3, above both clips) carries the layer.
+		graphops::add_track(&project, seq, TrackType::Video).expect("add the adjustment track");
+		let adj_track = {
+			let g = lock(&project);
+			graphops::track_ids(&g.graph, seq, TrackType::Video)[2]
+		};
+		let (adj, _fx) = adjustment_layer_with_opacity(&project, seq, adj_track, 3, 7, 0.5);
+
+		let tb = graphops::sequence_time_base(&lock(&project).graph, seq).unwrap();
+		let at = |frame: i64| graphops::ts_to_rational(frame, tb);
+		let render = |montage: Vec<MontageClip>, adjustments: Vec<AdjustmentSpan>, at_time: Rational| {
+			let params = VideoTicketParams {
+				viewer: 0,
+				project: String::new(),
+				time: at_time,
+				force_size: Some((64, 64)),
+				force_format: Some(oak_core::PixelFormat::F32),
+				cache: None,
+				cache_dir: None,
+				cache_id: None,
+				cache_timebase: None,
+				footage: None,
+				montage,
+				adjustments,
+			};
+			let mut dst = vec![0u8; 64 * 64 * 16];
+			oak_render::eval::render_montage_frame_into(
+				params.time,
+				&params,
+				(64, 64),
+				&mut dst,
+				64 * 16,
+			)
+			.expect("montage render");
+			dst
+		};
+		let pixel = |frame: &[u8]| {
+			let off = (8 * 64 + 8) * 16;
+			[0, 1, 2, 3]
+				.map(|i| f32::from_le_bytes(frame[off + i * 4..off + i * 4 + 4].try_into().unwrap()))
+		};
+
+		// Inside the layer's range the span rides the ticket, above the stack.
+		let (montage, spans) = video_montage_with_adjustments(&project, seq, at(5));
+		assert_eq!(montage.len(), 2, "both clips cover frame 5");
+		assert_eq!(spans.len(), 1, "the layer emits one span");
+		assert_eq!(
+			spans[0].track_index,
+			montage.len(),
+			"the layer sits above every clip (it grades the whole composite)"
+		);
+		assert_eq!(spans[0].effects.len(), 1, "the layer's stack rides the span");
+		assert_eq!(spans[0].effects[0].type_id, "org.olivevideoeditor.Olive.opacity");
+
+		let baseline = render(montage.clone(), Vec::new(), at(5));
+		let graded = render(montage.clone(), spans, at(5));
+		let (b, g) = (pixel(&baseline), pixel(&graded));
+		assert!(
+			b[2] > 0.6 && b[3] > 0.9,
+			"the baseline shows V2's opaque blue on top (b={}, a={})",
+			b[2],
+			b[3]
+		);
+		for i in 0..4 {
+			assert!(
+				(g[i] - b[i] * 0.5).abs() < 0.06,
+				"the layer halves channel {i} ({}, expected {})",
+				g[i],
+				b[i] * 0.5
+			);
+		}
+
+		// Outside the layer's range no span is emitted and the render is
+		// byte-for-byte the plain montage.
+		for frame in [1, 8] {
+			let (m, s) = video_montage_with_adjustments(&project, seq, at(frame));
+			assert_eq!(m.len(), 2, "both clips still cover frame {frame}");
+			assert!(s.is_empty(), "frame {frame} is outside the layer's range");
+			assert_eq!(
+				render(m.clone(), s, at(frame)),
+				render(m, Vec::new(), at(frame)),
+				"frame {frame} renders ungraded"
+			);
+		}
+
+		// A disabled layer is not a layer at all: no span, and the frame is
+		// the plain composite (the graph path's enabled check).
+		{
+			let mut g = lock(&project);
+			let entry = g.graph.get_mut(adj).expect("the layer block");
+			entry
+				.behavior
+				.as_any_mut()
+				.and_then(|a| a.downcast_mut::<oak_node::block::AdjustmentBlockBehavior>())
+				.expect("an adjustment behavior")
+				.core
+				.enabled = false;
+		}
+		let (m, s) = video_montage_with_adjustments(&project, seq, at(5));
+		assert_eq!(m.len(), 2, "the clips stay in the montage");
+		assert!(s.is_empty(), "a disabled layer emits no span");
+
+		oak_undo::global::clear().unwrap();
+		let _ = std::fs::remove_file(&red);
+		let _ = std::fs::remove_file(&blue);
+	}
+
+	/// M14 W3 montage path: a layer BELOW a clip grades only the tracks
+	/// underneath it — the span's boundary is the montage index reached
+	/// when the clips under the layer are composited, so V3's clip lands
+	/// over the graded result instead of being graded itself.
+	#[test]
+	fn montage_adjustment_span_grades_only_the_tracks_below_it() {
+		let _media = media_lock();
+		oak_core::color::set_pipeline_color_settings(
+			oak_core::colormath::WorkingColorSpace::SrgbLegacy,
+			oak_core::colormath::OutputColorSpec::default(),
+		);
+		oak_undo::global::clear().unwrap();
+		let red = std::env::temp_dir().join(format!("oakapp_adjlow_red_{}.mp4", std::process::id()));
+		let blue =
+			std::env::temp_dir().join(format!("oakapp_adjlow_blue_{}.mp4", std::process::id()));
+		oak_codec::testmedia::write_test_clip_solid(&red, 64, 64, 10, 10, [0.9, 0.1, 0.1, 1.0])
+			.expect("generate the red media");
+		oak_codec::testmedia::write_test_clip_solid(&blue, 64, 64, 10, 10, [0.1, 0.1, 0.9, 1.0])
+			.expect("generate the blue media");
+
+		let project = graphops::create_project();
+		let seq = graphops::create_sequence(&project, "Mid Adjustment Montage");
+		let red_footage = graphops::import_footage(&project, &red).expect("import the red media");
+		let blue_footage = graphops::import_footage(&project, &blue).expect("import the blue media");
+		graphops::place_footage_clip(&project, seq, red_footage, TrackType::Video, 0, 0, 10, 0)
+			.expect("place the V1 (red) clip");
+		graphops::add_track(&project, seq, TrackType::Video).expect("add the adjustment track");
+		let adj_track = {
+			let g = lock(&project);
+			graphops::track_ids(&g.graph, seq, TrackType::Video)[1]
+		};
+		let (_adj, _fx) = adjustment_layer_with_opacity(&project, seq, adj_track, 0, 5, 0.5);
+		// V3's clip carries its own 50% Opacity so the composite keeps both
+		// contributions visible (an opaque top clip would hide the grading).
+		let blue_clip =
+			graphops::place_footage_clip(&project, seq, blue_footage, TrackType::Video, 2, 0, 10, 0)
+				.expect("place the V3 (blue) clip");
+		let clip_fx = crate::oakui::effectchain::insert(
+			&project,
+			blue_clip,
+			usize::MAX,
+			"org.olivevideoeditor.Olive.opacity",
+		)
+		.expect("append the clip's opacity effect");
+		crate::oakui::effectchain::set_input_value(
+			&project,
+			clip_fx,
+			"opacity_in",
+			oak_node::value::NodeValue::Float(0.5),
+		)
+		.expect("set the clip opacity value");
+
+		let tb = graphops::sequence_time_base(&lock(&project).graph, seq).unwrap();
+		let time = graphops::ts_to_rational(0, tb);
+		let render = |montage: Vec<MontageClip>, adjustments: Vec<AdjustmentSpan>, at_time: Rational| {
+			let params = VideoTicketParams {
+				viewer: 0,
+				project: String::new(),
+				time: at_time,
+				force_size: Some((64, 64)),
+				force_format: Some(oak_core::PixelFormat::F32),
+				cache: None,
+				cache_dir: None,
+				cache_id: None,
+				cache_timebase: None,
+				footage: None,
+				montage,
+				adjustments,
+			};
+			let mut dst = vec![0u8; 64 * 64 * 16];
+			oak_render::eval::render_montage_frame_into(
+				at_time,
+				&params,
+				(64, 64),
+				&mut dst,
+				64 * 16,
+			)
+			.expect("montage render");
+			dst
+		};
+		let pixel = |frame: &[u8]| {
+			let off = (8 * 64 + 8) * 16;
+			[0, 1, 2, 3]
+				.map(|i| f32::from_le_bytes(frame[off + i * 4..off + i * 4 + 4].try_into().unwrap()))
+		};
+
+		let (montage, spans) = video_montage_with_adjustments(&project, seq, time);
+		// V2 is taken over by the layer (no clips there), so the montage is
+		// V1's red then V3's blue, and the boundary sits between them.
+		assert_eq!(montage.len(), 2, "the two clips cover frame 0");
+		assert!(montage[0].effects.is_empty(), "the red clip has no stack");
+		assert_eq!(montage[1].effects.len(), 1, "the blue clip's own stack rides it");
+		assert_eq!(spans.len(), 1, "the layer emits one span");
+		assert_eq!(spans[0].track_index, 1, "the layer grades only V1's clip");
+		assert!(!spans[0].effects.is_empty(), "the layer carries its opacity");
+
+		let baseline = pixel(&render(montage.clone(), Vec::new(), time));
+		let graded = pixel(&render(montage.clone(), spans.clone(), time));
+		// Blue at 50% alpha over red: r = 0.05*0.5 + 0.9*0.5 = 0.475,
+		// a = 0.5 + 1.0*0.5 = 1.0. With the layer the red underneath is
+		// halved first: r = 0.05*0.5 + 0.45*0.5 = 0.25, a = 0.5 + 0.5*0.5 = 0.75.
+		assert!(
+			(baseline[0] - 0.475).abs() < 0.06 && (baseline[3] - 1.0).abs() < 0.06,
+			"the plain composite is blue over red (r={}, a={})",
+			baseline[0],
+			baseline[3]
+		);
+		assert!(
+			(graded[0] - 0.25).abs() < 0.06,
+			"only the red underneath is halved (r={}, expected 0.25)",
+			graded[0]
+		);
+		assert!(
+			(graded[3] - 0.75).abs() < 0.06,
+			"the layer's alpha halving shows through the 50% top clip (a={}, expected 0.75)",
+			graded[3]
+		);
+
+		// The layer is a layer only through the range it covers: past frame 5
+		// the clips still composite but no span is emitted, and a stale span
+		// (one carried outside its range) is inert.
+		let late = graphops::ts_to_rational(6, tb);
+		let stale = spans.clone();
+		let (m, s) = video_montage_with_adjustments(&project, seq, late);
+		assert_eq!(m.len(), 2, "the clips still cover frame 6");
+		assert!(s.is_empty(), "the layer's range ends at frame 5");
+		assert_eq!(m[0].effects.len(), 0, "the red clip still has no stack");
+		let stale_render = render(m.clone(), stale, late);
+		assert_eq!(
+			stale_render,
+			render(m, Vec::new(), late),
+			"a span whose range misses the ticket's time renders ungraded"
+		);
+
+		oak_undo::global::clear().unwrap();
+		let _ = std::fs::remove_file(&red);
+		let _ = std::fs::remove_file(&blue);
 	}
 
 	/// A multi-cam HOST clip's montage media is the CURRENT source's angle
@@ -1662,6 +2076,7 @@ mod tests {
 			cache_timebase: None,
 			footage: None,
 			montage,
+			adjustments: Vec::new(),
 		};
 		let mut dst = vec![0u8; 64 * 64 * 16];
 		oak_render::eval::render_montage_frame_into(
@@ -1872,6 +2287,7 @@ mod tests {
 						cache_timebase: None,
 						footage: None,
 						montage,
+						adjustments: Vec::new(),
 					};
 					let mut dst = vec![0u8; 64 * 64 * 16];
 					oak_render::eval::render_montage_frame_into(

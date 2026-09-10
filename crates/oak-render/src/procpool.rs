@@ -2471,6 +2471,11 @@ fn build_ticket_spec(
 		footage_file,
 		footage_stream,
 		montage,
+		adjustments: params
+			.adjustments
+			.iter()
+			.map(crate::ipc::wire_adjustment_from)
+			.collect(),
 		// M16 S1 graph mode: the worker renders the viewer's graph frame
 		// when nonzero (else the montage path above) — and only when the
 		// ticket's project matches the worker's loaded snapshot (the

@@ -172,7 +172,13 @@ pub struct RenderEvalHooks {
     /// size as a paused full-res frame. `None` (non-sequence renders)
     /// falls back to the render-target size.
     pub sequence_size: Option<(i32, i32)>,
-
+    /// Position of the adjustment layer currently being swept, in
+    /// `0.0..=1.0` (C++ the adjustment/transition `progress_in` uniform).
+    /// [`render_graph_frame`] sets this for the duration of one adjustment
+    /// block's evaluation, so a chain hanging off an adjustment layer can
+    /// fade its result across the layer's span. Only shaders declaring a
+    /// `progress_in` uniform consume it.
+    pub layer_progress: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +289,7 @@ impl RenderEvalHooks {
             ticket: None,
             frame_size: None,
             sequence_size: None,
+            layer_progress: None,
         }
     }
 
@@ -813,22 +820,42 @@ impl RenderEvalHooks {
         // visibly changes size whenever the transport stops. Pre-filling
         // the row wins over `run_effect`'s frame-size auto-fill; a node
         // that inserted its own `resolution_in` keeps it.
-        let mut sequence_row;
-        let params = if self.sequence_size.is_some()
+        //
+        // `progress_in` is the same pre-fill for the adjustment-layer
+        // sweep: a shader declaring the uniform receives the layer
+        // progress the graph driver recorded for this evaluation. The
+        // row is only cloned when something actually needs inserting.
+        let mut anchored_row;
+        let needs_resolution = self.sequence_size.is_some()
             && !payload.params.contains_key("resolution_in")
             && compiled
                 .translated
                 .uniforms
                 .iter()
-                .any(|u| u.name == "resolution_in")
-        {
-            let (w, h) = self.sequence_size.unwrap();
-            sequence_row = payload.params.clone();
-            sequence_row.insert(
-                "resolution_in".to_string(),
-                NodeValue::Vec2([w as f64, h as f64]),
-            );
-            &sequence_row
+                .any(|u| u.name == "resolution_in");
+        let needs_progress = self.layer_progress.is_some()
+            && !payload.params.contains_key("progress_in")
+            && compiled
+                .translated
+                .uniforms
+                .iter()
+                .any(|u| u.name == "progress_in");
+        let params = if needs_resolution || needs_progress {
+            anchored_row = payload.params.clone();
+            if needs_resolution {
+                let (w, h) = self.sequence_size.unwrap();
+                anchored_row.insert(
+                    "resolution_in".to_string(),
+                    NodeValue::Vec2([w as f64, h as f64]),
+                );
+            }
+            if needs_progress {
+                anchored_row.insert(
+                    "progress_in".to_string(),
+                    NodeValue::Float(self.layer_progress.unwrap()),
+                );
+            }
+            &anchored_row
         } else {
             &payload.params
         };
@@ -1396,12 +1423,272 @@ fn composite_tracks(frames: Vec<Frame>, size: (i32, i32)) -> Frame {
     acc
 }
 
+/// One video track's contribution to [`render_graph_frame`], resolved
+/// before any evaluation so the project lock is only borrowed immutably
+/// (the adjustment sweep needs `&mut` on the very same graph).
+enum TrackRenderStep {
+    /// The track's enabled clips covering the frame time.
+    Clips(Vec<oak_node::id::NodeId>),
+    /// The track's enabled transition block covering the frame time: the
+    /// two blocks it joins are evaluated at `time` and blended with the
+    /// transition's shader. `progress` is the block's position across its
+    /// own span, in `0..=1` (`0.0` shows `out_block`, `1.0` shows
+    /// `in_block`); `shader` is the style id the block's `type_in` combo
+    /// selects.
+    Transition {
+        block: oak_node::id::NodeId,
+        out_block: oak_node::id::NodeId,
+        in_block: oak_node::id::NodeId,
+        progress: f64,
+        shader: &'static str,
+    },
+    /// The track's enabled adjustment block covering the frame time: run
+    /// its effect chain over every frame collected below and let the
+    /// result replace them (C++ adjustment layers affect everything
+    /// underneath). `progress` is the block's position across its own
+    /// span, in `0..=1`.
+    Adjustment {
+        block: oak_node::id::NodeId,
+        progress: f64,
+    },
+}
+
+/// Where `time` sits inside `in_..out`, in `0..=1` (the adjustment
+/// layer's `progress_in`). A degenerate span reports 0.
+fn layer_progress(in_: Rational, out: Rational, time: Rational) -> f64 {
+    let (in_, out, time) = (in_.to_f64(), out.to_f64(), time.to_f64());
+    if out > in_ {
+        ((time - in_) / (out - in_)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Evaluate one block at `time` and read its texture back to a CPU
+/// frame. Every non-texture outcome — the evaluator produced no texture
+/// channel, the handle is null, or the read-back failed — is `Ok(None)`
+/// so a caller can fall back instead of failing the whole frame.
+fn evaluate_block_frame(
+    graph: &oak_node::graph::Graph,
+    traverser: &mut oak_node::traverser::Traverser,
+    hooks: &mut RenderEvalHooks,
+    block: oak_node::id::NodeId,
+    time: Rational,
+) -> Result<Option<Frame>> {
+    let request = oak_node::traverser::EvalRequest::new(block, time);
+    let table = traverser.evaluate(graph, &request, hooks).map_err(|e| {
+        Error::Failed(format!(
+            "graph evaluation of block {block:?} failed: {e:?}"
+        ))
+    })?;
+    let Some(NodeValue::Texture(handle)) = table.get(oak_node::value::ValueType::Texture) else {
+        return Ok(None);
+    };
+    if handle.ctx.is_null() {
+        return Ok(None);
+    }
+    let Some(texture) = (unsafe { oak_node::handle::get_checked::<Texture>(handle) }).cloned() else {
+        return Ok(None);
+    };
+    match texture.to_frame() {
+        Ok(frame) => Ok(Some(frame)),
+        Err(err) => {
+            eprintln!("graph sequence: texture read-back failed: {err:#}");
+            Ok(None)
+        }
+    }
+}
+
+/// Blend the two sides of a transition block at `time` with the block's
+/// style shader: evaluate both sides, box a [`ShaderJobPayload`] carrying
+/// the pair and the progress factor, and run it through the render
+/// seam's shader-job path (the transition node behavior supplies the
+/// fragment source for the shader id). `None` when a side produced no
+/// texture or the job could not run (no GPU context, compile failure) —
+/// the caller then falls back to the side that natively covers `time`.
+fn blend_transition(
+    graph: &oak_node::graph::Graph,
+    traverser: &mut oak_node::traverser::Traverser,
+    hooks: &mut RenderEvalHooks,
+    out_block: oak_node::id::NodeId,
+    in_block: oak_node::id::NodeId,
+    time: Rational,
+    progress: f64,
+    shader: &str,
+) -> Result<Option<Frame>> {
+    use oak_node::nodes::transitions;
+    use oak_node::value::NodeValueRow;
+
+    let from = evaluate_block_frame(graph, traverser, hooks, out_block, time)?;
+    let to = evaluate_block_frame(graph, traverser, hooks, in_block, time)?;
+
+    // Both sides present: blend them. The side frames are boxed as CPU
+    // textures (the shader-job path uploads those into scratch textures
+    // for the pass and releases them afterwards), so the originals stay
+    // around for the fallback below.
+    let blended = match (from.as_ref(), to.as_ref()) {
+        (Some(from), Some(to)) => {
+            let payload = ShaderJobPayload {
+                node_id: oak_node::id::NodeId::INVALID,
+                time,
+                iterations: 1,
+                type_id: "org.olivevideoeditor.Olive.transition".to_string(),
+                shader_id: shader.to_string(),
+                effect_input: String::new(),
+                params: NodeValueRow::from([
+                    (
+                        transitions::TEXTURE_INPUT.to_string(),
+                        texture_value(Texture::wrap_frame(from.clone())),
+                    ),
+                    (
+                        transitions::BLEND_INPUT.to_string(),
+                        texture_value(Texture::wrap_frame(to.clone())),
+                    ),
+                    (
+                        transitions::PROGRESS_INPUT.to_string(),
+                        NodeValue::Float(progress),
+                    ),
+                ]),
+                iterative_input: String::new(),
+            };
+            match hooks.process_shader_job(&payload) {
+                Some(texture) => match texture.to_frame() {
+                    Ok(frame) => Some(frame),
+                    Err(err) => {
+                        eprintln!("graph sequence: transition read-back failed: {err:#}");
+                        None
+                    }
+                },
+                None => None,
+            }
+        }
+        _ => None,
+    };
+
+    // Fallback: without a blend (a missing side, or a shader job that
+    // could not run) show the side that natively covers `time` — the
+    // outgoing block before the cut, the incoming one at or after it.
+    Ok(blended.or_else(|| if progress < 0.5 { from } else { to }))
+}
+
+/// Walk an adjustment block's effect chain to its head: the first node
+/// whose effect input has no upstream — the node a sweep must feed the
+/// composited lower layers into. Returns that node and the input id to
+/// connect on it. `None` when there is no chain (a bare adjustment layer
+/// contributes nothing and is skipped entirely) or when the walk cannot
+/// reach a head (unconnected effect input, or a cycle).
+fn adjustment_chain_head(
+    graph: &oak_node::graph::Graph,
+    block: oak_node::id::NodeId,
+) -> Option<(oak_node::id::NodeId, String)> {
+    let mut visited = std::collections::HashSet::new();
+    let mut node = block;
+    loop {
+        if !visited.insert(node) {
+            return None;
+        }
+        let entry = graph.get(node)?;
+        let input = entry.core.effect_input.clone();
+        if input.is_empty() || entry.core.get_input(&input).is_none() {
+            return None;
+        }
+        match graph.connected_output(node, &input, -1) {
+            Some(upstream) => node = upstream,
+            // The block's own effect input is open: nothing to run.
+            None if node == block => return None,
+            None => return Some((node, input)),
+        }
+    }
+}
+
+/// Run the effect chain of the adjustment `block` over `below` (the
+/// frames of every track underneath it, topmost first): composite them,
+/// stand up a temporary texture source holding the result, wire it into
+/// the chain head, evaluate the block, and tear the temporary node back
+/// down before returning — the graph is part of the live project, so
+/// anything inspecting it concurrently must never see a half-wired
+/// sweep.
+///
+/// `Ok(None)` means the boundary changes nothing (no effect chain, or the
+/// chain produced no readable texture); `Ok(Some(frame))` is the chain's
+/// output, which replaces the lower layers.
+fn flush_adjustment_layer(
+    graph: &mut oak_node::graph::Graph,
+    traverser: &mut oak_node::traverser::Traverser,
+    hooks: &mut RenderEvalHooks,
+    block: oak_node::id::NodeId,
+    below: &[Frame],
+    size: (i32, i32),
+    time: Rational,
+    progress: f64,
+) -> Result<Option<Frame>> {
+    let Some((head, head_input)) = adjustment_chain_head(graph, block) else {
+        return Ok(None);
+    };
+    let below = composite_tracks(below.to_vec(), size);
+    let (core, behavior) = oak_node::nodes::compositesource::create();
+    let source = graph.add_node(core, behavior);
+    if let Some(entry) = graph.get_mut(source) {
+        entry.core.set_standard_value(
+            oak_node::nodes::compositesource::TEXTURE_INPUT,
+            -1,
+            texture_value(Texture::wrap_frame(below)),
+        );
+    }
+    if let Err(err) = graph.connect(source, head, &head_input, -1) {
+        let _ = graph.remove_node(source);
+        return Err(Error::Failed(format!(
+            "adjustment layer {block:?}: cannot feed {head_input} of {head:?}: {err:?}"
+        )));
+    }
+    hooks.layer_progress = Some(progress);
+    let evaluated =
+        traverser.evaluate(graph, &oak_node::traverser::EvalRequest::new(block, time), hooks);
+    hooks.layer_progress = None;
+    let _ = graph.remove_node(source);
+    let table = evaluated.map_err(|e| {
+        Error::Failed(format!(
+            "graph evaluation of adjustment layer {block:?} failed: {e:?}"
+        ))
+    })?;
+    let Some(NodeValue::Texture(handle)) = table.get(oak_node::value::ValueType::Texture) else {
+        return Ok(None);
+    };
+    if handle.ctx.is_null() {
+        return Ok(None);
+    }
+    let Some(texture) = (unsafe { oak_node::handle::get_checked::<Texture>(handle) }).cloned()
+    else {
+        return Ok(None);
+    };
+    match texture.to_frame() {
+        Ok(frame) => Ok(Some(frame)),
+        Err(err) => {
+            eprintln!("graph sequence: adjustment layer read-back failed: {err:#}");
+            Ok(None)
+        }
+    }
+}
+
 /// Render one frame of `viewer` (a sequence) at `time`: evaluate every
 /// enabled clip overlapping `time` through the node graph (one traverser
 /// pass per clip; the hooks' decoder cache is shared across clips) and
 /// composite the resulting frames bottommost-first — in the video track
 /// list the LAST track (the highest-numbered one) is the topmost stack
 /// element (NLE stacking, matching the timeline UI).
+///
+/// A track whose enabled adjustment block covers `time` contributes an
+/// adjustment sweep (see [`flush_adjustment_layer`]) instead of its clips:
+/// everything collected below is composited and pushed through the block's
+/// effect chain, and the result replaces the layer stack underneath, so a
+/// single block affects every lower track at once.
+///
+/// A track whose enabled transition block covers `time` contributes one
+/// blended frame (see [`blend_transition`]) instead of the clip that
+/// covers `time` on its own: both blocks the transition joins are
+/// evaluated and mixed by the style shader the block's `type_in` combo
+/// selects. An adjustment block still wins over a transition on the same
+/// track.
 ///
 /// `size` is the decode target for every clip, so all frames composite
 /// without per-frame scaling. Errors: `Invalid` for a non-F32 format or a
@@ -1420,62 +1707,166 @@ pub fn render_graph_frame(
     if w <= 0 || h <= 0 {
         return Err(Error::Invalid);
     }
-    let graph = &project.lock().unwrap().graph;
-    let entry = graph.get(viewer).ok_or(Error::NotFound)?;
-    let sequence = entry
-        .behavior
-        .as_any()
-        .and_then(|a| a.downcast_ref::<oak_node::sequence::SequenceBehavior>())
-        .ok_or(Error::NotFound)?;
+    let mut project_guard = project.lock().unwrap();
 
-    // Collect the clips covering `time`: the sequence's track lists (video
-    // then audio — C++ `Sequence` keeps them in the `k_track_input_format`
-    // array order), the video list's tracks topmost-first (the list's last
-    // track is the top of the stack; `composite_tracks` walks the frames in
-    // reverse and draws the first frame last), then each track's blocks.
-    let mut clips: Vec<oak_node::id::NodeId> = Vec::new();
-    for tl_id in &sequence.track_lists {
-        let Some(tl) = graph.get(*tl_id) else {
-            continue;
-        };
-        let Some(tl) = tl
+    // Plan the video tracks bottommost-first, one step per track: the
+    // sequence's track lists (video then audio — C++ `Sequence` keeps them
+    // in the `k_track_input_format` array order), the video list's tracks
+    // in stacking order (the list's last track is the top of the stack;
+    // `composite_tracks` walks the frames in reverse and draws the first
+    // frame last), then each track's blocks. The plan holds plain ids so
+    // the evaluation pass below can borrow the graph mutably for an
+    // adjustment sweep's temporary source node.
+    let (steps, sequence_size) = {
+        let graph = &project_guard.graph;
+        let entry = graph.get(viewer).ok_or(Error::NotFound)?;
+        let sequence = entry
             .behavior
             .as_any()
-            .and_then(|a| a.downcast_ref::<oak_node::track::TrackListBehavior>())
-        else {
-            continue;
-        };
-        if tl.kind != oak_node::track::TrackType::Video {
-            continue;
-        }
-        for track_id in tl.tracks.iter().rev() {
-            let Some(track) = graph.get(*track_id) else {
+            .and_then(|a| a.downcast_ref::<oak_node::sequence::SequenceBehavior>())
+            .ok_or(Error::NotFound)?;
+
+        let mut steps: Vec<TrackRenderStep> = Vec::new();
+        for tl_id in &sequence.track_lists {
+            let Some(tl) = graph.get(*tl_id) else {
                 continue;
             };
-            let Some(track) = track
+            let Some(tl) = tl
                 .behavior
                 .as_any()
-                .and_then(|a| a.downcast_ref::<oak_node::track::TrackBehavior>())
+                .and_then(|a| a.downcast_ref::<oak_node::track::TrackListBehavior>())
             else {
                 continue;
             };
-            for block_id in &track.blocks {
-                let Some(block) = graph.get(*block_id) else {
+            if tl.kind != oak_node::track::TrackType::Video {
+                continue;
+            }
+            for track_id in &tl.tracks {
+                let Some(track) = graph.get(*track_id) else {
                     continue;
                 };
-                let Some(clip) = block
+                let Some(track) = track
                     .behavior
                     .as_any()
-                    .and_then(|a| a.downcast_ref::<oak_node::block::ClipBlockBehavior>())
+                    .and_then(|a| a.downcast_ref::<oak_node::track::TrackBehavior>())
                 else {
                     continue;
                 };
-                if clip.core.enabled && time >= clip.core.in_() && time < clip.core.out() {
-                    clips.push(*block_id);
+                // An enabled adjustment block covering `time` takes over
+                // the track: its sweep replaces that track's clip stack.
+                let mut step = None;
+                for block_id in &track.blocks {
+                    let Some(block) = graph.get(*block_id) else {
+                        continue;
+                    };
+                    let Some(adjustment) = block.behavior.as_any().and_then(|a| {
+                        a.downcast_ref::<oak_node::block::AdjustmentBlockBehavior>()
+                    }) else {
+                        continue;
+                    };
+                    if adjustment.core.enabled
+                        && time >= adjustment.core.in_()
+                        && time < adjustment.core.out()
+                    {
+                        step = Some(TrackRenderStep::Adjustment {
+                            block: *block_id,
+                            progress: layer_progress(
+                                adjustment.core.in_(),
+                                adjustment.core.out(),
+                                time,
+                            ),
+                        });
+                        break;
+                    }
                 }
+                // A transition block covering `time` blends the two blocks
+                // it joins. The scan runs before the clip scan so the
+                // blend replaces the plain clip read: in the first half of
+                // the span the outgoing clip alone covers `time` (the cut
+                // is its out-point), in the second the incoming one does,
+                // so the clip path would otherwise hard-cut at the cut.
+                // A block with an unconnected side falls through to the
+                // clip path, which shows whichever clip covers `time`.
+                if step.is_none() {
+                    for block_id in &track.blocks {
+                        let Some(block) = graph.get(*block_id) else {
+                            continue;
+                        };
+                        let Some(transition) = block.behavior.as_any().and_then(|a| {
+                            a.downcast_ref::<oak_node::block::TransitionBlockBehavior>()
+                        }) else {
+                            continue;
+                        };
+                        if !(transition.core.enabled
+                            && time >= transition.core.in_()
+                            && time < transition.core.out())
+                        {
+                            continue;
+                        }
+                        let (Some(out_block), Some(in_block)) = (
+                            graph.connected_output(
+                                *block_id,
+                                oak_node::block::transition_input::OUT_BLOCK,
+                                -1,
+                            ),
+                            graph.connected_output(
+                                *block_id,
+                                oak_node::block::transition_input::IN_BLOCK,
+                                -1,
+                            ),
+                        ) else {
+                            continue;
+                        };
+                        let style = block
+                            .core
+                            .value_at_time(
+                                oak_node::block::transition_input::TYPE_INPUT,
+                                -1,
+                                time,
+                            )
+                            .to_double() as i64;
+                        step = Some(TrackRenderStep::Transition {
+                            block: *block_id,
+                            out_block,
+                            in_block,
+                            progress: layer_progress(
+                                transition.core.in_(),
+                                transition.core.out(),
+                                time,
+                            ),
+                            shader: oak_node::nodes::transitions::shader_id_for(style),
+                        });
+                        break;
+                    }
+                }
+                if step.is_none() {
+                    let mut clips: Vec<oak_node::id::NodeId> = Vec::new();
+                    for block_id in &track.blocks {
+                        let Some(block) = graph.get(*block_id) else {
+                            continue;
+                        };
+                        let Some(clip) = block
+                            .behavior
+                            .as_any()
+                            .and_then(|a| a.downcast_ref::<oak_node::block::ClipBlockBehavior>())
+                        else {
+                            continue;
+                        };
+                        if clip.core.enabled && time >= clip.core.in_() && time < clip.core.out() {
+                            clips.push(*block_id);
+                        }
+                    }
+                    step = Some(TrackRenderStep::Clips(clips));
+                }
+                steps.push(step.unwrap());
             }
         }
-    }
+        let sequence_size = sequence
+            .video_params
+            .first()
+            .map(|p| (p.width.max(1), p.height.max(1)));
+        (steps, sequence_size)
+    };
 
     let mut traverser = oak_node::traverser::Traverser::new();
     let mut hooks = RenderEvalHooks::new();
@@ -1483,47 +1874,124 @@ pub fn render_graph_frame(
     // The generators' `resolution_in` anchor (C++ NodeGlobals square
     // resolution): the sequence's native size, so proxy-size playback and
     // full-res paused frames draw generated layers identically.
-    hooks.sequence_size = sequence
-        .video_params
-        .first()
-        .map(|p| (p.width.max(1), p.height.max(1)));
+    hooks.sequence_size = sequence_size;
     let perf = std::env::var_os("OAK_PERF").is_some();
     let mut perf_collect = perf.then(std::time::Instant::now);
     let mut perf_collect_ms = 0.0f64;
+    // Topmost frame first (see the track walk above).
     let mut frames: Vec<Frame> = Vec::new();
-    let mut perf_clip_hist: Vec<(oak_node::id::NodeId, f64)> = Vec::new();
-    for clip in clips.clone() {
-        let clip_sw = perf.then(std::time::Instant::now);
-        let request = oak_node::traverser::EvalRequest::new(clip, time);
-        let table = traverser.evaluate(graph, &request, &mut hooks).map_err(|e| {
-            Error::Failed(format!("graph evaluation of clip {clip:?} failed: {e:?}"))
-        })?;
-        if perf {
-            perf_clip_hist.push((
-                clip,
-                clip_sw
-                    .map(|t| t.elapsed().as_secs_f64() * 1000.0)
-                    .unwrap_or(0.0),
-            ));
-        }
-        if let Some(t0) = &perf_collect {
-            perf_collect_ms += t0.elapsed().as_secs_f64() * 1000.0;
-            perf_collect = Some(std::time::Instant::now());
-        }
-        let Some(NodeValue::Texture(handle)) = table.get(oak_node::value::ValueType::Texture)
-        else {
-            continue;
-        };
-        if handle.ctx.is_null() {
-            continue;
-        }
-        let Some(texture) = (unsafe { oak_node::handle::get_checked::<Texture>(handle) }).cloned()
-        else {
-            continue;
-        };
-        match texture.to_frame() {
-            Ok(frame) => frames.push(frame),
-            Err(err) => eprintln!("graph sequence: texture read-back failed: {err:#}"),
+    let mut perf_clip_hist: Vec<(&'static str, oak_node::id::NodeId, f64)> = Vec::new();
+    for step in steps {
+        match step {
+            TrackRenderStep::Clips(clips) => {
+                for clip in clips {
+                    let clip_sw = perf.then(std::time::Instant::now);
+                    let request = oak_node::traverser::EvalRequest::new(clip, time);
+                    let table = traverser
+                        .evaluate(&project_guard.graph, &request, &mut hooks)
+                        .map_err(|e| {
+                            Error::Failed(format!(
+                                "graph evaluation of clip {clip:?} failed: {e:?}"
+                            ))
+                        })?;
+                    if perf {
+                        perf_clip_hist.push((
+                            "clip",
+                            clip,
+                            clip_sw
+                                .map(|t| t.elapsed().as_secs_f64() * 1000.0)
+                                .unwrap_or(0.0),
+                        ));
+                    }
+                    if let Some(t0) = &perf_collect {
+                        perf_collect_ms += t0.elapsed().as_secs_f64() * 1000.0;
+                        perf_collect = Some(std::time::Instant::now());
+                    }
+                    let Some(NodeValue::Texture(handle)) =
+                        table.get(oak_node::value::ValueType::Texture)
+                    else {
+                        continue;
+                    };
+                    if handle.ctx.is_null() {
+                        continue;
+                    }
+                    let Some(texture) =
+                        (unsafe { oak_node::handle::get_checked::<Texture>(handle) }).cloned()
+                    else {
+                        continue;
+                    };
+                    match texture.to_frame() {
+                        Ok(frame) => frames.insert(0, frame),
+                        Err(err) => {
+                            eprintln!("graph sequence: texture read-back failed: {err:#}")
+                        }
+                    }
+                }
+            }
+            TrackRenderStep::Transition {
+                block,
+                out_block,
+                in_block,
+                progress,
+                shader,
+            } => {
+                let transition_sw = perf.then(std::time::Instant::now);
+                let blended = blend_transition(
+                    &project_guard.graph,
+                    &mut traverser,
+                    &mut hooks,
+                    out_block,
+                    in_block,
+                    time,
+                    progress,
+                    shader,
+                )?;
+                if perf {
+                    perf_clip_hist.push((
+                        "transition",
+                        block,
+                        transition_sw
+                            .map(|t| t.elapsed().as_secs_f64() * 1000.0)
+                            .unwrap_or(0.0),
+                    ));
+                }
+                if let Some(t0) = &perf_collect {
+                    perf_collect_ms += t0.elapsed().as_secs_f64() * 1000.0;
+                    perf_collect = Some(std::time::Instant::now());
+                }
+                if let Some(frame) = blended {
+                    frames.insert(0, frame);
+                }
+            }
+            TrackRenderStep::Adjustment { block, progress } => {
+                let sweep_sw = perf.then(std::time::Instant::now);
+                let swept = flush_adjustment_layer(
+                    &mut project_guard.graph,
+                    &mut traverser,
+                    &mut hooks,
+                    block,
+                    &frames,
+                    size,
+                    time,
+                    progress,
+                )?;
+                if perf {
+                    perf_clip_hist.push((
+                        "adjustment",
+                        block,
+                        sweep_sw
+                            .map(|t| t.elapsed().as_secs_f64() * 1000.0)
+                            .unwrap_or(0.0),
+                    ));
+                }
+                if let Some(t0) = &perf_collect {
+                    perf_collect_ms += t0.elapsed().as_secs_f64() * 1000.0;
+                    perf_collect = Some(std::time::Instant::now());
+                }
+                if let Some(frame) = swept {
+                    frames = vec![frame];
+                }
+            }
         }
     }
 
@@ -1534,8 +2002,8 @@ pub fn render_graph_frame(
         let composite_ms = composite_started
             .map(|t| t.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
-        for (clip, ms) in &perf_clip_hist {
-            eprintln!("[perf]   clip {clip:?} evaluate {ms:.1}ms");
+        for (kind, node, ms) in &perf_clip_hist {
+            eprintln!("[perf]   {kind} {node:?} evaluate {ms:.1}ms");
         }
         eprintln!(
             "[perf] graph frame time {time:?} size {size:?}: evaluate {perf_collect_ms:.1}ms composite {composite_ms:.1}ms total {}ms",
@@ -1772,6 +2240,14 @@ fn render_montage_frame(
 /// shared-memory slot slice as `dst`, so the composited frame lands in
 /// the slot with no staging copy. `dst` is zeroed first (transparent
 /// black base).
+///
+/// Adjustment layers (`params.adjustments`, M14 W3) sit between the
+/// clips: a span's effect stack runs over the frame accumulated so far
+/// once `span.track_index` clips below it have been composited — the
+/// montage twin of the graph path's `flush_adjustment_layer`, which
+/// grades everything under the layer and leaves the tracks above
+/// compositing over that result. Spans arrive bottom-up (non-decreasing
+/// boundary); the loop consumes them in list order.
 pub fn render_montage_frame_into(
     time: Rational,
     params: &crate::ticket::VideoTicketParams,
@@ -1786,8 +2262,15 @@ pub fn render_montage_frame_into(
     }
     // Transparent-black base.
     dst[..need].fill(0);
+    let mut spans = params.adjustments.iter().peekable();
     // Decode from the bottom clip first, composite topmost-last.
-    for clip in &params.montage {
+    for (index, clip) in params.montage.iter().enumerate() {
+        // Every layer whose boundary is reached by the clips composited
+        // so far grades the accumulated frame before this clip lands.
+        while spans.peek().is_some_and(|span| span.track_index <= index) {
+            let span = spans.next().expect("peeked");
+            apply_adjustment_span(dst, dst_stride, w, h, span, time);
+        }
         if time < clip.in_time || time >= clip.out_time {
             continue;
         }
@@ -1809,7 +2292,117 @@ pub fn render_montage_frame_into(
         };
         composite_over(dst, dst_stride, w, h, src_data, src_stride, clip.gain);
     }
+    // Layers above every clip (their boundary is the montage end): they
+    // grade the final composite.
+    for span in spans {
+        apply_adjustment_span(dst, dst_stride, w, h, span, time);
+    }
     Ok(())
+}
+
+/// Apply an adjustment layer's effect stack to the frame accumulated so
+/// far — the montage twin of the graph path's `flush_adjustment_layer`.
+/// The stack runs source-first over `dst` before the clips above the
+/// layer are composited, so the layer grades exactly the picture
+/// underneath it (C++: the adjustment node's `texture_input` chain
+/// output passes through its effect chain, and that output is what the
+/// tracks above composite over; a bare adjustment layer passes the
+/// frame through unchanged).
+///
+/// Known limitation (M14 W3 — the same one the clip stacks carry): the
+/// montage evaluator only covers the built-in Opacity effect and OFX
+/// plugins; other built-ins (color management, transforms, generated
+/// textures…) log a warning once and pass the frame through. Graph mode
+/// (`render_graph_frame`, M14 W2) evaluates the full built-in set, so a
+/// worker holding a matching project snapshot stays the accurate
+/// preview and this path is the montage fallback.
+fn apply_adjustment_span(
+    dst: &mut [u8],
+    dst_stride: i32,
+    w: i32,
+    h: i32,
+    span: &crate::ticket::AdjustmentSpan,
+    time: Rational,
+) {
+    // Spans are baked for the ticket's own time; one that does not cover
+    // it (a stale or foreign list) is inert, matching the graph path's
+    // range test.
+    if time < span.in_time || time >= span.out_time {
+        return;
+    }
+    // Fast path: an all-Opacity stack (the common case) scales the
+    // accumulated frame in place, no staging copy — opacity is a pure
+    // per-channel multiply, alpha included (C++ `:/shaders/opacity.frag`).
+    let mut factors = Vec::new();
+    let mut opacity_only = true;
+    for effect in span.effects.iter().filter(|e| e.enabled) {
+        match opacity_factor(effect) {
+            Some(factor) => factors.push(factor),
+            // Unity is a pass-through; any other type needs the staged
+            // path below.
+            None if effect.type_id == OPACITY_EFFECT_TYPE_ID => {}
+            None => {
+                opacity_only = false;
+                break;
+            }
+        }
+    }
+    if opacity_only {
+        for factor in factors {
+            scale_channels_in_place(dst, dst_stride as usize, w, h, factor);
+        }
+        return;
+    }
+    // General path: the effect evaluator takes and returns an owned
+    // texture, so stage the accumulated frame into one and copy the
+    // result back.
+    let Ok(mut frame) = generate_frame(time, (w, h), PixelFormat::F32) else {
+        return;
+    };
+    let frame_stride = frame.linesize_bytes();
+    if !copy_rows(
+        &mut frame.data,
+        frame_stride,
+        dst,
+        dst_stride as usize,
+        w,
+        h,
+    ) {
+        return;
+    }
+    let tex = apply_effect_list(Texture::wrap_frame(frame), &span.effects, time);
+    if let Texture::Cpu(out) = &tex {
+        copy_rows(dst, dst_stride as usize, &out.data, out.linesize_bytes(), w, h);
+    }
+}
+
+/// Copy `h` rows of `w * 16` bytes between two F32 RGBA buffers with
+/// different strides (the montage pipeline writes packed frames, slots
+/// carry their own stride). False — nothing copied — when either buffer
+/// is too small for the requested geometry.
+fn copy_rows(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    w: i32,
+    h: i32,
+) -> bool {
+    if w <= 0 || h <= 0 {
+        return false;
+    }
+    let row_bytes = (w as usize) * 16;
+    let rows = h as usize;
+    let span = |stride: usize| (rows - 1) * stride + row_bytes;
+    if src.len() < span(src_stride) || dst.len() < span(dst_stride) {
+        return false;
+    }
+    for y in 0..rows {
+        let s = y * src_stride;
+        let d = y * dst_stride;
+        dst[d..d + row_bytes].copy_from_slice(&src[s..s + row_bytes]);
+    }
+    true
 }
 
 /// `src` over `dst` (premultiplied-ish alpha compositing; F32 RGBA).
@@ -1903,14 +2496,67 @@ fn apply_clip_effects(
     clip: &crate::ticket::MontageClip,
     time: Rational,
 ) -> Texture {
+    apply_effect_list(src, &clip.effects, time)
+}
+
+/// Run an effect stack (source-first) over `src`; the clip stacks and the
+/// adjustment-layer stacks share this evaluator.
+fn apply_effect_list(
+    src: Texture,
+    effects: &[crate::ticket::MontageEffect],
+    time: Rational,
+) -> Texture {
     let mut tex = src;
-    for effect in &clip.effects {
+    for effect in effects {
         if !effect.enabled {
             continue;
         }
         tex = apply_montage_effect(tex, effect, time);
     }
     tex
+}
+
+/// The factor an Opacity effect would scale its input by: `None` when
+/// the effect is not the built-in Opacity or its factor is unity (C++
+/// `qFuzzyCompare(opacity, 1.0)`, a pass-through).
+fn opacity_factor(effect: &crate::ticket::MontageEffect) -> Option<f32> {
+    if effect.type_id != OPACITY_EFFECT_TYPE_ID {
+        return None;
+    }
+    let factor = effect
+        .params
+        .iter()
+        .find(|(id, _)| id == OPACITY_VALUE_INPUT)
+        .map(|(_, v)| v.to_double())
+        .unwrap_or(1.0);
+    if (factor - 1.0).abs() * 1e12 <= factor.abs().min(1.0) {
+        return None;
+    }
+    Some(factor as f32)
+}
+
+/// Scale every F32 channel (alpha included) of an F32 RGBA frame by
+/// `factor`, in place — the Opacity shader's `frag_color * opacity_in`.
+fn scale_channels_in_place(
+    data: &mut [u8],
+    stride: usize,
+    width: i32,
+    height: i32,
+    factor: f32,
+) {
+    if stride == 0 || width <= 0 || height <= 0 {
+        return;
+    }
+    let row_bytes = (width as usize) * 16;
+    for row in data.chunks_exact_mut(stride).take(height as usize) {
+        let row_end = row_bytes.min(row.len());
+        for px in row[..row_end].chunks_exact_mut(16) {
+            for c in px.chunks_exact_mut(4) {
+                let v = f32::from_le_bytes(c.try_into().unwrap());
+                c.copy_from_slice(&(v * factor).to_le_bytes());
+            }
+        }
+    }
 }
 
 /// Apply one effect to `src` (an F32 RGBA CPU frame of the montage
@@ -1925,30 +2571,17 @@ fn apply_montage_effect(
     // (C++ `:/shaders/opacity.frag`: `frag_color = texture(tex_in, …) *
     // opacity_in` — the shader scales the whole vec4, alpha included).
     if effect.type_id == OPACITY_EFFECT_TYPE_ID {
-        let factor = effect
-            .params
-            .iter()
-            .find(|(id, _)| id == OPACITY_VALUE_INPUT)
-            .map(|(_, v)| v.to_double())
-            .unwrap_or(1.0);
         // Unity is a pass-through (C++ `qFuzzyCompare(opacity, 1.0)`).
-        if (factor - 1.0).abs() * 1e12 <= factor.abs().min(1.0) {
+        let Some(factor) = opacity_factor(effect) else {
             return src;
-        }
+        };
         // Texture implements Drop, so scale in place through a mutable
         // borrow instead of moving the frame out.
         let mut tex = src;
         match &mut tex {
             Texture::Cpu(frame) => {
                 let stride = frame.linesize_bytes();
-                for row in frame.data.chunks_exact_mut(stride).take(frame.height.max(0) as usize) {
-                    for px in row[..(frame.width.max(0) as usize) * 16].chunks_exact_mut(16) {
-                        for c in px.chunks_exact_mut(4) {
-                            let v = f32::from_le_bytes(c.try_into().unwrap());
-                            c.copy_from_slice(&(v * factor as f32).to_le_bytes());
-                        }
-                    }
-                }
+                scale_channels_in_place(&mut frame.data, stride, frame.width, frame.height, factor);
             }
             _ => {
                 warn_unsupported_once(
@@ -2033,6 +2666,7 @@ mod tests {
             cache_timebase: None,
             footage: None,
             montage: Vec::new(),
+        	adjustments: Vec::new(),
         };
         let tex = render_produced_frame(params.time, &params).unwrap();
         assert_eq!(tex.size(), (16, 9));

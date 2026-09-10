@@ -516,6 +516,14 @@ pub struct MockEngine {
 	/// the applied (id, track kind, track index, start frame) — drives
 	/// app-level tests of the explorer→timeline drag).
 	footage_drops: Vec<MockFootageDrop>,
+	/// Text-generator bin entries created via
+	/// [`AppEngine::create_text_footage`] since creation, as entry ids (mock
+	/// state; the mock's [`ProjectDataSource::roots`] lists them beside the
+	/// demo folders and files — drives app-level tests of the "添加文本素材"
+	/// action).
+	text_footages: Vec<u64>,
+	/// Id allocator for the text entries above.
+	next_text_footage_id: u64,
 	/// The fake project library the project manager browses (M13 D4): an
 	/// in-memory row set the library trait methods operate on, so the app
 	/// flow (list / open / create / rename / duplicate / delete / import /	/// export) is testable without a database.
@@ -811,6 +819,8 @@ impl MockEngine {
 			cpu_frame_cache: Mutex::new(HashMap::new()),
 			imported_footage: Vec::new(),
 			footage_drops: Vec::new(),
+			text_footages: Vec::new(),
+			next_text_footage_id: 100,
 			library: demo_library(),
 			next_library_id: 100,
 			library_opened: Vec::new(),
@@ -1347,6 +1357,49 @@ impl AppEngine for MockEngine {
 		cx.notify();
 	}
 
+	fn add_adjustment_layer(
+		&mut self,
+		index: usize,
+		frame: Frame,
+		cx: &mut Context<Self>,
+	) -> Result<(), String> {
+		let Some(kind) = self.tracks.get(index).map(|t| t.kind) else {
+			return Err(format!("no track at index {index}"));
+		};
+		if kind != TrackKind::Video {
+			return Err("adjustment layers are only supported on video tracks".to_string());
+		}
+		// The demo's canned layer: five seconds from the clicked frame,
+		// colored apart from the demo clips so the panel tests can tell it
+		// apart at a glance.
+		let fps = self.frame_rate();
+		let length = (5.0 * fps.num as f64 / fps.den.max(1) as f64)
+			.round()
+			.max(1.0) as i64;
+		let start = Frame(frame.0.max(0));
+		let clip = MockClip {
+			id: ClipId(self.next_mock_clip_id()),
+			range: FrameRange::new(start, Frame(start.0 + length)),
+			media_in: Frame(0),
+			label: "调整图层".into(),
+			color: Hsla {
+				h: 0.55,
+				s: 0.55,
+				l: 0.5,
+				a: 1.0,
+			},
+		};
+		let track = &mut self.tracks[index];
+		let position = track
+			.clips
+			.iter()
+			.position(|c| c.range.start.0 > start.0)
+			.unwrap_or(track.clips.len());
+		track.clips.insert(position, clip);
+		cx.notify();
+		Ok(())
+	}
+
 	fn set_track_height(&mut self, height: Pixels, cx: &mut Context<Self>) {
 		self.set_track_height(height, cx);
 	}
@@ -1405,17 +1458,163 @@ impl AppEngine for MockEngine {
 	}
 
 	fn effect_params(&self, effect: EffectId) -> Option<Vec<crate::oakui::engine::EffectParam>> {
-		// A canned text parameter behind a sentinel id, for the params
-		// view's text-field tests.
+		// A canned parameter list behind a sentinel id, mirroring the shape
+		// of the v3 text node's inputs (ids, value types, combo options and
+		// min bounds included) so the params view's tests can cover every
+		// control the text inspector builds. Three entries carry the HIDDEN
+		// flag: a real node's hidden inputs are dropped by the facade's
+		// `effect_params` before they get here, and the view must skip them
+		// on its own too (plugin and mock engines can hand them over).
 		(effect.0 == 900).then(|| {
-			vec![crate::oakui::engine::EffectParam {
-				input_id: "text_in".to_string(),
-				display_name: "Text".to_string(),
-				value_type: oak_node::value::ValueType::Text,
-				value: oak_node::value::NodeValue::Text("<p>engine text</p>".to_string()),
-				flags: 0,
-				properties: Vec::new(),
-			}]
+			use oak_node::input::flags::{ARRAY, HIDDEN};
+			use oak_node::value::{NodeValue, ValueType};
+
+			fn param(
+				input_id: &str,
+				display_name: &str,
+				value_type: ValueType,
+				value: NodeValue,
+				flags: u32,
+				properties: Vec<(&str, NodeValue)>,
+			) -> crate::oakui::engine::EffectParam {
+				crate::oakui::engine::EffectParam {
+					input_id: input_id.to_string(),
+					display_name: display_name.to_string(),
+					value_type,
+					value,
+					flags,
+					properties: properties
+						.into_iter()
+						.map(|(k, v)| (k.to_string(), v))
+						.collect(),
+				}
+			}
+
+			vec![
+				param(
+					"pos_in",
+					"Position",
+					ValueType::Vec2,
+					NodeValue::Vec2([0.0, 0.0]),
+					0,
+					Vec::new(),
+				),
+				param(
+					"size_in",
+					"Size",
+					ValueType::Vec2,
+					NodeValue::Vec2([400.0, 300.0]),
+					0,
+					vec![("min", NodeValue::Vec2([0.0, 0.0]))],
+				),
+				param(
+					"plain_text_in",
+					"Text",
+					ValueType::Text,
+					NodeValue::Text("文本\nsecond line".to_string()),
+					0,
+					vec![("multiline", NodeValue::Boolean(true))],
+				),
+				param(
+					"text_in",
+					"Legacy text",
+					ValueType::Text,
+					NodeValue::Text("<p>engine text</p>".to_string()),
+					HIDDEN,
+					vec![("vieweronly", NodeValue::Boolean(true))],
+				),
+				param(
+					"font_family_in",
+					"Font family",
+					ValueType::StrCombo,
+					NodeValue::StrCombo(String::new()),
+					0,
+					vec![
+						("combo_option", NodeValue::Text("Sans".to_string())),
+						("combo_option", NodeValue::Text("Serif".to_string())),
+					],
+				),
+				param(
+					"font_size_in",
+					"Font size",
+					ValueType::Float,
+					NodeValue::Float(72.0),
+					0,
+					vec![("min", NodeValue::Float(1.0))],
+				),
+				param(
+					"outline_enabled_in",
+					"Outline",
+					ValueType::Boolean,
+					NodeValue::Boolean(false),
+					0,
+					Vec::new(),
+				),
+				param(
+					"outline_color_in",
+					"Outline color",
+					ValueType::Color,
+					NodeValue::Color([0.0, 0.0, 0.0, 1.0]),
+					0,
+					Vec::new(),
+				),
+				param(
+					"outline_width_in",
+					"Outline width",
+					ValueType::Float,
+					NodeValue::Float(2.0),
+					0,
+					vec![("min", NodeValue::Float(0.0))],
+				),
+				param(
+					"glow_enabled_in",
+					"Glow",
+					ValueType::Boolean,
+					NodeValue::Boolean(false),
+					0,
+					Vec::new(),
+				),
+				param(
+					"glow_color_in",
+					"Glow color",
+					ValueType::Color,
+					NodeValue::Color([1.0, 1.0, 0.0, 1.0]),
+					0,
+					Vec::new(),
+				),
+				param(
+					"glow_radius_in",
+					"Glow radius",
+					ValueType::Float,
+					NodeValue::Float(8.0),
+					0,
+					vec![("min", NodeValue::Float(0.0))],
+				),
+				param(
+					"valign_in",
+					"Vertical align",
+					ValueType::Combo,
+					NodeValue::Combo(0),
+					HIDDEN,
+					Vec::new(),
+				),
+				param(
+					"use_args_in",
+					"Use args",
+					ValueType::Boolean,
+					NodeValue::Boolean(true),
+					HIDDEN,
+					Vec::new(),
+				),
+				param(
+					"args_in",
+					"Args",
+					ValueType::Text,
+					NodeValue::Text(String::new()),
+					ARRAY,
+					vec![("arraystart", NodeValue::Int(1))],
+				),
+			]
 		})
 	}
 
@@ -1806,6 +2005,14 @@ impl AppEngine for MockEngine {
 		self.imported_footage.push(path);
 		cx.notify();
 		Ok(())
+	}
+
+	fn create_text_footage(&mut self, cx: &mut Context<Self>) -> Result<u64, String> {
+		let id = self.next_text_footage_id;
+		self.next_text_footage_id += 1;
+		self.text_footages.push(id);
+		cx.notify();
+		Ok(id)
 	}
 
 	fn drop_footage(
@@ -2351,6 +2558,16 @@ impl AppEngine for MockEngine {
 		cx.notify();
 	}
 
+	fn add_default_transition(
+		&mut self,
+		_clips: Vec<ClipId>,
+		_cx: &mut Context<Self>,
+	) -> Result<usize, String> {
+		// The demo timeline is not backed by a module graph, so there is no
+		// block to hang a transition on.
+		Err("default transition: the demo engine has no project".to_string())
+	}
+
 	fn multicam_switch_to(&mut self, source: i32, split_clip: bool, cx: &mut Context<Self>) {
 		let guard = self.ensure_demo_multicam();
 		let Some(demo) = guard.as_ref() else {
@@ -2559,12 +2776,19 @@ impl NodeGraphDataSource for MockEngine {
 
 impl ProjectDataSource for MockEngine {
 	fn roots(&self) -> Vec<ProjectEntry> {
-		vec![
+		let mut roots = vec![
 			ProjectEntry::new(1, crate::i18n::tr("bin.footage"), true),
 			ProjectEntry::new(2, crate::i18n::tr("bin.music"), true),
 			ProjectEntry::new(3, "第一稿.mp4", false),
 			ProjectEntry::new(4, "aaa.ove", false),
-		]
+		];
+		// Text generators created through the "添加文本素材" action (the
+		// shared node label `文本`, so the demo's browser stays locale-
+		// independent).
+		for &id in &self.text_footages {
+			roots.push(ProjectEntry::new(id, super::graphops::TEXT_FOOTAGE_LABEL, false));
+		}
+		roots
 	}
 
 	fn children(&self, parent_id: u64) -> Vec<ProjectEntry> {
@@ -2803,6 +3027,13 @@ impl MockEngine {
 	/// [`MockFootageDrop`]).
 	pub fn footage_drops(&self) -> &[MockFootageDrop] {
 		&self.footage_drops
+	}
+
+	/// The text-generator entries created via
+	/// [`AppEngine::create_text_footage`] so far (mock state; the entry ids
+	/// are also listed by [`ProjectDataSource::roots`]).
+	pub fn text_footages(&self) -> &[u64] {
+		&self.text_footages
 	}
 
 	/// The display name of the project-explorer entry with `id`, if any.
@@ -3581,6 +3812,37 @@ mod tests {
 				);
 			});
 			assert_eq!(engine.read(app).workarea(), Some((Frame(30), Frame(90))));
+		});
+	}
+
+	/// 添加文本素材 on the mock: every call gets a fresh entry id, the ids
+	/// are listed by the bin as leaves labelled with the shared `文本`
+	/// node label (the drop path resolves them by name).
+	#[gpui::test]
+	async fn create_text_footage_lists_a_text_entry(cx: &mut TestAppContext) {
+		cx.update(|app| {
+			let engine = demo_engine(app);
+			let first = engine.update(app, |engine, cx| {
+				engine.create_text_footage(cx).expect("create text footage")
+			});
+			let second = engine.update(app, |engine, cx| {
+				engine.create_text_footage(cx).expect("create text footage")
+			});
+			assert_ne!(first, second, "each action gets a fresh entry id");
+			assert_eq!(engine.read(app).text_footages(), &[first, second]);
+			let listed: Vec<_> = engine
+				.read(app)
+				.roots()
+				.into_iter()
+				.filter(|e| e.id == first || e.id == second)
+				.collect();
+			assert_eq!(listed.len(), 2, "both text entries are listed in the bin");
+			assert!(
+				listed.iter().all(|e| {
+					e.name == crate::oakui::graphops::TEXT_FOOTAGE_LABEL && !e.is_dir
+				}),
+				"the entries carry the shared 文本 label as leaves"
+			);
 		});
 	}
 }

@@ -31,7 +31,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use oak_core::videoparams::VideoParams as CommonVideoParams;
 use oak_core::Rational;
-use oak_node::block::{BlockCore, ClipBlockBehavior, GapBlockBehavior, TransitionBlockBehavior};
+use oak_node::block::{
+	AdjustmentBlockBehavior, BlockCore, ClipBlockBehavior, GapBlockBehavior,
+	TransitionBlockBehavior,
+};
 use oak_node::folder::FolderBehavior;
 use oak_node::footage::{FootageBehavior, StreamInfo};
 use oak_node::graph::Graph;
@@ -108,6 +111,9 @@ pub fn block_core_of(graph: &Graph, block: NodeId) -> Option<BlockCore> {
 	if let Some(b) = any.downcast_ref::<TransitionBlockBehavior>() {
 		return Some(b.core.clone());
 	}
+	if let Some(b) = any.downcast_ref::<AdjustmentBlockBehavior>() {
+		return Some(b.core.clone());
+	}
 	None
 }
 
@@ -129,6 +135,10 @@ fn set_block_core(graph: &mut Graph, block: NodeId, f: impl FnOnce(&mut BlockCor
 		return true;
 	}
 	if let Some(b) = any.downcast_mut::<TransitionBlockBehavior>() {
+		f(&mut b.core);
+		return true;
+	}
+	if let Some(b) = any.downcast_mut::<AdjustmentBlockBehavior>() {
 		f(&mut b.core);
 		return true;
 	}
@@ -726,6 +736,18 @@ pub fn block_kind(project: &ProjectRef, block: NodeId) -> BlockKind {
 	} else {
 		BlockKind::Other
 	}
+}
+
+/// Whether the block is an adjustment layer (neither `BlockKind` covers
+/// it: the enum mirrors the deleted C ABI's block types).
+pub fn block_is_adjustment(project: &ProjectRef, block: NodeId) -> bool {
+	let guard = lock_project(project);
+	guard
+		.graph
+		.get(block)
+		.and_then(|e| e.behavior.as_any())
+		.map(|a| a.downcast_ref::<AdjustmentBlockBehavior>().is_some())
+		.unwrap_or(false)
 }
 
 /// The block's timeline in point (`oaknode_block_get_in`).

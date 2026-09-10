@@ -453,6 +453,49 @@ pub fn montage_effect_from(wire: &WireMontageEffect) -> crate::ticket::MontageEf
 	}
 }
 
+/// One adjustment layer of a montage on the wire (protocol v2 additive
+/// field of [`BatchTicketSpec`]; rationals flattened to num/den pairs).
+/// `track_index` is the montage-list boundary of
+/// [`crate::ticket::AdjustmentSpan`], not a track number.
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct WireAdjustmentSpan {
+	/// Adjustment in point numerator (sequence time).
+	pub in_num: i64,
+	/// Adjustment in point denominator.
+	pub in_den: i64,
+	/// Adjustment out point numerator (sequence time).
+	pub out_num: i64,
+	/// Adjustment out point denominator.
+	pub out_den: i64,
+	/// Montage-list boundary (clips composited below this layer).
+	pub track_index: usize,
+	/// The adjustment's effect stack (source-first).
+	pub effects: Vec<WireMontageEffect>,
+}
+
+/// Map a ticket-side adjustment span to its wire form (main process).
+pub fn wire_adjustment_from(span: &crate::ticket::AdjustmentSpan) -> WireAdjustmentSpan {
+	WireAdjustmentSpan {
+		in_num: span.in_time.numerator(),
+		in_den: span.in_time.denominator(),
+		out_num: span.out_time.numerator(),
+		out_den: span.out_time.denominator(),
+		track_index: span.track_index,
+		effects: span.effects.iter().map(wire_effect_from).collect(),
+	}
+}
+
+/// Map a wire adjustment span back to the ticket-side form (worker).
+pub fn adjustment_from_wire(wire: &WireAdjustmentSpan) -> crate::ticket::AdjustmentSpan {
+	crate::ticket::AdjustmentSpan {
+		in_time: oak_core::Rational::new(wire.in_num, wire.in_den),
+		out_time: oak_core::Rational::new(wire.out_num, wire.out_den),
+		track_index: wire.track_index,
+		effects: wire.effects.iter().map(montage_effect_from).collect(),
+	}
+}
+
 /// One frame ticket inside a [`RenderBatchMsg`] — the main process
 /// assigns the destination `slot`.
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
@@ -480,6 +523,9 @@ pub struct BatchTicketSpec {
 	pub footage_stream: i32,
 	/// Sequence montage (ordered topmost-last; empty = none).
 	pub montage: Vec<WireMontageClip>,
+	/// Adjustment layers over the montage (protocol v2 additive: older peers
+	/// omit the field and it defaults to no adjustment layers).
+	pub adjustments: Vec<WireAdjustmentSpan>,
 	/// Sequence viewer node identity (0 = montage mode; nonzero = render
 	/// the viewer's graph frame from the worker's loaded snapshot).
 	pub viewer_node: u64,
@@ -1976,6 +2022,7 @@ mod tests {
 					footage_file: "a.mp4".into(),
 					footage_stream: 0,
 					montage: vec![],
+					adjustments: vec![],
 					viewer_node: 0,
 					project_key: String::new(),
 				},
@@ -2010,6 +2057,22 @@ mod tests {
 							}],
 						}],
 					}],
+					adjustments: vec![WireAdjustmentSpan {
+						in_num: 0,
+						in_den: 24,
+						out_num: 48,
+						out_den: 24,
+						track_index: 1,
+						effects: vec![WireMontageEffect {
+							type_id: "org.olivevideoeditor.Olive.opacity".into(),
+							enabled: true,
+							effect_input_id: "tex_in".into(),
+							params: vec![WireEffectParam {
+								input: "opacity_in".into(),
+								value: WireNodeValue::Float(0.5),
+							}],
+						}],
+					}],
 					viewer_node: 0,
 					project_key: String::new(),
 				},
@@ -2031,6 +2094,44 @@ mod tests {
 			value["tickets"][1]["montage"][0]["effects"][0]["params"][0]["value"],
 			json!({ "t": "float", "v": 0.5 })
 		);
+		// The adjustment layer rides the ticket as an additive v2 field: its
+		// boundary is a montage-list index, not a track number.
+		assert_eq!(value["tickets"][1]["adjustments"][0]["track_index"], 1);
+		assert_eq!(value["tickets"][1]["adjustments"][0]["out_num"], 48);
+		assert_eq!(
+			value["tickets"][1]["adjustments"][0]["effects"][0]["type_id"],
+			"org.olivevideoeditor.Olive.opacity"
+		);
+		// The ticket-side conversions agree with the wire structs.
+		let parsed: WireAdjustmentSpan =
+			serde_json::from_value(value["tickets"][1]["adjustments"][0].clone()).unwrap();
+		let span = adjustment_from_wire(&parsed);
+		assert_eq!(span.in_time, oak_core::Rational::new(0, 24));
+		assert_eq!(span.out_time, oak_core::Rational::new(48, 24));
+		assert_eq!(span.track_index, 1);
+		assert_eq!(
+			span.effects[0].type_id,
+			"org.olivevideoeditor.Olive.opacity"
+		);
+		assert_eq!(span.effects[0].effect_input_id.as_deref(), Some("tex_in"));
+		assert_eq!(
+			span.effects[0].params[0].1,
+			oak_node::value::NodeValue::Float(0.5)
+		);
+		// `Rational::new` normalizes, so the wire form of the parsed span
+		// collapses 48/24 to 2/1.
+		let wire = wire_adjustment_from(&span);
+		assert_eq!(
+			wire,
+			WireAdjustmentSpan {
+				in_num: 0,
+				in_den: 1,
+				out_num: 2,
+				out_den: 1,
+				track_index: 1,
+				effects: parsed.effects.clone(),
+			}
+		);
 		// Round-trip back to the struct.
 		let round: RenderBatchMsg = serde_json::from_value(value).unwrap();
 		assert_eq!(round, batch);
@@ -2041,6 +2142,10 @@ mod tests {
 		assert_eq!(bare.slot, 2);
 		assert_eq!(bare.format, 0);
 		assert!(bare.montage.is_empty());
+		assert!(
+			bare.adjustments.is_empty(),
+			"v1 tickets carry no adjustment layers"
+		);
 	}
 
 	/// Protocol v2 compatibility: a v1-shaped montage clip (no `effects`

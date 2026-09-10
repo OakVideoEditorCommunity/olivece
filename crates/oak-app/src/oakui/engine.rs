@@ -339,6 +339,20 @@ pub trait AppEngine:
 	/// it).
 	fn remove_track(&mut self, index: usize, cx: &mut Context<Self>);
 
+	/// Adds an adjustment layer to the display track at `index`, starting
+	/// at `frame` and five seconds long (undoable where the backend
+	/// supports it). Returns a user-facing error message on failure.
+	/// Default: unsupported.
+	fn add_adjustment_layer(
+		&mut self,
+		index: usize,
+		frame: Frame,
+		cx: &mut Context<Self>,
+	) -> Result<(), String> {
+		let _ = (index, frame, cx);
+		Err("add adjustment layer not supported".into())
+	}
+
 	/// Sets the row height of every timeline track (timeline toolbar).
 	fn set_track_height(&mut self, height: Pixels, cx: &mut Context<Self>);
 
@@ -1071,6 +1085,15 @@ pub trait AppEngine:
 		Err("no project open".to_string())
 	}
 
+	/// Creates a text generator in the open project's root folder (the
+	/// project explorer's "添加文本素材" action) and returns its entry id.
+	/// The bin entry is NOT a sequence: a double-click selects it like
+	/// footage, and the timeline drop places a generator clip.
+	fn create_text_footage(&mut self, cx: &mut Context<Self>) -> Result<u64, String> {
+		let _ = cx;
+		Err("no project open".to_string())
+	}
+
 	/// Applies new name/format/interlaced parameters to the sequence `id`.
 	fn update_sequence_parameters(
 		&mut self,
@@ -1212,6 +1235,18 @@ pub trait AppEngine:
 	fn toggle_clip_links(&mut self, clips: Vec<ClipId>, cx: &mut Context<Self>) {
 		let _ = (clips, cx);
 	}
+
+	/// Adds a transition of the configured default length (the
+	/// `DefaultTransitionLength` preference, seconds) at every contiguous
+	/// seam around `clips` — the clip menu's Default Transition item and the
+	/// Ctrl+Shift+D action (the C++ `timeline::add_default_transition`).
+	/// One undoable "Add Transition" entry; returns how many transitions
+	/// were created, or `Err` when no selected seam accepts one.
+	fn add_default_transition(
+		&mut self,
+		clips: Vec<ClipId>,
+		cx: &mut Context<Self>,
+	) -> Result<usize, String>;
 
 	// -------------------------------------------------------------------
 	// Multi-camera (the C++ MulticamWidget / timeline Multi-Cam menu):

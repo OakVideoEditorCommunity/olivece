@@ -493,6 +493,7 @@ mod tests {
 				cache_timebase: None,
 				footage: None,
 				montage: Vec::new(),
+				adjustments: Vec::new(),
 			}),
 			audio: None,
 			produce,
@@ -564,6 +565,7 @@ mod tests {
 					cache_timebase: None,
 					footage: None,
 					montage: Vec::new(),
+					adjustments: Vec::new(),
 				}),
 				audio: None,
 				produce: p,
@@ -602,6 +604,7 @@ mod tests {
 			cache_timebase: None,
 			footage: None,
 			montage: Vec::new(),
+			adjustments: Vec::new(),
 		});
 		d.post(Job {
 			node_identity: 0,

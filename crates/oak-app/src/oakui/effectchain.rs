@@ -93,11 +93,96 @@ pub fn is_enabled(g: &Graph, node: NodeId) -> bool {
 		.unwrap_or(false)
 }
 
+/// The built-in effect group keys, in presentation order.
+///
+/// The effect library and the inspector's add menu head the built-in
+/// effects with these groups, in this order; `general` collects every
+/// category without a group of its own and sorts last. The keys are
+/// **language-pack keys**, never display strings: a header's label is
+/// [`group_label`]'s `effect_library.group.<key>` lookup.
+pub const GROUP_KEYS: &[&str] = &[
+	"color",
+	"filter",
+	"distort",
+	"keying",
+	"generator",
+	"math",
+	"time",
+	"channel",
+	"transition",
+	"general",
+];
+
+/// The group key of a node [`Category`](oak_node::node::Category).
+///
+/// The category enum mirrors the C++ `Node::CategoryID`, which is finer
+/// grained than the create menu: outputs, plain effects, inputs, OpenFX
+/// plugins, timeline and group nodes have no group of their own and land
+/// in `general`. `time` / `channel` / `transition` are part of the key
+/// set (the language packs carry their labels) but no category maps to
+/// them yet.
+pub fn category_group_key(category: oak_node::node::Category) -> &'static str {
+	use oak_node::node::Category;
+	match category {
+		Category::Color => "color",
+		Category::Filter => "filter",
+		Category::Distort => "distort",
+		Category::Keying => "keying",
+		Category::Generator => "generator",
+		Category::Math => "math",
+		_ => "general",
+	}
+}
+
+/// The display label of an effect-group key: the localized
+/// `effect_library.group.<key>` string for the built-in keys, and the key
+/// itself for OpenFX sub-categories (their labels come from the plugin
+/// descriptor, not from the language packs).
+pub fn group_label(group_key: &str) -> String {
+	match group_key {
+		"color" => crate::i18n::tr("effect_library.group.color"),
+		"filter" => crate::i18n::tr("effect_library.group.filter"),
+		"distort" => crate::i18n::tr("effect_library.group.distort"),
+		"keying" => crate::i18n::tr("effect_library.group.keying"),
+		"generator" => crate::i18n::tr("effect_library.group.generator"),
+		"math" => crate::i18n::tr("effect_library.group.math"),
+		"time" => crate::i18n::tr("effect_library.group.time"),
+		"channel" => crate::i18n::tr("effect_library.group.channel"),
+		"transition" => crate::i18n::tr("effect_library.group.transition"),
+		"general" => crate::i18n::tr("effect_library.group.general"),
+		// OpenFX sub-categories (and any key a future pack ships without a
+		// label): shown verbatim rather than as a raw pack key.
+		other => other,
+	}
+	.to_string()
+}
+
+/// The language-pack key of a built-in node's display name, built at
+/// runtime: `node.<type-id suffix>.name`, the suffix being the type id's
+/// last dotted segment (`org.olivevideoeditor.Olive.colorcorrect` →
+/// `colorcorrect`).
+fn node_name_key(type_id: &str) -> String {
+	format!("node.{}.name", type_suffix(type_id))
+}
+
+/// The language-pack key of a built-in node input's display name:
+/// `node.<type-id suffix>.input.<input id>`.
+fn input_name_key(type_id: &str, input_id: &str) -> String {
+	format!("node.{}.input.{input_id}", type_suffix(type_id))
+}
+
+/// The last dotted segment of a node type id — the language-pack key's
+/// `<type-id suffix>`.
+fn type_suffix(type_id: &str) -> &str {
+	type_id.rsplit('.').next().unwrap_or(type_id)
+}
+
 /// The effect types the user can add to a clip's chain — the built-in
 /// factory entries flagged `video_effect` and not hidden from the create
-/// menu (no group), plus every runtime-registered OpenFX plugin entry
-/// (grouped by its sub-category: Filter / Generator / Transition /
-/// General — the C++ `factorymenu.cpp` OpenFX branch).
+/// menu (grouped by their first category, see [`category_group_key`]),
+/// plus every runtime-registered OpenFX plugin entry (grouped by its
+/// sub-category: Filter / Generator / Transition / General — the C++
+/// `factorymenu.cpp` OpenFX branch).
 pub fn addable_effects() -> Vec<super::engine::EffectEntry> {
 	use super::engine::EffectEntry;
 	use oak_node::node::flags as node_flags;
@@ -115,10 +200,18 @@ pub fn addable_effects() -> Vec<super::engine::EffectEntry> {
 			} else {
 				meta.name.to_string()
 			};
+			// The library shows the pack's `node.<type-id suffix>.name`; a
+			// type the packs don't know keeps the node's own English name.
+			let name = crate::i18n::tr_or(&node_name_key(meta.type_id), &name);
+			let group = meta
+				.categories
+				.first()
+				.map(|category| category_group_key(*category))
+				.unwrap_or("general");
 			out.push(EffectEntry {
 				type_id: meta.type_id.to_string(),
 				name,
-				group: None,
+				group: Some(group.to_string()),
 			});
 		}
 	}
@@ -136,16 +229,28 @@ pub fn addable_effects() -> Vec<super::engine::EffectEntry> {
 			group: Some(meta.sub_category),
 		});
 	}
-	// Default presentation order: built-ins first, then the OpenFX
-	// sub-category groups alphabetically; names alphabetical (folded)
-	// within each group.
+	// Default presentation order: built-in groups first, in GROUP_KEYS
+	// order (`general` last), then the OpenFX sub-category groups
+	// alphabetically; names alphabetical (folded) within each group.
 	out.sort_by(|a, b| {
 		let ga = a.group.as_deref().unwrap_or("");
 		let gb = b.group.as_deref().unwrap_or("");
-		ga.cmp(gb)
-			.then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+		match (group_rank(ga), group_rank(gb)) {
+			(Some(ra), Some(rb)) => ra.cmp(&rb),
+			(Some(_), None) => std::cmp::Ordering::Less,
+			(None, Some(_)) => std::cmp::Ordering::Greater,
+			(None, None) => ga.cmp(gb),
+		}
+		.then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
 	});
 	out
+}
+
+/// The presentation rank of a built-in group key, or `None` for a key
+/// outside [`GROUP_KEYS`] (an OpenFX sub-category, which the sort orders
+/// after every built-in group).
+fn group_rank(group: &str) -> Option<usize> {
+	GROUP_KEYS.iter().position(|key| *key == group)
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +281,13 @@ pub fn effect_params(
 	use oak_node::value::ValueType;
 
 	let entry = g.get(node)?;
+	// The pack keys describe the built-in nodes only: an OpenFX plugin's
+	// labels come from the plugin (and the OFX translation pass), and a
+	// plugin type id happens to end in a built-in type's suffix, the
+	// built-in name would otherwise leak into it.
+	let builtin = oak_node::factory::Factory::global()
+		.find(entry.behavior.type_id())
+		.is_some();
 	let mut out = Vec::new();
 	for input in &entry.core.inputs {
 		// Clip/texture/sample/matrix inputs are graph connections or
@@ -202,6 +314,18 @@ pub fn effect_params(
 		} else {
 			input.display_name.clone()
 		};
+		// Built-in nodes label their inputs from the pack instead
+		// (`node.<type-id suffix>.input.<input id>`), so an input the
+		// behavior names in English — or leaves at its raw input id —
+		// follows the active language. The behavior's name is the fallback.
+		let display_name = if builtin {
+			crate::i18n::tr_or(
+				&input_name_key(entry.behavior.type_id(), &input.id),
+				&display_name,
+			)
+		} else {
+			display_name
+		};
 		// Combo options: built-in nodes carry them on the behavior (C++
 		// `set_combo_box_strings`); OFX plugin params already carry the
 		// ("combo_option", _) properties from the translation pass.
@@ -214,6 +338,35 @@ pub fn effect_params(
 					oak_node::value::NodeValue::Text(option.to_string()),
 				));
 			}
+		}
+		// The v3 text node's `font_family_in` is a str-combo whose options
+		// the node layer cannot supply: oak-node deliberately links no font
+		// or shaping crate, so the app's text backend enumerates the system
+		// families and the facade injects them here (the same
+		// `("combo_option", Text)` shape the OFX translation pass uses).
+		if input.id == "font_family_in" && !properties.iter().any(|(k, _)| k == "combo_option") {
+			for name in super::textengine::font_families() {
+				properties.push((
+					"combo_option".to_string(),
+					oak_node::value::NodeValue::Text(name),
+				));
+			}
+		}
+		// The v3 text node's editable text inputs hold more than one line
+		// (the node shapes each `\n`-separated line of the string), and the
+		// inspector renders them as multi-line fields so the user can type
+		// line breaks. The node layer cannot say so — an input carries no
+		// presentation metadata beyond its properties — so the facade marks
+		// the multi-line text ids here, the same way it injects the font
+		// families above.
+		if input.value_type == ValueType::Text
+			&& matches!(input.id.as_str(), "plain_text_in" | "text_in")
+			&& !properties.iter().any(|(k, _)| k == "multiline")
+		{
+			properties.push((
+				"multiline".to_string(),
+				oak_node::value::NodeValue::Boolean(true),
+			));
 		}
 		out.push(super::engine::EffectParam {
 			input_id: input.id.clone(),
@@ -780,19 +933,144 @@ mod tests {
 		}
 	}
 
-	/// The effect-library grouping: every addable effect is either an
-	/// ungrouped built-in or an OpenFX entry with one of the four
-	/// sub-categories.
+	/// Every built-in entry carries its category's group key — one of
+	/// [`GROUP_KEYS`], never a display string — and the shipped nodes use
+	/// more than one group (a single "general" for everything would mean
+	/// the category mapping is dead).
+	#[test]
+	fn addable_effects_group_builtins_by_category() {
+		let factory = oak_node::factory::Factory::global();
+		let mut groups: Vec<&'static str> = Vec::new();
+		let mut builtins = 0usize;
+		for entry in addable_effects() {
+			if factory.find(&entry.type_id).is_none() {
+				continue; // an OpenFX plugin entry
+			}
+			builtins += 1;
+			let group = entry
+				.group
+				.as_deref()
+				.unwrap_or_else(|| panic!("built-in {} has no group", entry.type_id));
+			let key = GROUP_KEYS.iter().copied().find(|key| *key == group).unwrap_or_else(|| {
+				panic!("built-in {} has the unknown group {group:?}", entry.type_id)
+			});
+			if !groups.contains(&key) {
+				groups.push(key);
+			}
+		}
+		assert!(builtins > 0, "the factory ships built-in video effects");
+		assert!(
+			groups.len() > 1,
+			"built-ins spread over several groups: {groups:?}"
+		);
+	}
+
+	/// OpenFX plugin entries keep their plugin-supplied sub-category
+	/// (Filter / Generator / Transition / General), which never collides
+	/// with a built-in group key.
 	#[test]
 	fn addable_effects_group_openfx_by_sub_category() {
+		let factory = oak_node::factory::Factory::global();
 		for entry in addable_effects() {
-			if let Some(group) = entry.group {
+			if factory.find_dynamic(&entry.type_id).is_none() {
+				continue; // a built-in
+			}
+			let group = entry
+				.group
+				.as_deref()
+				.expect("an OpenFX entry carries a sub-category");
+			assert!(
+				["Filter", "Generator", "Transition", "General"].contains(&group),
+				"unexpected OpenFX sub-category {group:?}"
+			);
+			assert!(
+				!GROUP_KEYS.contains(&group),
+				"OpenFX sub-category {group:?} collides with a built-in group key"
+			);
+		}
+	}
+
+	/// The sort the library and the inspector render: built-in groups in
+	/// [`GROUP_KEYS`] order, then the OpenFX sub-categories, names folded
+	/// alphabetically inside a group.
+	#[test]
+	fn addable_effects_sort_builtins_first() {
+		let entries = addable_effects();
+		let rank = |entry: &crate::oakui::engine::EffectEntry| {
+			entry
+				.group
+				.as_deref()
+				.and_then(group_rank)
+				.unwrap_or(GROUP_KEYS.len())
+		};
+		for pair in entries.windows(2) {
+			let (a, b) = (&pair[0], &pair[1]);
+			let (ra, rb) = (rank(a), rank(b));
+			if ra != rb {
 				assert!(
-					["Filter", "Generator", "Transition", "General"].contains(&group.as_str()),
-					"unexpected OpenFX sub-category {group:?}"
+					ra < rb,
+					"group order: {a:?} ({ra}) before {b:?} ({rb})"
+				);
+			} else if a.group == b.group {
+				assert!(
+					a.name.to_lowercase() <= b.name.to_lowercase(),
+					"name order inside {:?}: {a:?} before {b:?}",
+					a.group
+				);
+			} else {
+				// Two OpenFX sub-categories (rank only separates built-ins).
+				assert!(
+					a.group.as_deref().unwrap_or("") <= b.group.as_deref().unwrap_or(""),
+					"OpenFX sub-category order: {a:?} before {b:?}"
 				);
 			}
 		}
+	}
+
+	/// The category → group-key mapping covers every `Category` variant
+	/// and falls back to `general`.
+	#[test]
+	fn category_group_key_maps_every_category() {
+		use oak_node::node::Category;
+		let all = [
+			Category::Output,
+			Category::Effect,
+			Category::Generator,
+			Category::Input,
+			Category::Math,
+			Category::Color,
+			Category::Distort,
+			Category::Filter,
+			Category::Keying,
+			Category::OpenFx,
+			Category::Timeline,
+			Category::Group,
+		];
+		for category in all {
+			assert!(
+				GROUP_KEYS.contains(&category_group_key(category)),
+				"{category:?} maps outside GROUP_KEYS"
+			);
+		}
+		assert_eq!(category_group_key(Category::Color), "color");
+		assert_eq!(category_group_key(Category::Keying), "keying");
+		assert_eq!(category_group_key(Category::Effect), "general");
+		assert_eq!(category_group_key(Category::OpenFx), "general");
+	}
+
+	/// A group label is the language pack's string for the built-in keys —
+	/// never the raw key — and passes OpenFX sub-categories through.
+	#[test]
+	fn group_label_localizes_keys_and_passes_sub_categories_through() {
+		for key in GROUP_KEYS {
+			let label = group_label(key);
+			assert!(
+				!label.starts_with("effect_library.group."),
+				"language pack entry missing for the {key} group (got {label:?})"
+			);
+		}
+		assert_eq!(group_label("Filter"), "Filter");
+		assert_eq!(group_label("Sapphire"), "Sapphire");
 	}
 
 	/// `set_input_value` writes the standard value undoably and rejects
@@ -1071,5 +1349,181 @@ mod tests {
 			..plain
 		};
 		assert_eq!(ui_section_of(&grouped), Some(("Basic".into(), "Main".into())));
+	}
+
+	/// W6: the v3 text node is a footage entry now (the project panel's
+	/// "add text footage" button and the timeline drop), so the effect
+	/// library / add menus no longer offer it. A text3 node that is in a
+	/// project anyway — a legacy chain, or the one the footage path
+	/// creates — must keep chaining and keep exposing its params.
+	#[test]
+	fn text3_is_not_addable_but_a_chain_node_still_reports_its_params() {
+		let _g = stack_lock();
+		oak_undo::global::clear().unwrap();
+
+		const TEXT3: &str = "org.olivevideoeditor.Olive.text3";
+		assert!(
+			!addable_effects().iter().any(|e| e.type_id == TEXT3),
+			"text3 left the effect add menus"
+		);
+
+		// `insert` resolves through the factory (which still registers the
+		// type) rather than the addable table: legacy chains and the
+		// footage path keep working.
+		let (project, host) = project_with_clip();
+		let node = insert(&project, host, 0, TEXT3).expect("chain a legacy text3 effect");
+		assert_eq!(chain(&lock(&project).graph, host), vec![node]);
+
+		let params = effect_params(&lock(&project).graph, node).expect("the node exposes params");
+		let plain_text = params
+			.iter()
+			.find(|p| p.input_id == "plain_text_in")
+			.expect("the structured text parameter survives");
+		assert_eq!(plain_text.value_type, oak_node::value::ValueType::Text);
+		// The facade marks the multi-line text ids (the inspector renders a
+		// multi-line field off this property); the node itself carries no
+		// presentation metadata.
+		assert!(
+			plain_text
+				.properties
+				.iter()
+				.any(|(k, v)| k == "multiline"
+					&& matches!(v, oak_node::value::NodeValue::Boolean(true))),
+			"plain_text_in is marked as multi-line"
+		);
+		assert!(params.iter().any(|p| p.input_id == "font_size_in"));
+		assert!(params.iter().any(|p| p.input_id == "outline_enabled_in"));
+		// The hidden legacy HTML input stays a param *input* in the node,
+		// never in the inspector.
+		assert!(!params.iter().any(|p| p.input_id == "text_in"));
+
+		oak_undo::global::clear().unwrap();
+	}
+
+	/// The effect library and the inspector name built-in effects and their
+	/// parameters from runtime-built pack keys (`node.<type-id suffix>.name`
+	/// / `node.<type-id suffix>.input.<input id>`): switching the active
+	/// language renames the whole library and parameter list, while a node
+	/// the packs don't know keeps the name it ships with.
+	#[test]
+	fn effect_and_parameter_names_follow_the_language_pack() {
+		let _lang = crate::i18n::lang_test_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let _g = stack_lock();
+		oak_undo::global::clear().unwrap();
+		crate::i18n::set_language_code("zh-CN");
+
+		// Every addable built-in shows its pack name, never the factory's
+		// English one.
+		let factory = oak_node::factory::Factory::global();
+		let mut builtins = 0usize;
+		for entry in addable_effects() {
+			let Some(meta) = factory.find(&entry.type_id) else {
+				continue; // an OpenFX plugin entry: the plugin names it
+			};
+			assert_ne!(
+				entry.name, meta.name,
+				"{} is still English in zh-CN",
+				entry.type_id
+			);
+			builtins += 1;
+		}
+		assert!(builtins > 0, "the factory ships addable built-ins");
+		let name_of = |type_id: &str| {
+			addable_effects()
+				.into_iter()
+				.find(|e| e.type_id == type_id)
+				.unwrap_or_else(|| panic!("{type_id} is addable"))
+				.name
+		};
+		assert_eq!(
+			name_of("org.olivevideoeditor.Olive.colorcorrect"),
+			"颜色校正"
+		);
+		assert_eq!(name_of("org.olivevideoeditor.Olive.position"), "位置");
+
+		// The inspector's parameter labels follow the same keys.
+		let (project, host) = project_with_clip();
+		let node = insert(&project, host, 0, "org.olivevideoeditor.Olive.colorcorrect")
+			.expect("chain Color Correct");
+		let params = effect_params(&lock(&project).graph, node).expect("the node exposes params");
+		let label = |input_id: &str| {
+			params
+				.iter()
+				.find(|p| p.input_id == input_id)
+				.unwrap_or_else(|| panic!("{input_id} is a parameter"))
+				.display_name
+				.clone()
+		};
+		assert_eq!(label("saturation_in"), "饱和度");
+		assert_eq!(label("gamma_in"), "伽马");
+		assert_eq!(label("gain_in"), "增益");
+
+		crate::i18n::set_language_code("en-US");
+		oak_undo::global::clear().unwrap();
+	}
+
+	/// The pack coverage behind the lookup above: every name a built-in
+	/// node gives one of its inputs has a `node.<type-id suffix>.input.<id>`
+	/// entry, so no parameter label falls back to English. Inputs the
+	/// behavior does not name (`enabled_in`, `use_args_in`) carry no entry —
+	/// their label is the raw input id, and the enabled input never renders.
+	#[test]
+	fn every_builtin_parameter_name_has_a_pack_entry() {
+		let _lang = crate::i18n::lang_test_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		crate::i18n::set_language_code("zh-CN");
+		let mut missing = Vec::new();
+		let mut named = 0usize;
+		for meta in oak_node::factory::Factory::global().entries() {
+			let (core, behavior) = (meta.create)();
+			for input in &core.inputs {
+				let english = behavior.input_name(&input.id);
+				if english == input.id {
+					continue;
+				}
+				if crate::i18n::tr_or(&input_name_key(meta.type_id, &input.id), english) == english {
+					missing.push(format!("node.{}.input.{}", type_suffix(meta.type_id), input.id));
+				}
+				named += 1;
+			}
+		}
+		assert!(missing.is_empty(), "no pack entry for {missing:?}");
+		assert!(named >= 250, "the built-in nodes name their inputs ({named})");
+		crate::i18n::set_language_code("en-US");
+	}
+
+	/// The v3 text node's `font_family_in` is a str-combo the node layer
+	/// cannot populate (oak-node links no font crate): `effect_params`
+	/// injects the app's font backend families as its combo options, sorted
+	/// and de-duplicated.
+	#[test]
+	fn text_font_family_combo_is_injected_from_the_font_backend() {
+		let _g = stack_lock();
+		let (project, _clip) = project_with_clip();
+		let node = {
+			let mut g = lock(&project);
+			let (core, behavior) = oak_node::factory::Factory::global()
+				.create_any("org.olivevideoeditor.Olive.text3")
+				.expect("the factory registers the v3 text node");
+			g.graph.add_node(core, behavior)
+		};
+
+		let params = effect_params(&lock(&project).graph, node).expect("the node exposes params");
+		let param = params
+			.iter()
+			.find(|p| p.input_id == "font_family_in")
+			.expect("the font family combo is a parameter");
+		assert_eq!(param.value_type, oak_node::value::ValueType::StrCombo);
+
+		let options = combo_options(param);
+		assert!(!options.is_empty(), "the font backend found no families");
+		assert_eq!(options, crate::oakui::textengine::font_families());
+		let mut sorted = options.clone();
+		sorted.sort();
+		sorted.dedup();
+		assert_eq!(options, sorted);
 	}
 }

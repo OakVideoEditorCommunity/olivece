@@ -655,6 +655,23 @@ impl<E: AppEngine> OakApp<E> {
 		)
 		.detach();
 
+		// The project explorer's 添加文本素材 button creates a text
+		// generator bin entry in the open project.
+		cx.subscribe(
+			&panels.project,
+			|this,
+			 _panel,
+			 _event: &crate::panels::project_explorer::NewTextFootageRequested,
+			 cx| {
+				this.engine.update(cx, |engine, cx| {
+					if let Err(e) = engine.create_text_footage(cx) {
+						println!("[shell] add text footage: {e}");
+					}
+				});
+			},
+		)
+		.detach();
+
 		// A footage drop onto a timeline with no open sequence goes through
 		// the probe-vs-manual choice before any sequence is created.
 		cx.subscribe(
@@ -5446,6 +5463,46 @@ mod tests {
 		assert_eq!(drops[0].track_kind, gpui::timeline::TrackKind::Video);
 		assert_eq!(drops[0].track_index, 0);
 		assert_eq!(drops[0].time, gpui::timeline::Frame(50));
+	}
+
+	/// The project explorer's 添加文本素材 button creates a text generator
+	/// bin entry: the click emits `NewTextFootageRequested`, the shell's
+	/// subscription calls `AppEngine::create_text_footage`, and the bin
+	/// lists the new entry (labelled 文本, the shared node label) beside
+	/// the demo rows.
+	#[gpui::test]
+	async fn clicking_add_text_footage_creates_a_text_entry(cx: &mut TestAppContext) {
+		let _guard = crate::i18n::lang_test_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let (window, root) = mock_shell(cx);
+		let mut vcx = VisualTestContext::from_window(window.into(), cx);
+
+		let button = vcx
+			.debug_bounds("project-add-text-footage")
+			.expect("the explorer's 添加文本素材 button is rendered");
+		vcx.simulate_click(button.center(), gpui::Modifiers::none());
+		drop(vcx);
+		cx.run_until_parked();
+
+		let created = cx.read(|app| root.read(app).engine.read(app).text_footages().to_vec());
+		assert_eq!(
+			created,
+			vec![100],
+			"the click reached the engine exactly once"
+		);
+		let listed = cx.read(|app| {
+			use gpui_widgets::project_explorer::ProjectDataSource as _;
+			root.read(app)
+				.engine
+				.read(app)
+				.roots()
+				.iter()
+				.any(|e| {
+					e.id == 100 && e.name == crate::oakui::graphops::TEXT_FOOTAGE_LABEL
+				})
+		});
+		assert!(listed, "the created text entry is listed in the bin");
 	}
 
 	/// The project explorer lists root-level imported footage in BOTH views:

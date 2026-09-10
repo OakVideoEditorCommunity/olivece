@@ -135,6 +135,12 @@ pub trait PanelCommandHandler: Sized {
 	fn speed_duration(&mut self, _cx: &mut Context<Self>) -> bool {
 		false
 	}
+	/// The clip menu's "Default Transition" item / the Ctrl+Shift+D action:
+	/// add a transition of the configured default length at every seam
+	/// around the selected clips.
+	fn default_transition(&mut self, _cx: &mut Context<Self>) -> bool {
+		false
+	}
 	fn toggle_links(&mut self, _cx: &mut Context<Self>) -> bool {
 		false
 	}
@@ -259,6 +265,7 @@ pub fn dispatch_to<P: PanelCommandHandler>(
 		ActionId::RippleDelete => panel.ripple_delete(cx),
 		ActionId::SplitAtPlayhead => panel.split_at_playhead(cx),
 		ActionId::SpeedDuration => panel.speed_duration(cx),
+		ActionId::DefaultTransition => panel.default_transition(cx),
 		ActionId::LinkUnlink => panel.toggle_links(cx),
 		ActionId::EnableDisable => panel.toggle_selected_enabled(cx),
 		ActionId::Insert => panel.insert(cx),

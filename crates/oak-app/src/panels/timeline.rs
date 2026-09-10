@@ -103,6 +103,11 @@ pub struct TimelinePanel<E: AppEngine> {
 	/// The track behind the currently open track-head menu (the "Delete"
 	/// item's target); `None` when a different menu is open.
 	context_track: Option<usize>,
+	/// The empty-area click behind the currently open empty-area menu: the
+	/// display track under the cursor plus the clicked frame ("Add
+	/// Adjustment Layer" anchors there); `None` when a different menu is
+	/// open.
+	context_empty: Option<(usize, Frame)>,
 }
 
 /// A footage drop target resolved from the cursor: the display track under
@@ -198,6 +203,7 @@ impl<E: AppEngine> TimelinePanel<E> {
 			footage_drop: None,
 			context_menu,
 			context_track: None,
+			context_empty: None,
 		}
 	}
 
@@ -240,7 +246,10 @@ impl<E: AppEngine> TimelinePanel<E> {
 				};
 				clip_menu(sync, &proxy, Some(multicam))
 			}
-			TimelineHit::Empty { .. } => empty_area_menu(),
+			TimelineHit::Empty { track, frame } => {
+				self.context_empty = Some((*track, *frame));
+				empty_area_menu()
+			}
 			TimelineHit::TrackHead(track) => {
 				self.context_track = Some(*track);
 				track_head_menu()
@@ -250,6 +259,9 @@ impl<E: AppEngine> TimelinePanel<E> {
 		};
 		if !matches!(hit, TimelineHit::TrackHead(_)) {
 			self.context_track = None;
+		}
+		if !matches!(hit, TimelineHit::Empty { .. }) {
+			self.context_empty = None;
 		}
 		self.context_menu.show(position, menu, cx);
 	}
@@ -281,6 +293,16 @@ impl<E: AppEngine> TimelinePanel<E> {
 			LOCAL_DELETE_ALL_EMPTY => {
 				self.engine
 					.update(cx, |engine, cx| engine.delete_empty_tracks(cx));
+			}
+			LOCAL_ADD_ADJUSTMENT_LAYER => {
+				if let Some((track, frame)) = self.context_empty {
+					if let Err(err) = self
+						.engine
+						.update(cx, |engine, cx| engine.add_adjustment_layer(track, frame, cx))
+					{
+						println!("[timeline] add adjustment layer failed: {err}");
+					}
+				}
 			}
 			LOCAL_CACHE_ALL | LOCAL_CACHE_IN_OUT | LOCAL_CACHE_DISCARD => {
 				println!("[timeline] cache action {item} (not implemented yet)");
@@ -665,6 +687,18 @@ impl<E: AppEngine> PanelCommandHandler for TimelinePanel<E> {
 	fn split_at_playhead(&mut self, cx: &mut Context<Self>) -> bool {
 		self.engine
 			.update(cx, |engine, cx| engine.split_at_playhead(cx));
+		true
+	}
+	/// 编辑 → 设为默认转场 / Ctrl+Shift+D: adds a transition of the
+	/// configured default length at every seam around the selected clips.
+	fn default_transition(&mut self, cx: &mut Context<Self>) -> bool {
+		let ids: Vec<ClipId> = self.timeline.read(cx).selection().iter().copied().collect();
+		let result = self
+			.engine
+			.update(cx, |engine, cx| engine.add_default_transition(ids, cx));
+		if let Err(error) = result {
+			println!("[timeline] add default transition failed: {error}");
+		}
 		true
 	}
 	fn set_marker(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1109,6 +1143,7 @@ const LOCAL_TIMECODE_FRAMES: usize = 2126;
 const LOCAL_TIMECODE_MILLISECONDS: usize = 2127;
 const LOCAL_ADD_VIDEO_TRACK: usize = 2130;
 const LOCAL_ADD_AUDIO_TRACK: usize = 2131;
+const LOCAL_ADD_ADJUSTMENT_LAYER: usize = 2132;
 
 /// A registry-backed item shown under a "Properties" label (the C++ clip
 /// and sequence "Properties" entries open the Speed/Duration and Sequence
@@ -1294,7 +1329,11 @@ pub(crate) fn empty_area_menu() -> Menu {
 			LOCAL_SHOW_WAVEFORMS,
 			i18n::tr("timeline.context.show_waveforms"),
 		)
-		.with_checked(false)
+		.with_checked(false),
+		MenuItem::new(
+			LOCAL_ADD_ADJUSTMENT_LAYER,
+			i18n::tr("timeline.context.add_adjustment_layer"),
+		)
 		.separated(),
 		properties_item(ActionId::SequenceSettings),
 	])
@@ -1376,7 +1415,8 @@ pub(crate) fn ruler_menu() -> Menu {
 mod tests {
 	use super::*;
 	use crate::oakui::MockEngine;
-	use gpui::{px, size, TestAppContext, VisualTestContext};
+	use gpui::timeline::{FrameRange, TimelineDataSource};
+	use gpui::{px, size, Hsla, TestAppContext, VisualTestContext};
 
 	/// Builds a `TimelinePanel` in a window of the given logical size and
 	/// returns a `VisualTestContext` for bounds assertions.
@@ -1710,8 +1750,9 @@ mod tests {
 		assert!(!item.checked.unwrap_or(false));
 	}
 
-	/// The empty-area menu exposes the view toggles plus the sequence
-	/// settings "Properties" entry.
+	/// The empty-area menu exposes the view toggles, the "Add Adjustment
+	/// Layer" creation entry (§3.5) and the sequence settings "Properties"
+	/// entry.
 	#[test]
 	fn empty_area_menu_toggles_and_properties() {
 		let menu = empty_area_menu();
@@ -1732,8 +1773,87 @@ mod tests {
 		);
 		assert!(sub.iter().all(|item| item.checked == Some(false)));
 
+		// "Add Adjustment Layer" sits between the view toggles and
+		// Properties, carries the i18n label and closes its section so the
+		// tail reads as the properties block.
+		let adjustment = menu
+			.items
+			.iter()
+			.position(|item| item.id == LOCAL_ADD_ADJUSTMENT_LAYER)
+			.expect("add adjustment layer item");
+		let item = &menu.items[adjustment];
+		assert!(item.label == i18n::tr("timeline.context.add_adjustment_layer"));
+		assert!(item.enabled);
+		assert!(item.separator_after);
+		assert_eq!(
+			menu.items[adjustment + 1].id,
+			ActionId::SequenceSettings.entry().menu_id(),
+			"Properties follows the adjustment item"
+		);
+
 		let properties = menu.items.last().expect("properties tail");
 		assert_eq!(properties.id, ActionId::SequenceSettings.entry().menu_id());
+	}
+
+	/// Choosing "Add Adjustment Layer" from the empty-area menu lands the
+	/// demo's five-second layer on the video track under the cursor, at the
+	/// clicked frame and in a color of its own (§3.5).
+	#[gpui::test]
+	async fn empty_area_menu_adds_an_adjustment_layer_at_the_clicked_frame(
+		cx: &mut TestAppContext,
+	) {
+		let (cx, panel) = panel_window(cx, 1600.0, 900.0);
+		// The demo's track 0 is a video track with one clip (标题.mov, frames
+		// 120..300); the created layer must not borrow that clip's color.
+		let demo_colors: Vec<Hsla> = cx.read(|app| {
+			let engine = panel.read(app).engine.clone();
+			let engine = engine.read(app);
+			engine
+				.track(0)
+				.expect("the demo's first track")
+				.clips()
+				.iter()
+				.filter_map(|clip| clip.color())
+				.collect()
+		});
+		assert_eq!(demo_colors.len(), 1, "the demo track has one colored clip");
+
+		// The right-click anchors the menu on (track 0, frame 50); choosing
+		// the item creates the layer there.
+		cx.update(|_window, cx| {
+			panel.update(cx, |panel, cx| {
+				panel.open_context_menu(
+					gpui::point(px(10.0), px(10.0)),
+					TimelineHit::Empty {
+						track: 0,
+						frame: Frame(50),
+					},
+					cx,
+				);
+				panel.on_local_menu_item(LOCAL_ADD_ADJUSTMENT_LAYER, cx);
+			});
+		});
+
+		cx.read(|app| {
+			let engine = panel.read(app).engine.clone();
+			let engine = engine.read(app);
+			let track = engine.track(0).expect("the demo's first track");
+			let clips = track.clips();
+			assert_eq!(clips.len(), 2, "the layer joins the track's demo clip");
+			let layer = &clips[0];
+			assert_eq!(
+				layer.range(),
+				FrameRange::new(Frame(50), Frame(175)),
+				"five seconds (125 frames at 25fps) from the clicked frame"
+			);
+			assert_eq!(layer.label(), SharedString::from("调整图层"));
+			assert_eq!(layer.media_in(), Frame(0));
+			let color = layer.color().expect("the layer carries its own color");
+			assert!(
+				demo_colors.iter().all(|demo| *demo != color),
+				"the layer color is distinct from the demo clips"
+			);
+		});
 	}
 
 	/// The track-header menu is exactly the two delete entries.

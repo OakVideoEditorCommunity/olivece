@@ -868,6 +868,12 @@ pub struct RealClip {
 	/// The clip's texture chain contains a multicam node (the timeline
 	/// overlay + the panel's detection read the same truth).
 	multicam: bool,
+	/// Duration in frames of the transition attached to the clip's head
+	/// (the seam shared with the previous clip), if any.
+	in_transition: Option<Frame>,
+	/// Duration in frames of the transition attached to the clip's tail
+	/// (the seam shared with the next clip), if any.
+	out_transition: Option<Frame>,
 }
 
 impl ClipData for RealClip {
@@ -893,6 +899,14 @@ impl ClipData for RealClip {
 
 	fn is_multicam(&self) -> bool {
 		self.multicam
+	}
+
+	fn in_transition(&self) -> Option<Frame> {
+		self.in_transition
+	}
+
+	fn out_transition(&self) -> Option<Frame> {
+		self.out_transition
 	}
 }
 
@@ -1017,6 +1031,20 @@ impl TrackData for RealTrack {
 		&self.clips
 	}
 }
+
+/// The color of an adjustment layer's timeline band
+/// ([`RealClip::color`]): a fixed slate that sits outside the per-clip
+/// palette, so a band that carries no media is recognizable at a glance.
+const ADJUSTMENT_LAYER_COLOR: Hsla = Hsla {
+	h: 0.72,
+	s: 0.3,
+	l: 0.58,
+	a: 1.0,
+};
+
+/// The default label of an adjustment layer (the block itself stores no
+/// label; the snapshot synthesizes one like it does for unnamed clips).
+const ADJUSTMENT_LAYER_LABEL: &str = "调整图层";
 
 /// A deterministic clip color from a stable per-clip index (the module
 /// graph exposes no clip color).
@@ -1528,6 +1556,10 @@ impl RealEngine {
 
 	/// Builds an engine with no project open.
 	pub fn new(cx: &mut Context<Self>) -> Self {
+		// Text nodes reach their layout/rasterizer through the process-global
+		// hooks of `oak_node::nodes::textbackend` (oak-node links no font or
+		// shaping crate); fill them in before anything can run a node.
+		super::textengine::install();
 		let rate = VideoFormat::hd_1080p25().rate;
 		let (full_res_tx, full_res_rx) = mpsc::channel::<FullResEvent>();
 		let (thumb_tx, thumb_rx) = mpsc::channel::<ThumbEvent>();
@@ -3419,6 +3451,9 @@ impl RealEngine {
 		let height = graphops::track_behavior(graph, track)
 			.map(|t| px(oak_node::track::internal_height_to_pixel_height(t.height).max(24) as f32))
 			.unwrap_or(px(64.0));
+		// The transition wedges the track's clips carry (left = head
+		// transition, right = tail transition), keyed by clip block.
+		let widths = graphops::clip_transition_widths(graph, track);
 		let clips = graphops::clip_ids(graph, track)
 			.iter()
 			.enumerate()
@@ -3427,17 +3462,30 @@ impl RealEngine {
 				let to_ts = |r: oak_core::Rational| {
 					tb.map(|tb| graphops::rational_to_ts(r, tb)).unwrap_or(0)
 				};
+				let wedge = |w: Option<oak_core::Rational>| w.map(|r| Frame(to_ts(r)));
+				let (head, tail) = widths.get(&block).copied().unwrap_or((None, None));
+				let entry = graph.get(block)?;
+				let is_adjustment = entry
+					.behavior
+					.as_any()
+					.map(|a| a.is::<oak_node::block::AdjustmentBlockBehavior>())
+					.unwrap_or(false);
 				// The clip's color is locked in at creation time (its
 				// `override_color`); clips without one (older projects)
 				// fall back to the track-relative palette so their color
-				// still varies.
-				let entry = graph.get(block)?;
-				let color = if entry.core.override_color >= 0 {
+				// still varies. Adjustment layers wear their own fixed
+				// color instead of a palette entry: their band carries no
+				// media and must read as an effect layer, not a clip.
+				let color = if is_adjustment {
+					ADJUSTMENT_LAYER_COLOR
+				} else if entry.core.override_color >= 0 {
 					clip_color(entry.core.override_color as u64)
 				} else {
 					clip_color(clip_index as u64)
 				};
-				let label = if entry.core.label.is_empty() {
+				let label = if is_adjustment && entry.core.label.is_empty() {
+					ADJUSTMENT_LAYER_LABEL.to_string()
+				} else if entry.core.label.is_empty() {
 					format!("Clip {}", clip_index + 1)
 				} else {
 					entry.core.label.clone()
@@ -3452,6 +3500,8 @@ impl RealEngine {
 					color,
 					block,
 					multicam,
+					in_transition: wedge(head),
+					out_transition: wedge(tail),
 				})
 			})
 			.collect();
@@ -3518,7 +3568,7 @@ impl RealEngine {
 		let block = graphops::id_of(id.0)?;
 		let project = self.project_ref()?;
 		let guard = graphops::lock(project);
-		graphops::clip_behavior(&guard.graph, block)?;
+		graphops::block_core_of(&guard.graph, block)?;
 		// The clip must be on the CURRENT timeline (a stale id of a
 		// removed clip must not resolve).
 		self.tracks
@@ -3559,7 +3609,7 @@ impl RealEngine {
 		};
 		let guard = graphops::lock(project);
 		// A clip block node on the current timeline: its stack is the target.
-		if graphops::clip_behavior(&guard.graph, node).is_some()
+		if graphops::block_core_of(&guard.graph, node).is_some()
 			&& self
 				.tracks
 				.iter()
@@ -3574,7 +3624,7 @@ impl RealEngine {
 				let Some(block) = graphops::id_of(clip.id.0) else {
 					continue;
 				};
-				if graphops::clip_behavior(&guard.graph, block).is_none() {
+				if graphops::block_core_of(&guard.graph, block).is_none() {
 					continue;
 				}
 				if let Some(effect) = super::effectchain::chain(&guard.graph, block)
@@ -4194,6 +4244,34 @@ impl AppEngine for RealEngine {
 		);
 	}
 
+	fn add_adjustment_layer(
+		&mut self,
+		index: usize,
+		frame: Frame,
+		cx: &mut Context<Self>,
+	) -> Result<(), String> {
+		let Some(project) = self.project.clone() else {
+			return Err("add adjustment layer: no project is open".to_string());
+		};
+		let Some(seq) = self.sequence else {
+			return Err("add adjustment layer: no sequence is open".to_string());
+		};
+		let Some(tb) = self.time_base() else {
+			return Err("add adjustment layer: the sequence has no frame rate".to_string());
+		};
+		let Some(track) = self.tracks.get(index).map(|t| t.track) else {
+			return Err(format!("add adjustment layer: no track at index {index}"));
+		};
+		// The default span: five seconds from the clicked frame (the
+		// snapshot's non-snapping approximation of the C++ default).
+		let fps = tb.1 as f64 / tb.0.max(1) as f64;
+		let length = (5.0 * fps).round().max(1.0) as i64;
+		let in_ts = frame.0.max(0);
+		let result = graphops::create_adjustment_layer(&project, seq, track, in_ts, in_ts + length);
+		self.apply_edit(result.clone().map(|_| ()), "add adjustment layer", cx);
+		result.map(|_| ())
+	}
+
 	fn set_track_height(&mut self, height: Pixels, cx: &mut Context<Self>) {
 		let (Some(project), Some(seq)) = (self.project.clone(), self.sequence) else {
 			return;
@@ -4676,11 +4754,40 @@ impl AppEngine for RealEngine {
 				}
 				cx.notify();
 			}
-			// Selection / zoom / transition / track-selected / context-menu:
+			TimelineEvent::TransitionChanged {
+				clip,
+				edge,
+				new_length,
+			} => {
+				let Some(block) = self.clip_block(*clip) else {
+					return;
+				};
+				if self.clip_track_locked(block) {
+					return;
+				}
+				let Some(project) = self.project.clone() else {
+					return;
+				};
+				let Some(tb) = self.time_base() else {
+					return;
+				};
+				// The widget works in the sequence's frame unit, the
+				// command layer in seconds.
+				let frame = graphops::ts_to_rational(1, tb);
+				let requested = graphops::ts_to_rational(new_length.0.max(1), tb);
+				let result = graphops::set_transition_length(
+					&project,
+					block,
+					matches!(edge, TrimEdge::Start),
+					frame,
+					requested,
+				);
+				self.apply_edit(result.map(|_| ()), "transition length", cx);
+			}
+			// Selection / zoom / track-selected / context-menu:
 			// not editable (the right-click is answered by the panel's popup).
 			TimelineEvent::SelectionChanged
 			| TimelineEvent::TrackSelected { .. }
-			| TimelineEvent::TransitionChanged { .. }
 			| TimelineEvent::ContextMenuRequested { .. }
 			| TimelineEvent::ZoomChanged(_) => {}
 			TimelineEvent::TrackToggleRequested { track, toggle } => {
@@ -5147,12 +5254,22 @@ impl AppEngine for RealEngine {
 		// sequence node (TEXTURE_INPUT, like `clip_connected_sequence`
 		// resolves), so a multicam source sequence drops as a single
 		// multi-cam clip the panel detects.
-		let is_sequence = {
+		//
+		// Text entry drop: a GENERATOR clip — the clip reads the text
+		// node's output through `tex_in` instead of decoding media.
+		let (is_sequence, is_text) = {
 			let guard = graphops::lock(&project);
-			graphops::sequence_behavior(&guard.graph, footage).is_some()
+			(
+				graphops::sequence_behavior(&guard.graph, footage).is_some(),
+				graphops::node_type_id(&guard.graph, footage) == graphops::TEXT_FOOTAGE_TYPE_ID,
+			)
 		};
 		if is_sequence {
 			self.drop_sequence_entry(&project, footage, track_index, time, cx);
+			return;
+		}
+		if is_text {
+			self.drop_text_entry(&project, footage, track_index, time, cx);
 			return;
 		}
 		let (filename, video_streams, total_streams, seconds) = {
@@ -5735,6 +5852,15 @@ impl AppEngine for RealEngine {
 		};
 		let id = graphops::create_folder(&project, &name)?;
 		self.apply_edit(Ok(()), "new folder", cx);
+		Ok(id.identity())
+	}
+
+	fn create_text_footage(&mut self, cx: &mut Context<Self>) -> Result<u64, String> {
+		let Some(project) = self.project.clone() else {
+			return Err(crate::i18n::tr("seqprops.error.no_project").to_string());
+		};
+		let id = graphops::create_text_footage_node(&project)?;
+		self.apply_edit(Ok(()), "add text footage", cx);
 		Ok(id.identity())
 	}
 
@@ -6427,6 +6553,45 @@ impl AppEngine for RealEngine {
 		self.apply_edit(result, "multicam enable/disable", cx);
 	}
 
+	fn add_default_transition(
+		&mut self,
+		clips: Vec<ClipId>,
+		cx: &mut Context<Self>,
+	) -> Result<usize, String> {
+		let Some(project) = self.project.clone() else {
+			return Err("default transition: no project is open".to_string());
+		};
+		let Some(seq) = self.sequence else {
+			return Err("default transition: no sequence is open".to_string());
+		};
+		let Some(tb) = self.time_base() else {
+			return Err("default transition: the sequence has no frame rate".to_string());
+		};
+		// The preference is the WHOLE transition length; a default
+		// transition is symmetric, so each wedge takes half of it (at least
+		// one frame — `ts_to_rational` needs a positive frame count).
+		let seconds: f64 = config_get_string(CONFIG_KEY_DEFAULT_TRANSITION_SEC)
+			.parse()
+			.unwrap_or_else(|_| {
+				DEFAULT_TRANSITION_SEC
+					.parse()
+					.expect("the compiled-in default parses")
+			});
+		let fps = tb.1 as f64 / tb.0.max(1) as f64;
+		let half_frames = (seconds * fps / 2.0).round().max(1.0) as i64;
+		let half = graphops::ts_to_rational(half_frames, tb);
+		let blocks: Vec<NodeId> = clips
+			.iter()
+			.filter_map(|id| {
+				let block = self.clip_block(*id)?;
+				(!self.clip_track_locked(block)).then_some(block)
+			})
+			.collect();
+		let result = graphops::add_default_transition(&project, seq, &blocks, half);
+		self.apply_edit(result.clone().map(|_| ()), "add default transition", cx);
+		result
+	}
+
 	fn multicam_switch_to(&mut self, source: i32, split_clip: bool, cx: &mut Context<Self>) {
 		let Some(project) = self.project.clone() else {
 			return;
@@ -6724,6 +6889,64 @@ impl RealEngine {
 		// Link the A/V pair both ways (grouped edits move them together).
 		graphops::set_clips_linked(project, &[host_clip, audio_clip], true)?;
 		Ok(audio_clip)
+	}
+
+	/// Drops a text-project entry on the timeline as a GENERATOR clip: the
+	/// clip spans five seconds from the drop point and its `tex_in` reads
+	/// the text node, so the generator re-renders at whatever time the
+	/// clip spans (no media to decode and no footage length to clamp to).
+	/// The target track policy is the sequence drop's: the pointed display
+	/// row when it is a video track, else the first video track. Undoable
+	/// as one "Add Clip".
+	fn drop_text_entry(
+		&mut self,
+		project: &ProjectRef,
+		text: NodeId,
+		track_index: usize,
+		time: Frame,
+		cx: &mut Context<Self>,
+	) {
+		let Some(host_seq) = self.sequence else {
+			println!("[real engine] drop text: no sequence open");
+			return;
+		};
+		let video_target = if self
+			.tracks
+			.get(track_index)
+			.is_some_and(|t| t.kind == TrackKind::Video)
+		{
+			track_index
+		} else if let Some(index) = self.tracks.iter().position(|t| t.kind == TrackKind::Video)
+		{
+			index
+		} else {
+			println!("[real engine] drop text: no video track");
+			return;
+		};
+		let video_index = self.tracks[video_target].track_index;
+		// Five seconds of the host sequence's frames (the drop's default
+		// extent — the text clip has no media length to take one from).
+		let (in_ts, length_ts) = {
+			let guard = graphops::lock(project);
+			let Ok(tb) = graphops::sequence_time_base(&guard.graph, host_seq)
+				.ok_or_else(|| "host sequence has no frame rate".to_string())
+			else {
+				println!("[real engine] drop text: host has no frame rate");
+				return;
+			};
+			let fps_f = tb.1.max(1) as f64 / tb.0.max(1) as f64;
+			((time.0.max(0)), ((5.0 * fps_f).round() as i64).max(1))
+		};
+		let placed = graphops::place_text_clip(
+			project,
+			host_seq,
+			text,
+			video_index,
+			in_ts,
+			in_ts + length_ts,
+		);
+		let result = placed.map(|_| ());
+		self.apply_edit(result, "drop text", cx);
 	}
 
 	/// Drops a sequence-project entry on the timeline as a NESTED-SEQUENCE
@@ -10256,6 +10479,315 @@ mod tests {
 			Some(3840),
 			"non-sequence ids do not switch the current sequence"
 		);
+	}
+
+	/// 添加文本素材 through the engine facade: `create_text_footage`
+	/// creates a `text3` generator labelled "文本" mounted under the root
+	/// (the explorer lists it; it is NOT a sequence), and dropping it lands
+	/// a five-second generator clip on the host sequence's first video
+	/// track, wired through `tex_in` and undoable as one row.
+	#[gpui::test]
+	async fn engine_creates_text_footage_and_drops_it_on_the_timeline(
+		cx: &mut gpui::TestAppContext,
+	) {
+		let _media = media_lock();
+		let engine = cx.update(|cx| cx.new(|cx| RealEngine::create(cx)));
+		cx.update(|app| engine.update(app, |engine, cx| engine.new_project(cx)));
+
+		let text = cx.update(|app| {
+			engine
+				.update(app, |engine, cx| engine.create_text_footage(cx))
+				.expect("create text footage")
+		});
+		let project = cx.read(|app| engine.read(app).project.clone().expect("project"));
+		let node = graphops::id_of(text).expect("text node");
+		{
+			let guard = graphops::lock(&project);
+			assert_eq!(
+				graphops::node_type_id(&guard.graph, node),
+				graphops::TEXT_FOOTAGE_TYPE_ID
+			);
+			assert_eq!(
+				graphops::node_label(&guard.graph, node),
+				graphops::TEXT_FOOTAGE_LABEL
+			);
+			let children = guard
+				.graph
+				.get(guard.root)
+				.and_then(|e| e.behavior.as_any())
+				.and_then(|a| a.downcast_ref::<oak_node::folder::FolderBehavior>())
+				.map(|f| f.children.clone())
+				.unwrap_or_default();
+			assert!(
+				children.contains(&node),
+				"the text entry mounts under the root folder"
+			);
+		}
+		let is_seq = cx.read(|app| engine.read(app).entry_is_sequence(text));
+		assert!(!is_seq, "a text entry is not a sequence");
+
+		// Open a host sequence; the drop targets its first video track.
+		let seq = cx.update(|app| {
+			engine
+				.update(app, |engine, cx| {
+					engine
+						.create_sequence_with_params(
+							"Text Drop".to_string(),
+							VideoFormat {
+								width: 1920,
+								height: 1080,
+								rate: FrameRate::new(30000, 1001),
+							},
+							false,
+							cx,
+						)
+						.expect("create sequence")
+				})
+		});
+		cx.update(|app| {
+			engine.update(app, |engine, cx| {
+				engine.drop_footage(text, TrackKind::Video, 0, Frame(25), cx)
+			})
+		});
+
+		let seq_node = graphops::id_of(seq).expect("sequence node");
+		// The drop row is a display row: the engine's track view runs
+		// top-to-bottom, so row 0 is the topmost video track of the
+		// sequence's list (V2 with the default layout).
+		let target_row = cx.read(|app| {
+			let row = &engine.read(app).tracks[0];
+			assert_eq!(row.kind, TrackKind::Video, "the drop row is a video track");
+			row.track_index
+		});
+		let (tb, tracks) = {
+			let guard = graphops::lock(&project);
+			(
+				graphops::sequence_time_base(&guard.graph, seq_node).expect("time base"),
+				graphops::track_ids(&guard.graph, seq_node, TrackType::Video),
+			)
+		};
+		let track = tracks[target_row];
+		{
+			let guard = graphops::lock(&project);
+			let clips = graphops::clip_ids(&guard.graph, track);
+			assert_eq!(clips.len(), 1, "the drop lands exactly one clip: {clips:?}");
+			let clip = clips[0];
+			assert_eq!(
+				graphops::clip_track(&guard.graph, clip),
+				Some(track),
+				"the clip lands on the drop row's video track"
+			);
+			for (index, other) in tracks.iter().enumerate() {
+				if index == target_row {
+					continue;
+				}
+				assert!(
+					graphops::clip_ids(&guard.graph, *other).is_empty(),
+					"the other video tracks stay untouched"
+				);
+			}
+			let (in_r, out_r, _) = graphops::clip_range(&guard.graph, clip).expect("clip range");
+			let fps = tb.1 as f64 / tb.0 as f64;
+			let length = (5.0 * fps).round().max(1.0) as i64;
+			assert_eq!(in_r, graphops::ts_to_rational(25, tb));
+			assert_eq!(
+				out_r,
+				graphops::ts_to_rational(25 + length, tb),
+				"the clip spans five seconds from the drop point"
+			);
+			assert_eq!(
+				guard
+					.graph
+					.connected_output(clip, oak_node::block::clip_input::TEXTURE_INPUT, -1),
+				Some(node),
+				"the clip reads the generator through tex_in"
+			);
+		}
+
+		// One undo removes the clip (and its edge) again.
+		oak_undo::global::undo().unwrap();
+		{
+			let guard = graphops::lock(&project);
+			assert!(
+				graphops::clip_ids(&guard.graph, track).is_empty(),
+				"the undo removes the dropped clip"
+			);
+			assert!(
+				graphops::track_behavior(&guard.graph, track)
+					.map(|t| t.blocks.is_empty())
+					.unwrap_or(false),
+				"the undo also drops the gap the placement inserted"
+			);
+		}
+		oak_undo::global::clear().unwrap();
+	}
+
+	/// 调整图层 through the engine facade: `add_adjustment_layer` places a
+	/// five-second empty block at the clicked frame on a video track (an
+	/// `AdjustmentBlockBehavior` with no footage and no texture wiring),
+	/// refuses audio tracks, resolves through the timeline selection, and is
+	/// undone by one undo step.
+	#[gpui::test]
+	async fn engine_adds_and_undoes_adjustment_layer(cx: &mut gpui::TestAppContext) {
+		let _media = media_lock();
+		let engine = cx.update(|cx| cx.new(|cx| RealEngine::create(cx)));
+		cx.update(|app| engine.update(app, |engine, cx| engine.new_project(cx)));
+
+		let seq = cx.update(|app| {
+			engine.update(app, |engine, cx| {
+				engine
+					.create_sequence_with_params(
+						"Adjustment Layer".to_string(),
+						VideoFormat {
+							width: 1920,
+							height: 1080,
+							rate: FrameRate::new(25, 1),
+						},
+						false,
+						cx,
+					)
+					.expect("create sequence")
+			})
+		});
+		let seq_node = graphops::id_of(seq).expect("sequence node");
+		let project = cx.read(|app| engine.read(app).project.clone().expect("project"));
+		let tb = {
+			let guard = graphops::lock(&project);
+			graphops::sequence_time_base(&guard.graph, seq_node).expect("time base")
+		};
+		let fps = tb.1 as f64 / tb.0.max(1) as f64;
+		let length = (5.0 * fps).round().max(1.0) as i64;
+
+		// An audio row is not a legal host.
+		let audio_row = cx.read(|app| {
+			engine
+				.read(app)
+				.tracks
+				.iter()
+				.position(|row| row.kind == TrackKind::Audio)
+				.expect("the default layout has audio rows")
+		});
+		let rejected = cx.update(|app| {
+			engine.update(app, |engine, cx| {
+				engine.add_adjustment_layer(audio_row, Frame(0), cx)
+			})
+		});
+		let error = rejected.expect_err("audio tracks reject adjustment layers");
+		assert!(
+			error.contains("video track"),
+			"the rejection names the constraint: {error}"
+		);
+
+		// Row 0 is the topmost video row; frame 12 anchors the new layer.
+		let target_row = cx.read(|app| {
+			let row = &engine.read(app).tracks[0];
+			assert_eq!(row.kind, TrackKind::Video, "row 0 is a video track");
+			row.track_index
+		});
+		cx.update(|app| {
+			engine.update(app, |engine, cx| {
+				engine.add_adjustment_layer(0, Frame(12), cx)
+			})
+		})
+		.expect("add adjustment layer");
+
+		// The snapshot carries the new layer: the fixed slate (outside the
+		// per-clip palette), the synthesized label, and the five-second span
+		// from the clicked frame.
+		let (track, clip) = cx.read(|app| {
+			let engine = engine.read(app);
+			let row = &engine.tracks[0];
+			assert_eq!(row.clips.len(), 1, "the add lands exactly one block");
+			(row.track, row.clips[0].clone())
+		});
+		assert_eq!(clip.range, FrameRange::new(Frame(12), Frame(12 + length)));
+		assert_eq!(clip.media_in, Frame(0));
+		assert_eq!(clip.label, SharedString::from("调整图层"));
+		assert_eq!(clip.color, ADJUSTMENT_LAYER_COLOR);
+		assert!(
+			(0..16).all(|index| clip.color != clip_color(index)),
+			"the adjustment slate sits outside the per-clip palette"
+		);
+		let block = clip.block;
+
+		// The graph holds an adjustment block on the row's track, spanning
+		// the same range, with no texture source.
+		{
+			let guard = graphops::lock(&project);
+			let videos = graphops::track_ids(&guard.graph, seq_node, TrackType::Video);
+			assert_eq!(
+				videos[target_row], track,
+				"the display row maps to the graph track"
+			);
+			assert_eq!(graphops::clip_track(&guard.graph, block), Some(track));
+			assert_eq!(
+				graphops::clip_ids(&guard.graph, track),
+				vec![block],
+				"the placed block is the track's only clip"
+			);
+			for (index, other) in videos.iter().enumerate() {
+				if index == target_row {
+					continue;
+				}
+				assert!(
+					graphops::clip_ids(&guard.graph, *other).is_empty(),
+					"the other video tracks stay untouched"
+				);
+			}
+			let entry = guard.graph.get(block).expect("block node");
+			assert!(
+				entry
+					.behavior
+					.as_any()
+					.map(|a| a.is::<oak_node::block::AdjustmentBlockBehavior>())
+					.unwrap_or(false),
+				"the placed block carries the adjustment behavior"
+			);
+			let (in_r, out_r, media_in) =
+				graphops::clip_range(&guard.graph, block).expect("clip range");
+			assert_eq!(in_r, graphops::ts_to_rational(12, tb));
+			assert_eq!(
+				out_r,
+				graphops::ts_to_rational(12 + length, tb),
+				"the layer spans five seconds from the clicked frame"
+			);
+			assert_eq!(media_in, oak_core::Rational::new(0, 1));
+			assert!(
+				!guard.graph.is_input_connected(
+					block,
+					oak_node::block::adjustment_input::TEXTURE_INPUT,
+					-1
+				),
+				"the adjustment layer carries no texture source"
+			);
+		}
+
+		// The timeline selection resolves the snapshot id to the block (the
+		// inspector targets adjustment layers like any clip).
+		cx.update(|app| {
+			engine.update(app, |engine, cx| {
+				engine.set_selected_clips(vec![ClipId(block.identity())], cx)
+			})
+		});
+		let selected = cx.read(|app| engine.read(app).selected_clip_node());
+		assert_eq!(selected, Some(block), "the selected layer resolves to its block");
+
+		// One undo removes the placement (and the leading gap) again.
+		oak_undo::global::undo().unwrap();
+		{
+			let guard = graphops::lock(&project);
+			assert!(
+				graphops::clip_ids(&guard.graph, track).is_empty(),
+				"the undo removes the placed adjustment layer"
+			);
+			assert!(
+				graphops::track_behavior(&guard.graph, track)
+					.map(|t| t.blocks.is_empty())
+					.unwrap_or(false),
+				"the undo also drops the gap the placement inserted"
+			);
+		}
+		oak_undo::global::clear().unwrap();
 	}
 
 	/// `update_sequence_parameters` rewrites the name, the format and the

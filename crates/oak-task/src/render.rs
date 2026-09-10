@@ -542,6 +542,7 @@ impl RenderTask {
 				cache_timebase: None,
 				footage: Some((filename, 0)),
 				montage: Vec::new(),
+				adjustments: Vec::new(),
 			}),
 			// Sequence viewer: the montage is resolved without the lock.
 			None => {
@@ -558,6 +559,7 @@ impl RenderTask {
 					cache_timebase: None,
 					footage: None,
 					montage,
+					adjustments: Vec::new(),
 				})
 			}
 		}

@@ -117,6 +117,7 @@ fn main() {
 				// A single footage clip covers the whole timeline.
 				footage: Some((media_clone, 0)),
 				montage: Vec::new(),
+				adjustments: Vec::new(),
 			}),
 			audio: None,
 			produce: Arc::new(|_, _| {

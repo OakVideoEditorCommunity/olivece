@@ -136,6 +136,16 @@ pub struct TransitionBlockBehavior {
 	pub out_offset: Rational,
 }
 
+/// Adjustment block behavior: a block spanning a timeline range that hosts
+/// an effect chain (the "adjustment layer"). Its effect chain is attached
+/// exactly like a clip's, through `tex_in`; the source texture is supplied
+/// by the renderer (the composite of the tracks below), so `value()` only
+/// passes a connected texture through and a bare adjustment block is inert.
+pub struct AdjustmentBlockBehavior {
+	/// Block core.
+	pub core: BlockCore,
+}
+
 /// ClipBlock input ids (C++ `clip.cpp`).
 pub mod clip_input {
 	/// `tex_in` (texture, static) — the clip's effect input (C++
@@ -160,6 +170,18 @@ pub mod transition_input {
 	pub const OUT_BLOCK: &str = "out_block_in";
 	/// `in_block_in` (the incoming side).
 	pub const IN_BLOCK: &str = "in_block_in";
+	/// The transition style combo (`crate::nodes::transitions` owns the
+	/// names and the shader ids they map to). Not part of the C++ input
+	/// set — the C++ transition block is cross-dissolve only.
+	pub const TYPE_INPUT: &str = "type_in";
+}
+
+/// AdjustmentBlock input ids.
+pub mod adjustment_input {
+	/// `tex_in` (texture, static) — the adjustment layer's effect input
+	/// (same id every effect node and the clip use, so the effect chain
+	/// machinery works unchanged).
+	pub const TEXTURE_INPUT: &str = "tex_in";
 }
 
 /// Save the shared [`BlockCore`] custom fields (C++ persists the
@@ -267,6 +289,15 @@ impl TransitionBlockBehavior {
 	/// edges).
 	pub fn is_dual(&self) -> bool {
 		false
+	}
+}
+
+impl AdjustmentBlockBehavior {
+	/// New adjustment layer with a default length of one second.
+	pub fn new() -> Self {
+		AdjustmentBlockBehavior {
+			core: BlockCore::default(),
+		}
 	}
 }
 
@@ -498,8 +529,10 @@ impl NodeBehavior for TransitionBlockBehavior {
 		true
 	}
 
-	/// No video output yet (C++ transition crossfades are not ported; a
-	/// transition renders as a hole for now).
+	/// No video output of its own: the renderer blends the two blocks
+	/// this one joins at the track level (`oak_render::eval`'s transition
+	/// step), so the block node itself never produces a texture and a
+	/// track carrying only a transition renders as a hole.
 	fn value(
 		&self,
 		_core: &NodeCore,
@@ -507,6 +540,75 @@ impl NodeBehavior for TransitionBlockBehavior {
 		_time: Rational,
 		_table: &mut NodeValueTable,
 	) {
+	}
+}
+
+impl NodeBehavior for AdjustmentBlockBehavior {
+	fn name(&self) -> &str {
+		"Adjustment Layer"
+	}
+
+	fn type_id(&self) -> &str {
+		"org.olivevideoeditor.Olive.adjustment"
+	}
+
+	fn categories(&self) -> &[Category] {
+		block_categories()
+	}
+
+	fn as_any(&self) -> Option<&dyn std::any::Any> {
+		Some(self)
+	}
+
+	fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+		Some(self)
+	}
+
+	fn duplicate(&self, _core: &NodeCore) -> Option<Box<dyn NodeBehavior>> {
+		Some(Box::new(AdjustmentBlockBehavior {
+			core: self.core.clone(),
+		}))
+	}
+
+	/// Custom project save: the shared block span/state only (the effect
+	/// chain lives in the graph edges, like a clip's).
+	fn save_custom(&self, core: &NodeCore, writer: &mut dyn crate::serializer::XmlWrite) {
+		let _ = core;
+		save_block_core(writer, &self.core);
+	}
+
+	/// Custom project load; the track reference resolves in the
+	/// serializer's post-load pass.
+	fn load_custom(
+		&mut self,
+		_core: &mut NodeCore,
+		reader: &mut dyn crate::serializer::XmlRead,
+	) -> bool {
+		load_block_core(reader, &mut self.core, &mut |_, _| false);
+		true
+	}
+
+	/// Pass the connected texture through (same shape as the clip's
+	/// `value()`): an unconnected `tex_in` yields nothing, so a bare
+	/// adjustment layer is inert. The renderer drives the adjustment by
+	/// feeding the lower composition into the head of the effect chain.
+	fn value(
+		&self,
+		_core: &NodeCore,
+		inputs: &NodeValueRow,
+		_time: Rational,
+		table: &mut NodeValueTable,
+	) {
+		if !self.core.enabled {
+			return;
+		}
+		let Some(value) = inputs.get(adjustment_input::TEXTURE_INPUT) else {
+			return;
+		};
+		// `NodeValue::clone` addrefs the texture handle so the table row
+		// owns its own reference (released on drop); a plain handle copy
+		// would double-release the input's reference.
+		table.push(ValueType::Texture, value.clone(), None);
 	}
 }
 
@@ -583,7 +685,10 @@ pub fn gap_create() -> (NodeCore, Box<dyn NodeBehavior>) {
 }
 
 /// Constructor for a transition block (C++ `TransitionBlock`): adds the
-/// `out_block_in`/`in_block_in` node-typed connection inputs.
+/// `out_block_in`/`in_block_in` node-typed connection inputs plus the
+/// transition style combo (the C++ block is cross-dissolve only; the
+/// combo lets the composite driver pick between the four shaders in
+/// [`crate::nodes::transitions`]).
 pub fn transition_create() -> (NodeCore, Box<dyn NodeBehavior>) {
 	let mut core = NodeCore::new();
 	let mut out = Input::new(
@@ -604,7 +709,41 @@ pub fn transition_create() -> (NodeCore, Box<dyn NodeBehavior>) {
 	inn.display_name = "To".to_string();
 	core.add_input(inn);
 
+	let mut ty = Input::new(
+		transition_input::TYPE_INPUT,
+		ValueType::Combo,
+		NodeValue::Combo(0),
+	);
+	ty.flags |= crate::input::flags::NOT_CONNECTABLE | crate::input::flags::NOT_KEYFRAMABLE;
+	ty.properties = vec![(
+		"combobox_strings".to_string(),
+		NodeValue::Binary(crate::nodes::transitions::TYPE_NAMES.join(",").into_bytes()),
+	)];
+	core.add_input(ty);
+
 	(core, Box::new(TransitionBlockBehavior::new()))
+}
+
+/// Constructor for an adjustment block (the "adjustment layer"): a single
+/// connectable, non-keyframable `tex_in` texture input that doubles as the
+/// block's effect input. No footage link and no media/speed/reverse inputs
+/// — the block owns only its timeline span.
+pub fn adjustment_create() -> (NodeCore, Box<dyn NodeBehavior>) {
+	let mut core = NodeCore::new();
+
+	// Same convention as `clip_create`: the texture input sits right after
+	// the inherited `enabled_in` so the effect chain attaches at position
+	// one and the renderer can swap the whole chain in and out.
+	let mut tex = Input::new(
+		adjustment_input::TEXTURE_INPUT,
+		ValueType::Texture,
+		NodeValue::None,
+	);
+	tex.flags |= crate::input::flags::NOT_KEYFRAMABLE;
+	core.inputs.insert(1, tex);
+	core.effect_input = adjustment_input::TEXTURE_INPUT.to_string();
+
+	(core, Box::new(AdjustmentBlockBehavior::new()))
 }
 
 #[cfg(test)]
@@ -769,5 +908,72 @@ mod tests {
 				.connected_output(clip_id, clip_input::TEXTURE_INPUT, -1),
 			Some(effect_id)
 		);
+	}
+
+	/// The adjustment layer declares one connectable, non-keyframable
+	/// `tex_in` texture input and uses it as the effect input (the clip's
+	/// convention, without the media/speed inputs).
+	#[test]
+	fn adjustment_effect_input_and_texture_input() {
+		let (core, behavior) = adjustment_create();
+		assert_eq!(behavior.name(), "Adjustment Layer");
+		assert_eq!(behavior.type_id(), "org.olivevideoeditor.Olive.adjustment");
+		assert_eq!(core.effect_input, adjustment_input::TEXTURE_INPUT);
+
+		let tex = core
+			.get_input(adjustment_input::TEXTURE_INPUT)
+			.expect("adjustment declares a texture input");
+		assert_eq!(tex.value_type, ValueType::Texture);
+		assert_eq!(tex.default, NodeValue::None);
+		assert_ne!(tex.flags & crate::input::flags::NOT_KEYFRAMABLE, 0);
+		assert!(
+			tex.is_connectable(),
+			"effects attach through the texture input"
+		);
+
+		// `tex_in` sits right after the inherited `enabled_in`, and the
+		// adjustment declares no further inputs.
+		let ids: Vec<&str> = core.inputs.iter().map(|i| i.id.as_str()).collect();
+		assert_eq!(
+			ids,
+			vec![crate::node::ENABLED_INPUT, adjustment_input::TEXTURE_INPUT,]
+		);
+	}
+
+	/// The adjustment layer copies the connected `tex_in` texture to its
+	/// output; disabled and unconnected adjustment layers emit nothing
+	/// (the renderer feeds the chain's head when it drives the block).
+	#[test]
+	fn adjustment_value_passes_connected_texture_only() {
+		let mut inputs = NodeValueRow::new();
+		let handle = crate::handle::make_owned(43i32);
+		inputs.insert(
+			adjustment_input::TEXTURE_INPUT.to_string(),
+			NodeValue::Texture(handle),
+		);
+
+		let behavior = AdjustmentBlockBehavior::new();
+		let mut table = NodeValueTable::default();
+		behavior.value(&NodeCore::empty(), &inputs, Rational::new(0, 1), &mut table);
+		assert_eq!(table.count(), 1);
+		let NodeValue::Texture(out) = table.get(ValueType::Texture).unwrap() else {
+			unreachable!()
+		};
+		assert_eq!(out.ctx, handle.ctx, "the same texture box passes through");
+
+		let mut disabled = AdjustmentBlockBehavior::new();
+		disabled.core.enabled = false;
+		let mut table = NodeValueTable::default();
+		disabled.value(&NodeCore::empty(), &inputs, Rational::new(0, 1), &mut table);
+		assert_eq!(table.count(), 0, "disabled adjustment emits nothing");
+
+		let mut table = NodeValueTable::default();
+		behavior.value(
+			&NodeCore::empty(),
+			&NodeValueRow::new(),
+			Rational::new(0, 1),
+			&mut table,
+		);
+		assert_eq!(table.count(), 0, "unconnected adjustment emits nothing");
 	}
 }

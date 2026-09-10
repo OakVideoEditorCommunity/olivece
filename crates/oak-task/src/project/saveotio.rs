@@ -143,8 +143,10 @@ impl SaveOTIOTask {
 	}
 
 	/// Serialize one track: a `Track` whose kind matches the native track
-	/// type, one OTIO block per native block, plus a trailing `Gap` when the
-	/// track is shorter than `max_track_length`.
+	/// type, one OTIO block per native block (an adjustment layer, which has
+	/// no OTIO equivalent, becomes an equal-length `Gap` so later children
+	/// keep their timeline positions), plus a trailing `Gap` when the track
+	/// is shorter than `max_track_length`.
 	///
 	/// CPP-PARITY: saveotio.cpp (SaveOTIOTask::serialize_track)
 	fn serialize_track(
@@ -258,7 +260,28 @@ impl SaveOTIOTask {
 
 					Some(Composable::Transition(otio_transition))
 				}
-				nodeops::BlockKind::Other => None,
+				nodeops::BlockKind::Other => {
+					// Adjustment layers have no OTIO equivalent. OTIO places
+					// children sequentially, so dropping the block would shift
+					// every following child left; keeping its span as a Gap
+					// holds the timeline in place (and round-trips as a gap,
+					// which is what "no adjustment applied" means here).
+					nodeops::block_is_adjustment(project, block).then(|| {
+						Composable::Gap(Gap::new(
+							TimeRange::new(
+								RationalTime::from_rational(
+									block_in_of(project, block),
+									sequence_rate,
+								),
+								RationalTime::from_rational(
+									block_length_of(project, block),
+									sequence_rate,
+								),
+							),
+							nodeops::node_label(project, block),
+						))
+					})
+				}
 			};
 
 			let Some(otio_block) = otio_block else {

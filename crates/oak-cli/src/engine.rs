@@ -657,6 +657,7 @@ pub fn render_frame(
 		cache_timebase: None,
 		footage: None,
 		montage,
+		adjustments: Vec::new(),
 	};
 	let id = m.tickets.next_id();
 	m.tickets.submit_video_with_id(id, params, Box::new(|_| {}));
