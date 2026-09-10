@@ -47,8 +47,8 @@ use crate::oakui::component::text_input;
 use gpui::effect_stack::EffectId;
 use gpui::colors::DefaultColors;
 use gpui::{
-	div, prelude::*, px, rgb, size, point, ClickEvent, Context, Entity, EventEmitter, Render,
-	SharedString, Window,
+	div, prelude::*, px, rgb, size, point, ClickEvent, Context, Entity, EventEmitter, Focusable,
+	Render, SharedString, Window,
 };
 use gpui::{
 	Anchor, App, Bounds, ElementId, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseUpEvent,
@@ -142,7 +142,7 @@ impl<E: AppEngine> OfxParamsView<E> {
 
 	/// Applies the engine's current values to every control (called each
 	/// render so external edits / undo / redo land on the controls).
-	fn sync_values(&mut self, cx: &mut Context<Self>) {
+	fn sync_values(&mut self, window: &Window, cx: &mut Context<Self>) {
 		let params = self.engine.read(cx).effect_params(self.effect).unwrap_or_default();
 		for control in &self.controls {
 			let Some(param) = params.iter().find(|p| p.input_id == control.input_id) else {
@@ -207,6 +207,15 @@ impl<E: AppEngine> OfxParamsView<E> {
 						NodeValue::StrCombo(s) => s.clone(),
 						_ => continue,
 					};
+					// Never re-sync a field the user is editing: the
+					// params view re-renders on every engine tick, and
+					// reapplying the engine snapshot mid-edit wipes the
+					// in-progress text (the "cannot type into the text
+					// field" report). The field re-syncs on blur, and
+					// the row's explicit commit writes the edit back.
+					if editor.read(cx).focus_handle(cx).is_focused(window) {
+						continue;
+					}
 					let editor = editor.clone();
 					editor.update(cx, |editor, cx| {
 						if editor.as_str() != text {
@@ -842,9 +851,9 @@ fn patch_component(value: &NodeValue, channel: usize, component: f64) -> NodeVal
 }
 
 impl<E: AppEngine> Render for OfxParamsView<E> {
-	fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+	fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
 		let colors = cx.default_colors().clone();
-		self.sync_values(cx);
+		self.sync_values(window, cx);
 
 		let mut body = div().flex().flex_col().gap_1().p_2();
 		let mut last_section: Option<(String, String)> = None;
@@ -2657,4 +2666,88 @@ mod tests {
 		assert_eq!(point_from_sv(bounds, 0.5, 0.5), at(60.0, 45.0));
 		assert_eq!(point_from_sv(bounds, -1.0, 2.0), at(10.0, 20.0));
 	}
+	/// A text field the user is editing is never re-synced mid-edit: the
+	/// params view re-renders on every engine change, and reapplying the
+	/// engine snapshot would wipe the in-progress text (the "cannot type
+	/// into the text field" report). On blur the field re-syncs to the
+	/// engine value.
+	#[gpui::test]
+	async fn text_field_keeps_in_progress_edits_while_focused(cx: &mut TestAppContext) {
+		use crate::oakui::mock::MockEngine;
+		struct Host {
+			view: Entity<OfxParamsView<MockEngine>>,
+		}
+		impl Render for Host {
+			fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+				div().size_full().child(self.view.clone())
+			}
+		}
+		cx.update(|cx| cx.init_colors());
+		let window = cx.open_window(size(px(400.0), px(200.0)), |window, cx| {
+			let engine = cx.new(|cx| MockEngine::create(cx));
+			let view = cx.new(|cx| OfxParamsView::<MockEngine>::new(EffectId(900), engine, window, cx));
+			Host { view }
+		});
+		cx.run_until_parked();
+		let host = window.root(cx).expect("host root");
+		let view = cx.read(|cx| host.read(cx).view.clone());
+		let editor = cx.read(|cx| {
+			view.read(cx)
+				.controls
+				.iter()
+				.find_map(|c| match &c.kind {
+					ControlKind::Text(editor) => Some(editor.clone()),
+					_ => None,
+				})
+				.expect("a text control")
+		});
+		assert_eq!(
+			cx.read(|cx| editor.read(cx).as_str().to_string()),
+			"<p>engine text</p>"
+		);
+
+		// Focus the field and type: the in-progress text must survive the
+		// engine-notify re-sync (the tick-rate repaint).
+		window
+			.update(cx, |_root, window, cx| {
+				let handle = editor.read(cx).focus_handle(cx);
+				window.focus(&handle, cx);
+			})
+			.unwrap();
+		cx.update(|cx| {
+			editor.update(cx, |editor, cx| editor.emplace("user typed", cx));
+		});
+		cx.update(|cx| {
+			view.update(cx, |view, cx| {
+				let engine = view.engine.clone();
+				engine.update(cx, |_engine, cx| cx.notify());
+			});
+		});
+		cx.run_until_parked();
+		assert_eq!(
+			cx.read(|cx| editor.read(cx).as_str().to_string()),
+			"user typed",
+			"the in-progress text survives the re-sync while focused"
+		);
+
+		// On blur the field re-syncs to the engine value.
+		window
+			.update(cx, |_root, window, _cx| {
+				window.blur();
+			})
+			.unwrap();
+		cx.update(|cx| {
+			view.update(cx, |view, cx| {
+				let engine = view.engine.clone();
+				engine.update(cx, |_engine, cx| cx.notify());
+			});
+		});
+		cx.run_until_parked();
+		assert_eq!(
+			cx.read(|cx| editor.read(cx).as_str().to_string()),
+			"<p>engine text</p>",
+			"the field re-syncs to the engine value on blur"
+		);
+	}
 }
+

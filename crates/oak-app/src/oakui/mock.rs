@@ -1404,6 +1404,21 @@ impl AppEngine for MockEngine {
 		Ok(())
 	}
 
+	fn effect_params(&self, effect: EffectId) -> Option<Vec<crate::oakui::engine::EffectParam>> {
+		// A canned text parameter behind a sentinel id, for the params
+		// view's text-field tests.
+		(effect.0 == 900).then(|| {
+			vec![crate::oakui::engine::EffectParam {
+				input_id: "text_in".to_string(),
+				display_name: "Text".to_string(),
+				value_type: oak_node::value::ValueType::Text,
+				value: oak_node::value::NodeValue::Text("<p>engine text</p>".to_string()),
+				flags: 0,
+				properties: Vec::new(),
+			}]
+		})
+	}
+
 	fn add_node_at(
 		&mut self,
 		type_id: &str,
