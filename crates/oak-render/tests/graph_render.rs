@@ -639,3 +639,88 @@ fn chromakey_job_keys_green_with_ociobased_stub() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// Generator sizing is anchored to the SEQUENCE resolution (C++ inserts
+/// the NodeGlobals square resolution as `resolution_in` at job-build
+/// time), not the render target: a proxy-size playback render and a
+/// full-res paused frame must draw the shape at the same relative size,
+/// or the generated layer visibly changes size whenever the transport
+/// stops. A 96px rectangle on the default 1920x1080 sequence spans 5%
+/// of the width at BOTH 192x108 and 768x432 (the pre-fix
+/// target-anchored behavior drew 50% vs 12.5%).
+#[test]
+fn shape_generator_size_is_sequence_relative() {
+    if oak_core::backend::GpuContext::shared().is_none() {
+        eprintln!("skipping shape_generator_size_is_sequence_relative: no GPU adapter");
+        return;
+    }
+    let path = clip_path("shape_seqrel");
+    oak_codec::testmedia::write_test_clip_solid(&path, 64, 64, 10, 10, [0.0, 0.0, 1.0, 1.0])
+        .expect("blue clip generation");
+
+    let (project, seq) = build_effect_project(
+        (&path.to_string_lossy(), Rational::new(0, 1), Rational::new(1, 1)),
+        |p, footage, clip| {
+            let (ecore, ebehavior) = oak_node::factory::Factory::global()
+                .create_any("org.olivevideoeditor.Olive.shape")
+                .expect("shape factory entry");
+            let effect = p.graph.add_node(ecore, ebehavior);
+            p.graph.disconnect(footage, clip, oak_node::block::clip_input::TEXTURE_INPUT, -1);
+            // The shape module is crate-private; the input ids are the C++
+            // kBaseInput/kSizeInput strings.
+            p.graph
+                .connect(footage, effect, "base_in", -1)
+                .expect("connect footage to shape base");
+            p.graph
+                .connect(effect, clip, oak_node::block::clip_input::TEXTURE_INPUT, -1)
+                .expect("connect shape to clip");
+            p.graph.get_mut(effect).unwrap().core.set_standard_value(
+                "size_in",
+                -1,
+                oak_node::value::NodeValue::Vec2([96.0, 96.0]),
+            );
+            effect
+        },
+    );
+
+    // The fraction of the middle row covered by the opaque red square.
+    let red_fraction = |width: i32, height: i32| -> f32 {
+        let tex = oak_render::eval::render_graph_frame(
+            &project,
+            seq,
+            Rational::new(0, 1),
+            (width, height),
+            PixelFormat::F32,
+        )
+        .expect("shape render");
+        let Texture::Cpu(frame) = &tex else {
+            panic!("graph render produced a non-CPU texture");
+        };
+        let stride = frame.linesize_bytes() as usize;
+        let y = (height / 2) as usize;
+        let mut red = 0usize;
+        for x in 0..width as usize {
+            let off = y * stride + x * 16;
+            let r = f32::from_le_bytes(frame.data[off..off + 4].try_into().unwrap());
+            let g = f32::from_le_bytes(frame.data[off + 4..off + 8].try_into().unwrap());
+            let a = f32::from_le_bytes(frame.data[off + 12..off + 16].try_into().unwrap());
+            if r > 0.9 && g < 0.1 && a > 0.9 {
+                red += 1;
+            }
+        }
+        red as f32 / width as f32
+    };
+
+    let small = red_fraction(192, 108);
+    let large = red_fraction(768, 432);
+    assert!(
+        (small - large).abs() < 0.02,
+        "the shape's relative size must not depend on the render target: {small} at 192px vs {large} at 768px"
+    );
+    assert!(
+        (small - 0.05).abs() < 0.02,
+        "96px on the 1920px sequence is 5%%, got {small}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}

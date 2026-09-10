@@ -164,6 +164,14 @@ pub struct RenderEvalHooks {
     /// texture at the output resolution). The graph-sequence driver sets
     /// this to the sequence frame size.
     pub frame_size: Option<(i32, i32)>,
+    /// The sequence's square-pixel resolution (C++ the `NodeGlobals`
+    /// square resolution the shape/polygon generators insert as
+    /// `resolution_in` at job-build time). Generator jobs anchor their
+    /// pixel-size params to this — NOT to the render-target size — so a
+    /// proxy-resolution playback render draws them at the same relative
+    /// size as a paused full-res frame. `None` (non-sequence renders)
+    /// falls back to the render-target size.
+    pub sequence_size: Option<(i32, i32)>,
 
 }
 
@@ -274,6 +282,7 @@ impl RenderEvalHooks {
             use_cache: false,
             ticket: None,
             frame_size: None,
+            sequence_size: None,
         }
     }
 
@@ -794,6 +803,36 @@ impl RenderEvalHooks {
         // nobody knows better.
         let size = size.or(self.frame_size).unwrap_or((1, 1));
 
+        // `resolution_in` anchors to the sequence square resolution, not
+        // the render target (C++ inserts the NodeGlobals square
+        // resolution into the job at build time): the node params it
+        // denormalizes (shape size/pos, transform offsets, corner pin
+        // points, drop shadow distance) are all sequence-pixel values,
+        // so a proxy-size playback render must resolve them against the
+        // same resolution as a paused full-res frame, or the effect
+        // visibly changes size whenever the transport stops. Pre-filling
+        // the row wins over `run_effect`'s frame-size auto-fill; a node
+        // that inserted its own `resolution_in` keeps it.
+        let mut sequence_row;
+        let params = if self.sequence_size.is_some()
+            && !payload.params.contains_key("resolution_in")
+            && compiled
+                .translated
+                .uniforms
+                .iter()
+                .any(|u| u.name == "resolution_in")
+        {
+            let (w, h) = self.sequence_size.unwrap();
+            sequence_row = payload.params.clone();
+            sequence_row.insert(
+                "resolution_in".to_string(),
+                NodeValue::Vec2([w as f64, h as f64]),
+            );
+            &sequence_row
+        } else {
+            &payload.params
+        };
+
         let dst = match ctx.create_texture(size.0.max(1), size.1.max(1)) {
             Ok(t) => t,
             Err(err) => {
@@ -808,7 +847,7 @@ impl RenderEvalHooks {
         let result = run_effect(
             &ctx,
             &compiled,
-            &payload.params,
+            params,
             &inputs,
             dst,
             size,
@@ -1441,6 +1480,13 @@ pub fn render_graph_frame(
     let mut traverser = oak_node::traverser::Traverser::new();
     let mut hooks = RenderEvalHooks::new();
     hooks.frame_size = Some(size);
+    // The generators' `resolution_in` anchor (C++ NodeGlobals square
+    // resolution): the sequence's native size, so proxy-size playback and
+    // full-res paused frames draw generated layers identically.
+    hooks.sequence_size = sequence
+        .video_params
+        .first()
+        .map(|p| (p.width.max(1), p.height.max(1)));
     let perf = std::env::var_os("OAK_PERF").is_some();
     let mut perf_collect = perf.then(std::time::Instant::now);
     let mut perf_collect_ms = 0.0f64;
