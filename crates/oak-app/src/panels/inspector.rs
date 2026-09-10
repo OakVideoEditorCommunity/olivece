@@ -29,6 +29,8 @@ use gpui::{
 use crate::oakui::component::menu::{Menu, MenuItem};
 
 use crate::oakui::component::menu::{ContextMenuHandle, ContextMenuTriggered};
+use crate::oakui::effectchain::group_label;
+use crate::oakui::engine::EffectEntry;
 use crate::oakui::AppEngine;
 use crate::panels::commands::PanelCommandHandler;
 use crate::panels::ids::INSPECTOR;
@@ -141,13 +143,13 @@ impl<E: AppEngine> InspectorPanel<E> {
 		}
 	}
 
-	/// The "add effect" menu: one clickable row per addable effect of the
-	/// engine. Selecting a row inserts that effect at the recorded stack
-	/// index; the ✕ in the pinned header closes the menu without adding.
-	/// The list is height-capped and scrollable (with the OFX plugins
-	/// registered it runs to 150+ rows — an uncapped list pushed the
-	/// dismiss affordance far off-screen, making the menu impossible to
-	/// close).
+	/// The "add effect" menu: a group header row per resolved effect group,
+	/// each followed by that group's effect rows. Selecting an effect row
+	/// inserts it at the recorded stack index; the ✕ in the pinned header
+	/// closes the menu without adding. The list is height-capped and
+	/// scrollable (with the OFX plugins registered it runs to 150+ rows — an
+	/// uncapped list pushed the dismiss affordance far off-screen, making the
+	/// menu impossible to close).
 	fn render_add_menu(
 		&mut self,
 		index: usize,
@@ -165,7 +167,26 @@ impl<E: AppEngine> InspectorPanel<E> {
 			.px_2()
 			.py_1();
 
-		for entry in &effects {
+		for row in add_menu_rows(&effects) {
+			let entry = match row {
+				AddMenuRow::Header { key, label } => {
+					let key = key.unwrap_or_default().to_string();
+					list = list.child(
+						div()
+							.id(SharedString::from(format!("add-effect-group-{key}")))
+							.debug_selector(move || format!("add-effect-group-row-{key}").into())
+							.pt_2()
+							.pb_1()
+							.px_2()
+							.text_xs()
+							.font_weight(gpui::FontWeight(600.0))
+							.text_color(colors.disabled)
+							.child(label),
+					);
+					continue;
+				}
+				AddMenuRow::Effect(entry) => entry,
+			};
 			let engine = self.engine.clone();
 			let type_id = entry.type_id.clone();
 			let name = entry.name.clone();
@@ -234,6 +255,51 @@ impl<E: AppEngine> InspectorPanel<E> {
 			)
 			.child(list)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Add-effect menu rows — the engine's addable-effect table (already grouped
+// and sorted) flattened into one non-clickable header per group followed by
+// the group's entries. The labels come from the same
+// `effectchain::group_label` resolution the effect library uses, so both
+// surfaces name a group alike.
+// ---------------------------------------------------------------------------
+
+/// One row of the add-effect menu.
+enum AddMenuRow<'a> {
+	/// A group's header: the raw group key (`None` for an entry without a
+	/// group, i.e. a built-in from before the category grouping) and its
+	/// display label.
+	Header {
+		/// The group key, the same value [`EffectEntry::group`] holds.
+		key: Option<&'a str>,
+		/// The localized label.
+		label: String,
+	},
+	/// One addable effect.
+	Effect(&'a EffectEntry),
+}
+
+/// Flattens `entries` — in the order the engine yields them, groups
+/// contiguous and sorted — into header + entry rows.
+fn add_menu_rows(entries: &[EffectEntry]) -> Vec<AddMenuRow<'_>> {
+	let mut rows = Vec::with_capacity(entries.len() + 8);
+	let mut last: Option<Option<&str>> = None;
+	for entry in entries {
+		let group = entry.group.as_deref();
+		if last != Some(group) {
+			last = Some(group);
+			rows.push(AddMenuRow::Header {
+				key: group,
+				label: match group {
+					Some(group) => group_label(group),
+					None => crate::i18n::tr("effect_library.group.builtin").to_string(),
+				},
+			});
+		}
+		rows.push(AddMenuRow::Effect(entry));
+	}
+	rows
 }
 
 /// The inspector implements no focused-panel commands: everything falls
@@ -377,5 +443,58 @@ mod tests {
 				assert_eq!(menu.items[3].id, LOCAL_PROPERTIES);
 			}
 		}
+	}
+
+	/// The add menu flattens the engine's table into one header per group,
+	/// labelled through the same resolution the effect library uses, with
+	/// the entries keeping the engine's (grouped, sorted) order.
+	#[test]
+	fn add_menu_rows_emit_one_header_per_group() {
+		let entries = vec![
+			EffectEntry {
+				type_id: "oak:first".to_string(),
+				name: "First".to_string(),
+				group: Some("color".to_string()),
+			},
+			EffectEntry {
+				type_id: "oak:second".to_string(),
+				name: "Second".to_string(),
+				group: Some("color".to_string()),
+			},
+			EffectEntry {
+				type_id: "ofx:plugin".to_string(),
+				name: "Plugin".to_string(),
+				group: Some("Filter".to_string()),
+			},
+			EffectEntry {
+				type_id: "oak:ungrouped".to_string(),
+				name: "Ungrouped".to_string(),
+				group: None,
+			},
+		];
+		let shape: Vec<String> = add_menu_rows(&entries)
+			.iter()
+			.map(|row| match row {
+				AddMenuRow::Header { key, label } => {
+					format!("header:{}:{label}", key.unwrap_or("-"))
+				}
+				AddMenuRow::Effect(entry) => format!("effect:{}", entry.type_id),
+			})
+			.collect();
+		assert_eq!(
+			shape,
+			vec![
+				format!("header:color:{}", group_label("color")),
+				"effect:oak:first".to_string(),
+				"effect:oak:second".to_string(),
+				format!("header:Filter:{}", group_label("Filter")),
+				"effect:ofx:plugin".to_string(),
+				format!(
+					"header:-:{}",
+					crate::i18n::tr("effect_library.group.builtin")
+				),
+				"effect:oak:ungrouped".to_string(),
+			]
+		);
 	}
 }
