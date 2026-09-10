@@ -114,6 +114,8 @@ impl<E: AppEngine> ProjectExplorerPanel<E> {
 				if self.engine.read(cx).entry_path(id).is_some() {
 					let proxy = self.engine.read(cx).proxy_row(id);
 					footage_menu(true, proxy.as_ref())
+				} else if self.engine.read(cx).entry_is_sequence(id) {
+					sequence_menu()
 				} else {
 					entry_menu()
 				}
@@ -183,6 +185,12 @@ impl<E: AppEngine> ProjectExplorerPanel<E> {
 				} else {
 					println!("[project explorer] properties for non-sequence entry {id} (not implemented yet)");
 				}
+			}
+			LOCAL_EXPORT_SEQUENCE => {
+				let Some(id) = self.context_entry else {
+					return;
+				};
+				cx.emit(ExportSequenceRequested(id));
 			}
 			LOCAL_PROXY_GENERATE | LOCAL_PROXY_USE | LOCAL_PROXY_REVEAL | LOCAL_PROXY_DELETE => {
 				let Some(id) = self.context_entry else {
@@ -320,6 +328,13 @@ pub struct DeleteRequested(pub u64);
 
 impl<E: AppEngine> EventEmitter<DeleteRequested> for ProjectExplorerPanel<E> {}
 
+/// The project explorer asked the shell to open the 导出序列 dialog for
+/// the given sequence entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportSequenceRequested(pub u64);
+
+impl<E: AppEngine> EventEmitter<ExportSequenceRequested> for ProjectExplorerPanel<E> {}
+
 impl<E: AppEngine> DockPanel for ProjectExplorerPanel<E> {
 	fn panel_id(&self) -> gpui::dock::PanelId {
 		PROJECT
@@ -353,6 +368,7 @@ const LOCAL_PROXY_DELETE: usize = 2208;
 const LOCAL_RENAME: usize = 2209;
 const LOCAL_DELETE: usize = 2210;
 const LOCAL_PROPERTIES: usize = 2211;
+const LOCAL_EXPORT_SEQUENCE: usize = 2212;
 
 /// The proxy submenu (shared shape with the timeline's): enable state
 /// follows the footage's proxy fields (the C++ project explorer gates
@@ -448,6 +464,20 @@ pub(crate) fn entry_menu() -> Menu {
 	])
 }
 
+/// A sequence entry's context menu: the generic entry items plus 导出序列
+/// (the 文件 → 导出序列 dialog preselected to this sequence).
+pub(crate) fn sequence_menu() -> Menu {
+	let mut menu = entry_menu();
+	menu.items.push(
+		MenuItem::new(
+			LOCAL_EXPORT_SEQUENCE,
+			crate::i18n::tr("project.context.export_sequence"),
+		)
+		.separated(),
+	);
+	menu
+}
+
 /// Reveals `path` in the platform file manager (Finder on macOS, Explorer
 /// on Windows, `xdg-open` on the parent directory elsewhere).
 fn reveal_in_finder(path: &std::path::Path) {
@@ -530,5 +560,29 @@ mod tests {
 				LOCAL_PROPERTIES,
 			]
 		);
+	}
+
+	/// The sequence menu appends 导出序列 to the generic entry items.
+	#[test]
+	fn sequence_menu_appends_export() {
+		let menu = sequence_menu();
+		let ids: Vec<usize> = menu.items.iter().map(|item| item.id).collect();
+		assert_eq!(
+			ids,
+			vec![
+				LOCAL_OPEN_IN_NEW_TAB,
+				LOCAL_OPEN_IN_NEW_WINDOW,
+				LOCAL_RENAME,
+				LOCAL_DELETE,
+				LOCAL_PROPERTIES,
+				LOCAL_EXPORT_SEQUENCE,
+			]
+		);
+		let export = menu.items.last().expect("export item");
+		assert_eq!(
+			export.label,
+			crate::i18n::tr("project.context.export_sequence")
+		);
+		assert!(export.enabled);
 	}
 }

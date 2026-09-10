@@ -819,6 +819,33 @@ pub trait AppEngine:
 		path: PathBuf,
 	) -> Result<ExportSession, String>;
 
+	/// The project's sequence entries `(id, display name)` in
+	/// project-explorer order — the export dialog's sequence picker.
+	/// Default: none (engines without a project browser cannot export).
+	fn sequence_entries(&self) -> Vec<(u64, SharedString)> {
+		Vec::new()
+	}
+
+	/// The project-entry id of the sequence currently open in the
+	/// timeline (the export dialog's preselection), if any.
+	fn current_sequence_id(&self) -> Option<u64> {
+		None
+	}
+
+	/// Starts an export of the sequence behind project entry `id` (the
+	/// export dialog's sequence picker / the explorer's 导出序列 item).
+	/// The work area only applies when `id` is the open sequence.
+	/// Default: unsupported.
+	fn start_export_of(
+		&mut self,
+		id: u64,
+		settings: &ExportSettings,
+		path: PathBuf,
+	) -> Result<ExportSession, String> {
+		let _ = (id, settings, path);
+		Err("export not supported".into())
+	}
+
 	// -------------------------------------------------------------------
 	// Proxy media (the C++ Tools > proxy pipeline): global switch, per
 	// footage state and the generate / delete / reveal entries. Defaults

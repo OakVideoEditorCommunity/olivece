@@ -48,7 +48,7 @@ use gpui::dock::{
 use gpui::timeline::{ClipData, ClipId, Frame, FrameRange, TimelineEvent, TimelineView, TrackData};
 use gpui::{
     colors::DefaultColors, div, prelude::*, px, size, App, AsyncWindowContext, Bounds, Context,
-    Entity, PathPromptOptions, Render, Window, WindowBounds, WindowOptions,
+    Entity, PathPromptOptions, Render, SharedString, Window, WindowBounds, WindowOptions,
 };
 use gpui_widgets::audio_meter::{AudioLevelMeter, MeterOrientation};
 use gpui_widgets::dialog::progress::{progress_dialog, ProgressContent};
@@ -605,6 +605,19 @@ impl<E: AppEngine> OakApp<E> {
 		)
 		.detach();
 
+		// The project explorer's 导出序列 context item opens the export
+		// dialog with that sequence preselected.
+		cx.subscribe(
+			&panels.project,
+			|this,
+			 _panel,
+			 event: &crate::panels::project_explorer::ExportSequenceRequested,
+			 cx| {
+				this.open_export_dialog(Some(event.0), cx);
+			},
+		)
+		.detach();
+
 		// The project explorer's 重命名 / 删除 context items operate on
 		// the project's entry (rename prompts; delete removes the node).
 		cx.subscribe(
@@ -1048,7 +1061,7 @@ impl<E: AppEngine> OakApp<E> {
 			A::CloseProject => self
 				.engine
 				.update(cx, |engine, cx| engine.close_project(cx)),
-			A::Export => self.open_export_dialog(cx),
+			A::Export => self.open_export_dialog(None, cx),
 			A::Exit => cx.quit(),
 			// --- Edit ------------------------------------------------------
 			A::Undo => self.engine.update(cx, |engine, cx| engine.undo(cx)),
@@ -2846,15 +2859,23 @@ impl<E: AppEngine> OakApp<E> {
 	}
 
 	/// Opens the export dialog.
-	fn open_export_dialog(&mut self, cx: &mut Context<Self>) {
-		if self.engine.read(cx).current_sequence().is_none() {
-			println!("[export] no sequence open");
+	/// Opens the 导出序列 dialog: any sequence of the open project is
+	/// pickable (the current one preselected, or `preselect` when the
+	/// project explorer's 导出序列 context item opened the dialog).
+	fn open_export_dialog(&mut self, preselect: Option<u64>, cx: &mut Context<Self>) {
+		let sequences = self.engine.read(cx).sequence_entries();
+		if sequences.is_empty() {
+			println!("[export] the project has no sequences");
 			return;
 		}
-		let default_path = self.default_export_path(cx);
+		let selected = preselect
+			.or_else(|| self.engine.read(cx).current_sequence_id())
+			.filter(|id| sequences.iter().any(|(entry, _)| entry == id));
+		let default_path = self.default_export_path(cx, &sequences, selected);
 		self.spawn_modal(cx, move |window, app| {
 			let content = app.new(|cx| ExportDialogContent::new(window, cx));
 			content.update(app, |content, cx| {
+				content.set_sequences(sequences, selected, cx);
 				content.set_path(default_path.clone(), cx)
 			});
 			let modal = app.new(|cx| {
@@ -2872,13 +2893,22 @@ impl<E: AppEngine> OakApp<E> {
 		});
 	}
 
-	/// A default output path for the export dialog: the project name with
-	/// the format's extension, next to the project file.
-	fn default_export_path(&self, cx: &App) -> String {
+	/// A default output path for the export dialog: the picked sequence's
+	/// name with the format's extension, next to the project file.
+	fn default_export_path(
+		&self,
+		cx: &App,
+		sequences: &[(u64, SharedString)],
+		selected: Option<u64>,
+	) -> String {
+		let seq_name = selected
+			.and_then(|id| sequences.iter().find(|(entry, _)| *entry == id))
+			.or_else(|| sequences.first())
+			.map(|(_, name)| name.to_string());
 		let project = self.engine.read(cx).project();
-		let name = project
-			.map(|p| p.name.clone())
+		let name = seq_name
 			.filter(|n| !n.is_empty())
+			.or_else(|| project.map(|p| p.name.clone()).filter(|n| !n.is_empty()))
 			.unwrap_or_else(|| "untitled".to_string());
 		let dir = project
 			.and_then(|p| p.path.parent().map(|d| d.to_path_buf()))
@@ -2900,6 +2930,9 @@ impl<E: AppEngine> OakApp<E> {
 		if path.trim().is_empty() {
 			return;
 		}
+		let Some(sequence) = content.read(cx).selected_sequence(cx) else {
+			return;
+		};
 		// Append the format's extension when the user left it off.
 		let has_ext = std::path::Path::new(&path)
 			.extension()
@@ -2910,7 +2943,7 @@ impl<E: AppEngine> OakApp<E> {
 		}
 
 		let result = self.engine.update(cx, |engine, _cx| {
-			engine.start_export_with(&settings, PathBuf::from(&path))
+			engine.start_export_of(sequence, &settings, PathBuf::from(&path))
 		});
 		match result {
 			Ok(session) => {
@@ -5480,6 +5513,58 @@ mod tests {
 	// -------------------------------------------------------------------
 	// Project manager (M13 D4)
 	// -------------------------------------------------------------------
+
+	/// 文件 → 导出序列 opens the dialog with the project's sequences (the
+	/// current one preselected); OK exports the picked sequence and swaps
+	/// in the progress dialog.
+	#[gpui::test]
+	async fn export_sequence_dialog_picks_and_starts(cx: &mut TestAppContext) {
+		let _guard = crate::actions::shortcuts_test_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let _guard = crate::i18n::lang_test_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let (_window, root) = mock_shell(cx);
+
+		cx.update(|app| {
+			root.update(app, |app, cx| app.on_menu(ActionId::Export.menu_id(), cx))
+		});
+		cx.run_until_parked();
+
+		let content = cx.read(|app| match &root.read(app).modal {
+			ModalState::Export { content, .. } => content.clone(),
+			_ => panic!("the export dialog should be open"),
+		});
+		// The mock bin's one sequence (entry 4) is preselected; the
+		// default output path is a real file name.
+		assert_eq!(
+			cx.read(|app| content.read(app).selected_sequence(app)),
+			Some(4),
+			"the current sequence is preselected"
+		);
+		let path = cx.read(|app| content.read(app).path(app).to_string());
+		assert!(path.ends_with(".mp4"), "default export path: {path}");
+
+		// OK starts the export of the picked sequence: the progress dialog
+		// replaces the settings dialog.
+		cx.update(|app| {
+			root.update(app, |app, cx| {
+				app.on_modal(
+					&ModalEvent::ButtonClicked {
+						control: modal_ids::EXPORT,
+						button: 0,
+					},
+					cx,
+				)
+			})
+		});
+		cx.run_until_parked();
+		assert!(
+			cx.read(|app| matches!(root.read(app).modal, ModalState::Progress { .. })),
+			"OK starts the export and opens the progress dialog"
+		);
+	}
 
 	/// Dispatch a synthetic keystroke and settle with a double park.
 	/// gpui's window key handling may defer the binding dispatch (its

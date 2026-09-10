@@ -628,6 +628,7 @@ impl RenderTask {
 		time: Rational,
 		dispatch: *mut RenderDispatch,
 		in_flight: &mut Vec<TicketId>,
+		ticket_keys: &mut HashMap<TicketId, (i32, i64, i64)>,
 	) -> Result<()> {
 		unsafe {
 			(&*dispatch).running.fetch_add(1, Ordering::SeqCst);
@@ -635,6 +636,10 @@ impl RenderTask {
 		match self.submit_video_ticket(arena, time, dispatch) {
 			Ok(id) => {
 				in_flight.push(id);
+				ticket_keys.insert(
+					id,
+					(TICKET_VIDEO, time.numerator(), time.denominator()),
+				);
 				Ok(())
 			}
 			Err(e) => {
@@ -654,6 +659,7 @@ impl RenderTask {
 		range: TimeRange,
 		dispatch: *mut RenderDispatch,
 		in_flight: &mut Vec<TicketId>,
+		ticket_keys: &mut HashMap<TicketId, (i32, i64, i64)>,
 	) -> Result<()> {
 		unsafe {
 			(&*dispatch).running.fetch_add(1, Ordering::SeqCst);
@@ -661,6 +667,14 @@ impl RenderTask {
 		match self.submit_audio_ticket(arena, range, dispatch) {
 			Ok(id) => {
 				in_flight.push(id);
+				ticket_keys.insert(
+					id,
+					(
+						TICKET_AUDIO,
+						range.in_().numerator(),
+						range.in_().denominator(),
+					),
+				);
 				Ok(())
 			}
 			Err(e) => {
@@ -673,31 +687,20 @@ impl RenderTask {
 	}
 
 	/// Map a finished ticket back to its delivery slot: the audio slot for
-	/// audio tickets, the matching frame slot for video tickets.
+	/// audio tickets, the matching frame slot for video tickets. The key
+	/// comes from `ticket_keys` (the submitter-side record) — NOT from the
+	/// arena: the arena reaps finished fire-and-forget slots on the next
+	/// `allocate()`, so a ticket that completed before the next submit is
+	/// already gone from the arena's own map (the "Render ticket reported
+	/// an unexpected timestamp" failure that killed every export).
 	fn classify_ticket(
 		&self,
-		arena: &TicketArena,
+		ticket_keys: &HashMap<TicketId, (i32, i64, i64)>,
 		id: TicketId,
 		slot_by_key: &HashMap<(i32, i64, i64), usize>,
 	) -> Option<usize> {
-		let kind = arena.kind(id)?;
-		if kind == TICKET_AUDIO {
-			let range = arena.range(id)?;
-			slot_by_key
-				.get(&(
-					TICKET_AUDIO,
-					range.in_().numerator(),
-					range.in_().denominator(),
-				))
-				.copied()
-		} else if kind == TICKET_VIDEO {
-			let time = arena.time(id)?;
-			slot_by_key
-				.get(&(TICKET_VIDEO, time.numerator(), time.denominator()))
-				.copied()
-		} else {
-			None
-		}
+		let key = ticket_keys.get(&id)?;
+		slot_by_key.get(key).copied()
 	}
 
 	/// Drive the whole render: keep up to `max_inflight` frame tickets in
@@ -815,14 +818,21 @@ impl RenderTask {
 		let mut next_slot = 0usize;
 		// Reorder buffer: finished tickets not yet deliverable.
 		let mut pending: HashMap<usize, (TicketId, TicketResult)> = HashMap::new();
+		// Submitter-side ticket id -> delivery-slot key (the arena reaps
+		// finished fire-and-forget slots; this record is authoritative).
+		let mut ticket_keys: HashMap<TicketId, (i32, i64, i64)> = HashMap::new();
 		let mut progress_counter = 0.0;
 		let mut result: Result<()> = Ok(());
 
 		// Queue audio first (mirrors the C++ order).
 		if self.audio_enabled && result.is_ok() {
-			if let Err(e) =
-				self.start_audio_ticket(&arena, self.export_range, dispatch, &mut in_flight)
-			{
+			if let Err(e) = self.start_audio_ticket(
+				&arena,
+				self.export_range,
+				dispatch,
+				&mut in_flight,
+				&mut ticket_keys,
+			) {
 				result = Err(e);
 			}
 		}
@@ -835,6 +845,7 @@ impl RenderTask {
 					frame_times[next_frame_index],
 					dispatch,
 					&mut in_flight,
+					&mut ticket_keys,
 				) {
 					result = Err(e);
 					break;
@@ -847,7 +858,7 @@ impl RenderTask {
 			// Drain the completion queue into the reorder buffer.
 			while let Some((id, ticket_result)) = dispatch_ref.pop_finished() {
 				consumed += 1;
-				match self.classify_ticket(&arena, id, &slot_by_key) {
+				match self.classify_ticket(&ticket_keys, id, &slot_by_key) {
 					Some(slot_index) => {
 						pending.insert(slot_index, (id, ticket_result));
 					}
@@ -965,6 +976,7 @@ impl RenderTask {
 					frame_times[next_frame_index],
 					dispatch,
 					&mut in_flight,
+					&mut ticket_keys,
 				) {
 					result = Err(e);
 					break;

@@ -6223,6 +6223,85 @@ impl AppEngine for RealEngine {
 		Ok(super::renderops::spawn_export(&project, seq, params))
 	}
 
+	fn sequence_entries(&self) -> Vec<(u64, SharedString)> {
+		/// DFS the bin in explorer order, keeping sequence leaves.
+		fn collect(
+			project: &ProjectRef,
+			entries: Vec<ProjectEntry>,
+			out: &mut Vec<(u64, SharedString)>,
+		) {
+			for entry in entries {
+				if entry.is_dir {
+					collect(
+						project,
+						crate::oakui::projectbrowser::children(project, entry.id),
+						out,
+					);
+					continue;
+				}
+				let is_seq = graphops::id_of(entry.id).is_some_and(|node| {
+					let guard = graphops::lock(project);
+					graphops::sequence_behavior(&guard.graph, node).is_some()
+				});
+				if is_seq {
+					out.push((entry.id, entry.name));
+				}
+			}
+		}
+		let Some(project) = self.project_ref() else {
+			return Vec::new();
+		};
+		let mut out = Vec::new();
+		collect(project, crate::oakui::projectbrowser::roots(project), &mut out);
+		out
+	}
+
+	fn current_sequence_id(&self) -> Option<u64> {
+		self.sequence.map(|seq| seq.identity())
+	}
+
+	fn start_export_of(
+		&mut self,
+		id: u64,
+		settings: &super::engine::ExportSettings,
+		path: PathBuf,
+	) -> Result<ExportSession, String> {
+		let Some(project) = self.project.clone() else {
+			return Err("no project open".into());
+		};
+		let Some(seq) = graphops::id_of(id) else {
+			return Err("the entry is not a sequence".into());
+		};
+		{
+			let guard = graphops::lock(&project);
+			if graphops::sequence_behavior(&guard.graph, seq).is_none() {
+				return Err("the entry is not a sequence".into());
+			}
+		}
+		// The work area belongs to the OPEN sequence; a bin export of a
+		// different sequence renders it whole.
+		let workarea = match self.sequence {
+			Some(current) if current == seq => self.workarea().map(|(s, e)| (s.0, e.0)),
+			_ => None,
+		};
+		let length_frames = {
+			let guard = graphops::lock(&project);
+			let length = graphops::sequence_length(&guard.graph, seq);
+			graphops::sequence_time_base(&guard.graph, seq)
+				.map(|tb| graphops::rational_to_ts(length, tb))
+				.unwrap_or(0)
+		};
+		let params = super::renderops::encoding_params_with_settings(
+			&project,
+			seq,
+			settings,
+			&path,
+			workarea,
+			length_frames,
+		)?;
+		Ok(super::renderops::spawn_export(&project, seq, params))
+	}
+
 	fn multicam_state(&self) -> Option<MulticamState> {
 		self.multicam_state_internal()
 	}

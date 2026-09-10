@@ -2036,6 +2036,24 @@ impl AppEngine for MockEngine {
 		})
 	}
 
+	fn sequence_entries(&self) -> Vec<(u64, SharedString)> {
+		// The mock bin's one sequence entry (id 4 = "aaa.ove").
+		vec![(4, self.sequence.name.clone().into())]
+	}
+
+	fn current_sequence_id(&self) -> Option<u64> {
+		Some(4)
+	}
+
+	fn start_export_of(
+		&mut self,
+		_id: u64,
+		settings: &crate::oakui::engine::ExportSettings,
+		path: PathBuf,
+	) -> Result<ExportSession, String> {
+		self.start_export_with(settings, path)
+	}
+
 	fn use_proxy_media(&self) -> bool {
 		self.use_proxy
 	}

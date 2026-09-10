@@ -994,6 +994,7 @@ impl Render for PathField {
 /// The export dialog content: the container-format dropdown and the output
 /// path field.
 pub struct ExportDialogContent {
+	sequence: Entity<ComboBox>,
 	format: Entity<ComboBox>,
 	video_codec: Entity<ComboBox>,
 	audio_codec: Entity<ComboBox>,
@@ -1008,6 +1009,9 @@ pub struct ExportDialogContent {
 	formats: Vec<(i32, String, String)>,
 	/// The container format for the current codec lists.
 	active_format: i32,
+	/// (entry id, display name) of the pickable sequences, in dropdown
+	/// order; populated by the host from the open project.
+	sequences: Vec<(u64, SharedString)>,
 }
 
 impl ExportDialogContent {
@@ -1152,7 +1156,16 @@ impl ExportDialogContent {
 			}
 		});
 
+		// The sequence picker is filled by the host (it owns the project);
+		// an empty list disables the dialog's OK via the picker staying
+		// unselected.
+		let sequence = cx.new(|cx| {
+			ComboBox::new(13, Vec::new(), window, cx)
+				.with_placeholder(i18n::tr("export.sequence"))
+		});
+
 		Self {
+			sequence,
 			format,
 			video_codec,
 			audio_codec,
@@ -1165,7 +1178,42 @@ impl ExportDialogContent {
 			path,
 			formats,
 			active_format,
+			sequences: Vec::new(),
 		}
+	}
+
+	/// Populates the sequence picker from the open project and preselects
+	/// `selected` (falling back to the first entry — the dialog always has
+	/// a target to export).
+	pub fn set_sequences(
+		&mut self,
+		sequences: Vec<(u64, SharedString)>,
+		selected: Option<u64>,
+		cx: &mut Context<Self>,
+	) {
+		let preselect = selected
+			.and_then(|id| sequences.iter().position(|(entry, _)| *entry == id))
+			.or(if sequences.is_empty() { None } else { Some(0) });
+		let options = sequences
+			.iter()
+			.enumerate()
+			.map(|(i, (_, name))| ComboBoxOption::new(i, name.clone()))
+			.collect::<Vec<_>>();
+		self.sequence.update(cx, |combo, cx| combo.set_options(options, cx));
+		self.sequence
+			.update(cx, |combo, cx| combo.set_selected(preselect, cx));
+		self.sequences = sequences;
+		cx.notify();
+	}
+
+	/// The picked sequence's project-entry id (`None` only when the
+	/// project has no sequences — the host refuses to open the dialog
+	/// then).
+	pub fn selected_sequence(&self, cx: &App) -> Option<u64> {
+		self.sequence
+			.read(cx)
+			.selected()
+			.and_then(|index| self.sequences.get(index).map(|(id, _)| *id))
 	}
 
 	/// Rebuilds the codec lists for `fmt` and re-selects the first entry.
@@ -1312,6 +1360,11 @@ impl Render for ExportDialogContent {
 			.flex_col()
 			.gap_3()
 			.w_full()
+			.child(form_row(
+				&colors,
+				i18n::tr("export.sequence").into(),
+				self.sequence.clone(),
+			))
 			.child(form_row(
 				&colors,
 				i18n::tr("export.format").into(),
@@ -4139,7 +4192,6 @@ impl Render for RenameContent {
 /// [`Self::format`] + [`Self::path`] on OK.
 pub struct ExportProjectDialogContent {
 	format: Entity<ComboBox>,
-	path: Entity<PathField>,
 	/// (format id, display name) in dropdown order.
 	formats: Vec<(i32, String)>,
 }
@@ -4151,7 +4203,9 @@ pub const PROJECT_FORMAT_OVE: i32 = 1;
 pub const PROJECT_FORMAT_FCPXML: i32 = 2;
 
 impl ExportProjectDialogContent {
-	/// Builds the dialog (OTIO default, empty path).
+	/// Builds the dialog (OTIO default). The output path is NOT entered
+	/// here: OK hands off to the platform save dialog (the suggested name
+	/// carries the chosen format's extension).
 	pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
 		let formats: Vec<(i32, String)> = vec![
 			(PROJECT_FORMAT_OTIO, "OpenTimelineIO (.otio)".to_string()),
@@ -4168,11 +4222,7 @@ impl ExportProjectDialogContent {
 				.with_placeholder(i18n::tr("project.export.format"))
 		});
 		format.update(cx, |combo, cx| combo.set_selected(Some(PROJECT_FORMAT_OTIO as usize), cx));
-		let path = cx.new(|cx| {
-			let editor = cx.new(|cx| EditableTextState::new(StringStorage::default(), cx));
-			PathField { editor, enabled: true }
-		});
-		Self { format, path, formats }
+		Self { format, formats }
 	}
 
 	/// The selected project format id.
@@ -4194,18 +4244,6 @@ impl ExportProjectDialogContent {
 			_ => "otio",
 		}
 	}
-
-	/// The output path currently entered.
-	pub fn path(&self, cx: &App) -> SharedString {
-		self.path.read(cx).path(cx)
-	}
-
-	/// Pre-fills the output path (the suggested file name).
-	pub fn set_path(&mut self, path: impl Into<SharedString>, cx: &mut Context<Self>) {
-		let path = path.into();
-		self.path.update(cx, |field, cx| field.set_path(path, cx));
-		cx.notify();
-	}
 }
 
 impl Render for ExportProjectDialogContent {
@@ -4220,11 +4258,6 @@ impl Render for ExportProjectDialogContent {
 				&colors,
 				i18n::tr("project.export.format").into(),
 				self.format.clone(),
-			))
-			.child(form_row(
-				&colors,
-				i18n::tr("export.path").into(),
-				self.path.clone(),
 			))
 	}
 }
@@ -4292,6 +4325,54 @@ mod tests {
     use super::*;
     fn keystroke(key: &str) -> Keystroke {
 		gpui::Keystroke::parse(key).unwrap()
+	}
+
+	/// The export dialog's sequence picker: the host populates it from
+	/// the project, a known preselection wins, an unknown one falls back
+	/// to the first entry, and an empty project leaves nothing to export.
+	#[gpui::test]
+	async fn export_dialog_sequence_picker(cx: &mut gpui::TestAppContext) {
+		cx.update(|cx| cx.init_colors());
+		let window = cx.open_window(gpui::size(gpui::px(440.0), gpui::px(400.0)), |window, cx| {
+			ExportDialogContent::new(window, cx)
+		});
+		cx.run_until_parked();
+		let content = window.root(cx).expect("dialog content root");
+
+		let sequences = vec![
+			(7u64, SharedString::from("Opening")),
+			(9u64, SharedString::from("Finale")),
+		];
+		cx.update(|cx| {
+			content.update(cx, |content, cx| {
+				content.set_sequences(sequences.clone(), Some(9), cx)
+			});
+		});
+		assert_eq!(
+			cx.read(|cx| content.read(cx).selected_sequence(cx)),
+			Some(9),
+			"the known preselection wins"
+		);
+
+		cx.update(|cx| {
+			content.update(cx, |content, cx| {
+				content.set_sequences(sequences.clone(), Some(42), cx)
+			});
+		});
+		assert_eq!(
+			cx.read(|cx| content.read(cx).selected_sequence(cx)),
+			Some(7),
+			"an unknown preselection falls back to the first entry"
+		);
+
+		cx.update(|cx| {
+			content.update(cx, |content, cx| content.set_sequences(Vec::new(), None, cx));
+		});
+		assert_eq!(
+			cx.read(|cx| content.read(cx).selected_sequence(cx)),
+			None,
+			"an empty project leaves nothing to export"
+		);
 	}
 
 	/// The 4K presets are in the dropdown and resolve to their formats
