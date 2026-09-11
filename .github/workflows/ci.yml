@@ -82,6 +82,7 @@ jobs:
         with:
           path: .cache/ffmpeg
           key: ffmpeg-${{ runner.os }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
+          save-always: true
 
       # ------------------------------------------------------------------
       # Project FFmpeg (script + FFMPEG_DIR; see docs/build.md)
@@ -199,14 +200,7 @@ jobs:
 
   windows:
     name: Build & test (Windows)
-    runs-on: warp-windows-latest-x64-16x
-    env:
-      # The build needs the UCRT64 environment (mingw-w64-ucrt-x86_64-*
-      # toolchain), not the base MSYS one.
-      MSYSTEM: UCRT64
-    defaults:
-      run:
-        shell: msys2 {0}
+    runs-on: warp-windows-2025-vs2026-x64-16x
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -215,59 +209,51 @@ jobs:
           # their own repo and build as path dependencies of oakapp.
           submodules: true
 
-      - name: Setup MSYS2
-        uses: msys2/setup-msys2@v2
+      - name: Install Rust (stable, MSVC)
+        uses: dtolnay/rust-toolchain@stable
         with:
-          msystem: UCRT64
-          update: true
-          # MSYS2's own Rust targets x86_64-pc-windows-gnu by default —
-          # the Windows build is GNU-target (the MSVC linker rejects the
-          # Unix-style link args the build scripts emit).
-          install: >-
-            git
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-rust
+          # The Windows build is MSVC-ABI (the runner carries VS 2026):
+          # vcpkg's FFmpeg and the vendored OCIO build both want it.
+          toolchain: stable-x86_64-pc-windows-msvc
 
       # ------------------------------------------------------------------
-      # System dependencies
+      # vcpkg (manifest mode) + caches
       # ------------------------------------------------------------------
-      - name: Install system dependencies
-        run: |
-          bash ./tooling/install-deps.sh
-          pacman -S --needed --noconfirm \
-            mingw-w64-ucrt-x86_64-cmake \
-            mingw-w64-ucrt-x86_64-opencolorio \
-            mingw-w64-ucrt-x86_64-ffnvcodec-headers \
-            mingw-w64-ucrt-x86_64-pkgconf \
-            mingw-w64-ucrt-x86_64-clang mingw-w64-ucrt-x86_64-clang-libs git
+      # vcpkg.json at the repo root pins the dependency set (FFmpeg with
+      # every free codec + hwaccel, pkgconf, librsvg); the resolved tree
+      # lands in vcpkg_installed/ and is keyed on the manifest. The
+      # binary-cache archives dir makes a manifest bump rebuild cheap.
+      - name: Cache vcpkg artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg_installed
+            ~/AppData/Local/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          save-always: true
+
+      - name: Install dependencies (vcpkg manifest)
+        run: vcpkg install --triplet x64-windows
 
       # ------------------------------------------------------------------
       # Build environment
       # ------------------------------------------------------------------
-      # Windows uses the MSYS2 OpenColorIO package (the exact 2.5.2 the
-      # bridge targets; the vendored source needs MSVC-only constructs).
-      # Dynamic here — the CD packages the DLLs next to the binaries.
       - name: Configure build environment
         run: |
-          # System OCIO (MSYS2, the exact 2.5.2 the bridge targets);
-          # tooling/ocio-env.sh links it STATICALLY when the package ships
-          # libOpenColorIO.a, dynamically otherwise.
-          bash tooling/ocio-env.sh >> "$GITHUB_ENV"
-          echo "FFMPEG_DIR=.cache/ffmpeg" >> "$GITHUB_ENV"
-          # ocio-sys is the GIT fork (Mike-Solar/ocio-rs main, pinned in
-          # the root manifest): its build.rs already carries the
-          # fork's GNU-toolchain fix, so NO crate-unpack/glob patch step
-          # applies here. The old code unpacked `ocio-sys-0.2.1.crate`
-          # from the registry cache — impossible for a git dependency
-          # (no .crate archive; git sources land under
-          # registry/src/git/<hash>), hence the
-          # "ls .../ocio-sys-0.2.1/build.rs: No such file" Windows CI
-          # failure.
-          echo "OCIO_RS_NO_MSVC_INCLUDES=1" >> "$GITHUB_ENV"
+          $prefix = "$env:GITHUB_WORKSPACE\vcpkg_installed\x64-windows"
+          "FFMPEG_DIR=$prefix" >> $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$prefix\lib\pkgconfig" >> $env:GITHUB_ENV
+          "$prefix\tools\pkgconf" >> $env:GITHUB_PATH
+          # Bundled OCIO: ocio-sys' vendored sources build with the MSVC
+          # toolchain (what they need — the MSYS2 package was the
+          # workaround, not the preference), so no OCIO_INSTALL_DIR and
+          # no OCIO_RS_NO_MSVC_INCLUDES anywhere.
+          "OCIO_RS_ENABLE_REAL=1" >> $env:GITHUB_ENV
+          "OCIO_RS_LINK=static" >> $env:GITHUB_ENV
+          # Record the resolved versions in the build log: pinning them
+          # with builtin-baseline in vcpkg.json is a follow-up.
+          vcpkg list
 
-      # ------------------------------------------------------------------
-      # Caches
-      # ------------------------------------------------------------------
       # Covers the whole target/ dir plus ~/.cargo; shared across branches
       # of the same OS.
       - name: Cache cargo artifacts
@@ -276,57 +262,28 @@ jobs:
           shared-key: oak-ci-windows
           cache-on-failure: true
 
-      # The project FFmpeg (release/8.0, static, all free codecs + hwaccel)
-      # is built by tooling/ffmpeg/build-ffmpeg.sh — 10-20 min on a cold
-      # cache. It does not depend on the Rust toolchain, so key it on the
-      # script itself and keep it out of rust-cache.
-      - name: Cache project FFmpeg
-        uses: actions/cache@v4
-        with:
-          path: .cache/ffmpeg
-          key: ffmpeg-${{ runner.os }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
-
-      # ------------------------------------------------------------------
-      # Project FFmpeg (script + FFMPEG_DIR; see docs/build.md)
-      # ------------------------------------------------------------------
-      - name: Build project FFmpeg
-        run: |
-          bash tooling/ffmpeg/build-ffmpeg.sh
-          echo "FFMPEG_DIR=$(cygpath -m "$PWD/.cache/ffmpeg")" >> "$GITHUB_ENV"
-
       # ------------------------------------------------------------------
       # Build & test
       # ------------------------------------------------------------------
       # `cargo check` (not build): the Test step links the test binaries
       # anyway, and a full build would codegen every workspace crate twice
-      # (once without and once with cfg(test)). cargo check performs no
-      # final link, so the mingw-w64 link-order workaround is only needed
-      # in the Test step.
+      # (once without and once with cfg(test)).
       - name: Build
-        run: |
-          cargo check --workspace --locked
+        run: cargo check --workspace --locked
 
       - name: Test
         run: |
-          # The GitHub image injects the MSVC INCLUDE/LIB into the
-          # environment; clear them in-step (they poison the MinGW
-          # compiles with MSVC SDK headers).
-          unset INCLUDE LIB
-          # mingw-w64 >= Nov 2025 forwards _assert to __msvcrt_assert inside
-          # libmingwex.a; rustc's link order puts -lmingwex last, so any
-          # binary that pulls _assert.o leaves _fileno/_setmode/
-          # __imp___msvcrt_assert unresolved. A trailing -lmsvcrt re-scans
-          # the CRT import lib after libmingwex.
-          export RUSTFLAGS="-C link-args=-lmsvcrt"
-          if ! cargo test --workspace --locked; then
+          cargo test --workspace --locked
+          if ($LASTEXITCODE -ne 0) {
             # Retry once: a few gpui keystroke tests flake on Windows CI —
             # a synthetic keystroke is occasionally never delivered (the
             # undo/redo pair and a plain 's' toggle both failed once,
             # each identically to its pass state). A real regression
             # fails both passes.
-            echo "first pass failed; retrying once for gpui keystroke flakes"
+            Write-Host "first pass failed; retrying once for gpui keystroke flakes"
             cargo test --workspace --locked
-          fi
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
   macos:
     name: Build & test (macOS)

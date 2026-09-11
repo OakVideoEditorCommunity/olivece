@@ -15,6 +15,9 @@ CmakeSettings.json
 # clangd's index and likely other things that need not be in the repository
 .cache/
 
+# vcpkg manifest-mode install tree (Windows CI/CD; see vcpkg.json)
+vcpkg_installed/
+
 # Generated packaging assets (icons/icon.png is produced from Oak_Icon.svg
 # by rsvg-convert in the CD workflow; see .github/workflows/cd.yml)
 /icons/

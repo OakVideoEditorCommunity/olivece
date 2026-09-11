@@ -86,6 +86,12 @@ cargo test  --workspace         # Linux: see "headless tests" below
 
 ## Windows (MSYS2 UCRT64)
 
+> **CI/CD note**: the GitHub Windows CI/CD no longer uses this path — it
+> builds MSVC-ABI on `warp-windows-2025-vs2026-x64-16x` with vcpkg
+> manifest mode (`vcpkg.json` at the repo root: FFmpeg with every free
+> codec + hwaccel, pkgconf, librsvg) and the vendored static OCIO. The
+> MSYS2 flow below remains the documented local-build alternative.
+
 The Windows build targets **x86_64-pc-windows-gnu** with MSYS2's own
 Rust; the MSVC toolchain is not supported (the build scripts emit
 Unix-style link args the MSVC linker rejects).

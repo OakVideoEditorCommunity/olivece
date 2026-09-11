@@ -1,0 +1,35 @@
+{
+	"name": "oak",
+	"version": "0.5.0",
+	"comment": "Windows dependencies (CI/CD, MSVC): the project's FFmpeg with every free codec + hwaccel (mirrors tooling/ffmpeg/build-ffmpeg.sh's configure), plus pkgconf so the -sys crates can find the .pc files. ffmpeg version pinning via builtin-baseline is a follow-up once CI reports the resolved version (see .github/workflows/ci.yml).",
+	"dependencies": [
+		{
+			"name": "ffmpeg",
+			"features": [
+				"gpl",
+				"version3",
+				"x264",
+				"x265",
+				"dav1d",
+				"vpx",
+				"openh264",
+				"openjpeg",
+				"theora",
+				"webp",
+				"mp3lame",
+				"opus",
+				"vorbis",
+				"speex",
+				"snappy",
+				"ass",
+				"freetype",
+				"fribidi",
+				"fontconfig",
+				"gnutls",
+				"ffnvcodec"
+			]
+		},
+		"pkgconf",
+		"librsvg"
+	]
+}

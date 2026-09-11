@@ -320,11 +320,7 @@ jobs:
   # ------------------------------------------------------------------
   windows:
     name: Windows installer (NSIS)
-    runs-on: warp-windows-latest-x64-16x
-
-    defaults:
-      run:
-        shell: msys2 {0}
+    runs-on: warp-windows-2025-vs2026-x64-16x
 
     steps:
       - name: Checkout
@@ -332,49 +328,42 @@ jobs:
         with:
           submodules: true
 
-      - name: Install Rust (stable)
+      - name: Install Rust (stable, MSVC)
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup MSYS2
-        uses: msys2/setup-msys2@v2
         with:
-          msystem: UCRT64
-          update: true
-          # MSYS2's own Rust targets x86_64-pc-windows-gnu by default —
-          # the Windows build is GNU-target (the MSVC linker rejects the
-          # Unix-style link args the build scripts emit).
-          install: >-
-            git
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-rust
+          # The Windows build is MSVC-ABI (the runner carries VS 2026):
+          # vcpkg's FFmpeg and the vendored OCIO build both want it.
+          toolchain: stable-x86_64-pc-windows-msvc
 
-      - name: Install system dependencies
-        run: |
-          bash tooling/install-deps.sh
-          pacman -S --needed --noconfirm \
-            mingw-w64-ucrt-x86_64-cmake \
-            mingw-w64-ucrt-x86_64-opencolorio \
-            mingw-w64-ucrt-x86_64-librsvg \
-            mingw-w64-ucrt-x86_64-ffnvcodec-headers \
-            mingw-w64-ucrt-x86_64-pkgconf
+      # vcpkg.json at the repo root pins the dependency set (FFmpeg with
+      # every free codec + hwaccel, pkgconf, librsvg); the resolved tree
+      # lands in vcpkg_installed/ and is keyed on the manifest. The
+      # binary-cache archives dir makes a manifest bump rebuild cheap.
+      - name: Cache vcpkg artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg_installed
+            ~/AppData/Local/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          save-always: true
+
+      - name: Install dependencies (vcpkg manifest)
+        run: vcpkg install --triplet x64-windows
 
       - name: Configure build environment
         run: |
-          # System OCIO (MSYS2, the exact 2.5.2 the bridge targets);
-          # tooling/ocio-env.sh links it STATICALLY when the package ships
-          # libOpenColorIO.a, dynamically otherwise (the DLL bundling step
-          # below then still applies).
-          bash tooling/ocio-env.sh >> "$GITHUB_ENV"
-          # ocio-sys is the GIT fork (Mike-Solar/ocio-rs main, pinned in
-          # the root manifest): its build.rs already carries the
-          # fork's GNU-toolchain fix, so NO crate-unpack/glob patch step
-          # applies here. The old code unpacked `ocio-sys-0.2.1.crate`
-          # from the registry cache — impossible for a git dependency
-          # (no .crate archive; git sources land under
-          # registry/src/git/<hash>), hence the
-          # "ls .../ocio-sys-0.2.1/build.rs: No such file" Windows CI
-          # failure.
-          echo "OCIO_RS_NO_MSVC_INCLUDES=1" >> "$GITHUB_ENV"
+          $prefix = "$env:GITHUB_WORKSPACE\vcpkg_installed\x64-windows"
+          "FFMPEG_DIR=$prefix" >> $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$prefix\lib\pkgconfig" >> $env:GITHUB_ENV
+          "$prefix\tools\pkgconf" >> $env:GITHUB_PATH
+          # Bundled OCIO: ocio-sys' vendored sources build with the MSVC
+          # toolchain (what they need — the MSYS2 package was the
+          # workaround, not the preference), so no OCIO_INSTALL_DIR and
+          # no OCIO_RS_NO_MSVC_INCLUDES anywhere.
+          "OCIO_RS_ENABLE_REAL=1" >> $env:GITHUB_ENV
+          "OCIO_RS_LINK=static" >> $env:GITHUB_ENV
+          vcpkg list
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -382,42 +371,30 @@ jobs:
           shared-key: oak-workspace
           cache-on-failure: true
 
-      - name: Cache project FFmpeg
-        uses: actions/cache@v4
-        with:
-          path: .cache/ffmpeg
-          key: ffmpeg-${{ runner.os }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
-
-      - name: Build project FFmpeg (static, GPL + free codecs + hwaccel)
-        run: |
-          bash tooling/ffmpeg/build-ffmpeg.sh
-          echo "FFMPEG_DIR=$(cygpath -m "$PWD/.cache/ffmpeg")" >> "$GITHUB_ENV"
-
       - name: Install cargo-packager
         run: cargo install cargo-packager --locked
 
       - name: Generate app icon (PNG from Oak_Icon.svg)
         run: |
-          mkdir -p icons
-          rsvg-convert -w 512 -h 512 Oak_Icon.svg -o icons/icon.png
+          New-Item -ItemType Directory -Force icons | Out-Null
+          & "vcpkg_installed\x64-windows\tools\librsvg\rsvg-convert.exe" -w 512 -h 512 Oak_Icon.svg -o icons/icon.png
 
       - name: Build (release)
         run: |
-          # Clear the job-hook-injected MSVC INCLUDE/LIB before the GNU
-          # build (they poison the MinGW compiles with MSVC SDK headers).
-          unset INCLUDE LIB
+          # Static CRT: the installer then needs no vcruntime DLLs (the
+          # vcpkg DLLs below are the only runtime pieces to bundle).
+          $env:RUSTFLAGS = "-C target-feature=+crt-static"
           cargo build --release --locked
 
-      # Collect the MSYS2 runtime DLLs (libstdc++/libgcc/OpenColorIO/...)
-      # into target/pkg/win-dlls; the packager `resources` glob then
-      # installs them next to the executables.
+      # The vcpkg runtime DLLs (avcodec/avformat/... and the codec libs)
+      # ship next to the executables: copy them into target/pkg/win-dlls,
+      # which the packager `resources` glob installs alongside (the MSVC
+      # CRT itself is covered by the toolchain's static linking story;
+      # OCIO is bundled statically).
       - name: Bundle runtime DLLs
         run: |
-          unset INCLUDE LIB
-          pacman -S --needed --noconfirm mingw-w64-ucrt-x86_64-ntldd
-          tooling/package/bundle-dylibs-windows.sh target/pkg/win-dlls \
-            target/release/oak-editor.exe target/release/oak-cli.exe \
-            target/release/oak-worker.exe
+          New-Item -ItemType Directory -Force target/pkg/win-dlls | Out-Null
+          Copy-Item "vcpkg_installed\x64-windows\bin\*.dll" target/pkg/win-dlls/
 
       - name: Package (NSIS)
         run: cargo packager --release --formats nsis
