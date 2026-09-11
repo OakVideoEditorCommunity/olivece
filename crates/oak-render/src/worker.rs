@@ -232,7 +232,10 @@ impl InlineDispatcher {
 	}
 }
 
-fn execute_job(job: Job) {
+/// Run one job on the calling thread: the producer, then its completion
+/// (used by the inline dispatcher and by [`crate::pipeline::PipelineBackend`],
+/// which runs the same producer on its render thread).
+pub(crate) fn execute_job(job: Job) {
 	let result = catch_unwind(AssertUnwindSafe(|| (job.produce)(job.time, &job.params)))
 		.unwrap_or_else(|_| Err(Error::Failed("frame producer panicked".into())));
 	(job.done)(result);

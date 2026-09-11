@@ -51,6 +51,22 @@ pub enum RenderBackendChoice {
 	/// Process-isolated oak-worker pool (crash isolation + shm frames).
 	/// The M15 S2 default.
 	Processes(DispatcherConfig),
+	/// The M1 thread pipeline ([`crate::pipeline::PipelineBackend`]): one
+	/// render thread running the same producer the other backends run,
+	/// plus the decode thread footage rendering rendezvouses with.
+	/// Selected by `OAK_PIPELINE=threads`; the process pool stays the
+	/// default until the M4 acceptance.
+	Pipeline,
+}
+
+/// The backend `OAK_PIPELINE` asks for: `threads` selects the M1 thread
+/// pipeline, anything else (including unset) the default process pool.
+fn backend_choice_from_env() -> RenderBackendChoice {
+	if std::env::var("OAK_PIPELINE").as_deref() == Ok("threads") {
+		RenderBackendChoice::Pipeline
+	} else {
+		RenderBackendChoice::Processes(DispatcherConfig::default())
+	}
 }
 
 /// The manager. Created by `oakrender_manager_init` (C ABI), accessed
@@ -97,19 +113,25 @@ pub struct RenderManager {
 	/// target of [`RenderManager::set_workspace_size`]). `None` on the
 	/// inline (test) backend.
 	process_pool: Option<Arc<ProcessDispatcher>>,
+	/// The thread pipeline, when running the Pipeline backend (`None` on
+	/// the inline and process backends). Holding the `Arc` keeps the
+	/// render/decode threads alive for the manager's lifetime.
+	pipeline: Option<Arc<crate::pipeline::PipelineBackend>>,
 }
 
 impl RenderManager {
-	/// Initialize the process-wide manager with the default backend — the
-	/// process-isolated oak-worker pool (M15 S2 mandate; idempotent; C++
-	/// instance() semantics — only the main GUI process does this).
+	/// Initialize the process-wide manager with the backend `OAK_PIPELINE`
+	/// asks for — the process-isolated oak-worker pool (M15 S2 mandate)
+	/// unless the variable says `threads` (idempotent; C++ instance()
+	/// semantics — only the main GUI process does this).
 	pub fn init() -> Result<()> {
-		Self::init_with_backend(RenderBackendChoice::Processes(DispatcherConfig::default()))
+		Self::init_with_backend(backend_choice_from_env())
 	}
 
 	/// Initialize the process-wide manager with an explicit backend.
 	/// `Threads` is the test-only inline backend (no worker threads, no
-	/// child processes); `Processes` spawns the oak-worker pool.
+	/// child processes); `Processes` spawns the oak-worker pool;
+	/// `Pipeline` starts the M1 render/decode threads.
 	pub fn init_with_backend(choice: RenderBackendChoice) -> Result<()> {
 		let mut guard = lock(&MANAGER);
 		if guard.is_some() {
@@ -149,17 +171,18 @@ impl RenderManager {
 			eval::render_produced_frame(time, params)
 				.map(crate::ticket::TicketPayload::Video)
 		});
-		let (dispatch, audio_dispatch, audio_fallback, process_pool): (
+		let (dispatch, audio_dispatch, audio_fallback, process_pool, pipeline): (
 			Arc<dyn JobDispatch>,
 			Arc<dyn JobDispatch>,
 			Option<Arc<dyn JobDispatch>>,
 			Option<Arc<ProcessDispatcher>>,
+			Option<Arc<crate::pipeline::PipelineBackend>>,
 		) = match choice {
 			RenderBackendChoice::Threads => {
 				// Test-only inline backend: synchronous execution on the
 				// calling thread, shared by video and audio.
 				let inline = InlineDispatcher::sync();
-				(inline.clone(), inline, None, None)
+				(inline.clone(), inline, None, None, None)
 			}
 			RenderBackendChoice::Processes(config) => {
 				let dispatcher = ProcessDispatcher::new(config)?;
@@ -177,7 +200,16 @@ impl RenderManager {
 				// audio-side plugin crash now takes down the main process,
 				// and the mix cost lands on the UI tick.
 				let inline = InlineDispatcher::sync();
-				(dispatcher.clone(), inline, None, Some(dispatcher))
+				(dispatcher.clone(), inline, None, Some(dispatcher), None)
+			}
+			RenderBackendChoice::Pipeline => {
+				// M1 thread pipeline: the render thread executes the same
+				// producer (so graph mode included), and the decode thread
+				// the producer's footage decodes rendezvous with. Audio
+				// stays inline, as on the process backend.
+				let pipeline = crate::pipeline::PipelineBackend::new()?;
+				let inline = InlineDispatcher::sync();
+				(pipeline.clone(), inline, None, None, Some(pipeline))
 			}
 		};
 		let tickets = Arc::new(TicketArena::new_with_audio_fallback(
@@ -200,6 +232,7 @@ impl RenderManager {
 			inline_graph: Mutex::new(None),
 			stopping: AtomicBool::new(false),
 			process_pool,
+			pipeline,
 		}));
 		Ok(())
 	}
@@ -211,6 +244,12 @@ impl RenderManager {
 		&self,
 	) -> Option<(String, std::sync::Arc<std::sync::Mutex<oak_node::project::Project>>)> {
 		lock(&self.inline_graph).clone()
+	}
+
+	/// The thread pipeline, when the Pipeline backend is live (its queue
+	/// stats and decode service). `None` on the inline and process backends.
+	pub fn pipeline_backend(&self) -> Option<Arc<crate::pipeline::PipelineBackend>> {
+		self.pipeline.clone()
 	}
 
 	/// Global access; `None` before init.
@@ -558,5 +597,29 @@ mod tests {
 		let _ = std::fs::remove_dir_all(&dir);
 		assert_eq!(disk_cache_size().unwrap(), 0);
 		std::env::remove_var("OAK_CONFIG_DIR");
+	}
+
+	#[test]
+	fn backend_choice_env_selects_pipeline() {
+		let _guard = oak_core::commonutil::ENV_TEST_LOCK
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		std::env::remove_var("OAK_PIPELINE");
+		assert!(matches!(
+			backend_choice_from_env(),
+			RenderBackendChoice::Processes(_)
+		));
+		std::env::set_var("OAK_PIPELINE", "threads");
+		assert!(matches!(
+			backend_choice_from_env(),
+			RenderBackendChoice::Pipeline
+		));
+		// Any other value keeps the default process pool.
+		std::env::set_var("OAK_PIPELINE", "processes");
+		assert!(matches!(
+			backend_choice_from_env(),
+			RenderBackendChoice::Processes(_)
+		));
+		std::env::remove_var("OAK_PIPELINE");
 	}
 }

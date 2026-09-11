@@ -1059,6 +1059,23 @@ const MAX_CACHED_DECODERS: usize = 6;
 /// LRU tick source for [`DECODERS`].
 static DECODER_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Count of [`render_footage_frame_inner`] entries, i.e. of real codec work
+/// on the footage path (frame-cache hits and decode-service LRU hits do not
+/// count). Visible for the decode-service tests, which use it to tell a
+/// cached frame from a re-decode.
+static DECODE_INVOCATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The number of real footage decodes since the last
+/// [`reset_decode_invocations`] (or process start).
+pub fn decode_invocations() -> u64 {
+    DECODE_INVOCATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Reset the [`decode_invocations`] counter to zero.
+pub fn reset_decode_invocations() {
+    DECODE_INVOCATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Cap on decoded FRAMES cached per process (release builds of the graph
 /// renderer re-decode every frame the pre-render window pulls — each is a
 /// seek+decode on the shared decoder session, which serializes the graph
@@ -1175,6 +1192,12 @@ fn open_decoder(filename: &str, stream_index: i32) -> Result<Arc<dyn oak_codec::
 
 /// Decode the footage frame at `time` and copy/scale it into an
 /// oakrender F32 frame of `(w, h)`.
+///
+/// While a [`crate::pipeline::DecodeService`] is installed (the pipeline
+/// backend's decode thread) the decode is a rendezvous with that service,
+/// which caches frames and keeps the codec calls off the caller's thread;
+/// with no service installed this is the synchronous decode it has always
+/// been. Either way the pixels are the same.
 pub fn render_footage_frame(
     filename: &str,
     stream_index: i32,
@@ -1183,7 +1206,24 @@ pub fn render_footage_frame(
     format: PixelFormat,
 ) -> Result<Texture> {
     let started = std::time::Instant::now();
-    let result = render_footage_frame_inner(filename, stream_index, time, size, format);
+    let result = match crate::pipeline::decode_service() {
+        Some(service) => {
+            let request = crate::pipeline::DecodeRequest {
+                filename: filename.to_string(),
+                stream_index,
+                time,
+                size,
+                format,
+            };
+            match service.request(request) {
+                Some(result) => result,
+                // The service went away (shutdown) mid-flight: decode here
+                // rather than failing the frame.
+                None => render_footage_frame_inner(filename, stream_index, time, size, format),
+            }
+        }
+        None => render_footage_frame_inner(filename, stream_index, time, size, format),
+    };
     if std::env::var_os("OAK_PERF").is_some() {
         eprintln!(
             "[decode] {:?} s{} time {}/{} ({:.3}s) size {:?} -> {:.3}s {:?}",
@@ -1200,7 +1240,10 @@ pub fn render_footage_frame(
     result
 }
 
-fn render_footage_frame_inner(
+/// The synchronous decode behind [`render_footage_frame`] (frame-LRU →
+/// decoder session → codec → F32 frame). `pub(crate)` because the decode
+/// service runs exactly this on its own thread.
+pub(crate) fn render_footage_frame_inner(
     filename: &str,
     stream_index: i32,
     time: Rational,
@@ -1224,6 +1267,9 @@ fn render_footage_frame_inner(
             return Ok(Texture::wrap_frame(frame));
         }
     }
+    // Past the frame cache: this call really goes to the codec (the
+    // decode-service tests read this counter to prove it).
+    DECODE_INVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let decoder = open_decoder(filename, stream_index)?;
     let params = RetrieveVideoParams {
         stream: CodecStream::with_block(filename.to_string(), stream_index, None),

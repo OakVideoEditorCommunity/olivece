@@ -38,12 +38,16 @@ impl ManagerGuard {
 	/// Initialize the manager and hold the serialization lock. Uses the
 	/// test-only inline backend so no oak-worker children are spawned.
 	pub fn init() -> Self {
+		Self::init_with(oak_render::manager::RenderBackendChoice::Threads)
+	}
+
+	/// Initialize the manager with an explicit backend choice and hold the
+	/// serialization lock. Callers that pass `Pipeline` get the M1 thread
+	/// pipeline; everything else behaves like [`ManagerGuard::init`].
+	pub fn init_with(choice: oak_render::manager::RenderBackendChoice) -> Self {
 		let guard = MANAGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		oak_render::manager::RenderManager::shutdown();
-		oak_render::manager::RenderManager::init_with_backend(
-			oak_render::manager::RenderBackendChoice::Threads,
-		)
-		.expect("manager init");
+		oak_render::manager::RenderManager::init_with_backend(choice).expect("manager init");
 		Self { _guard: guard }
 	}
 }

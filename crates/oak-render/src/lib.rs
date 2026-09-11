@@ -35,6 +35,8 @@
 //! - `ipc` — render-worker NDJSON protocol + shm frame-slot transport
 //! - `scheduler` — preview frame scheduler (interleaved batch claims)
 //! - `procpool` — process-isolated render backend (M15)
+//! - `pipeline` — the M1 thread pipeline backend (render thread + decode
+//!   thread; selected by `OAK_PIPELINE=threads`)
 //! - `error` — re-exports `oak_core::error` (the backend/color/texture/
 //!   frame value types moved to `oak-core` in the oak-common merge)
 
@@ -51,6 +53,7 @@ pub mod frameio;
 pub mod handle;
 pub mod ipc;
 pub mod manager;
+pub mod pipeline;
 pub mod procpool;
 pub mod scheduler;
 pub mod shaderfx;
