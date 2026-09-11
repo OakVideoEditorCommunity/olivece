@@ -106,10 +106,14 @@ fn project_lifecycle() {
 #[test]
 fn project_deep_copy_isolation() {
 	let project = Project::new();
+	// The value node's id, kept across the lock scope so the copy can be
+	// looked up by identity (deep_copy preserves ids: the copy starts
+	// empty, so every node keeps its arena slot).
+	let a;
 	{
 		let mut p = project.lock().unwrap();
 		p.initialize().unwrap();
-		let a = add_test_node(&mut p.graph);
+		a = add_test_node(&mut p.graph);
 		let b = add_test_node(&mut p.graph);
 		p.graph.connect(a, b, "val_in", -1).unwrap();
 		p.graph
@@ -139,11 +143,10 @@ fn project_deep_copy_isolation() {
 
 	// The copy shares no mutable state: mutate the original, the copy
 	// must not see it (no sync has happened yet).
-	let copy_val = copy_guard.graph.node_ids()[1];
 	let copy_val = copy_guard
 		.graph
-		.get(copy_val)
-		.unwrap()
+		.get(a)
+		.expect("the copy keeps the original's node identities")
 		.core
 		.standard_value("val_in", -1)
 		.to_double();
@@ -156,11 +159,16 @@ fn project_deep_copy_isolation() {
 #[test]
 fn project_sync_copy_consistency() {
 	let project = Project::new();
+	// The two test nodes' ids, kept across the lock scope: the tests look
+	// nodes up by identity rather than by arena index (the project now
+	// also holds the root folder and the two graph endpoints).
+	let a;
+	let b;
 	{
 		let mut p = project.lock().unwrap();
 		p.initialize().unwrap();
-		let a = add_test_node(&mut p.graph);
-		let b = add_test_node(&mut p.graph);
+		a = add_test_node(&mut p.graph);
+		b = add_test_node(&mut p.graph);
 		p.graph.connect(a, b, "val_in", -1).unwrap();
 		p.graph
 			.get_mut(a)
@@ -173,9 +181,6 @@ fn project_sync_copy_consistency() {
 	let mut original = project.lock().unwrap();
 	let copied = original.deep_copy().unwrap();
 	let mut copy_guard = copied.lock().unwrap();
-	let ids = original.graph.node_ids();
-	let a = ids[1];
-	let b = ids[2];
 
 	// 1. add a new node c + edge c->b, 2. change a's value.
 	let c = add_test_node(&mut original.graph);

@@ -97,6 +97,11 @@ const EXPECTED_ORDER: &[&str] = &[
 	"org.olivevideoeditor.Olive.colorbars",
 	"org.olivevideoeditor.Olive.ramp",
 	"org.olivevideoeditor.Olive.multicam",
+	// Oak-only virtual graph endpoints (no C++ counterpart; appended
+	// after the C++ menu order by `nodes::register_all`, hidden from
+	// every create menu).
+	"org.olivevideoeditor.Olive.graphinput",
+	"org.olivevideoeditor.Olive.graphoutput",
 ];
 
 /// `register_all()` installs every built-in node, exactly once, in C++
@@ -110,8 +115,9 @@ fn registered_entries_match_cpp_order() {
 	}
 }
 
-/// First and last entries are polygon and multi-cam respectively
-/// (multi-cam is the last built-in in `factory.cpp` switch order).
+/// First entry is polygon; the last is the Oak-only graph-output endpoint
+/// (multi-cam is the last C++ built-in in `factory.cpp` switch order, but
+/// the endpoint pair is appended after it).
 #[test]
 fn first_and_last_entries() {
 	let entries = Factory::global().entries();
@@ -122,9 +128,9 @@ fn first_and_last_entries() {
 	assert_eq!(entries.first().unwrap().name, "Polygon");
 	assert_eq!(
 		entries.last().unwrap().type_id,
-		"org.olivevideoeditor.Olive.multicam"
+		"org.olivevideoeditor.Olive.graphoutput"
 	);
-	assert_eq!(entries.last().unwrap().name, "Multi-Cam");
+	assert_eq!(entries.last().unwrap().name, "Graph Output");
 }
 
 /// `find()` resolves a type id to its metadata (pan, index 4 in the

@@ -119,6 +119,10 @@ impl Project {
 		self.root = id;
 		self.settings
 			.insert(SETTING_ROOT.to_string(), id.identity().to_string());
+		// Every project graph carries the virtual endpoint pair (see
+		// docs/zh/plans/render-pipeline-threads.md §3.8); created last so
+		// the root folder keeps the first arena slot.
+		self.graph.ensure_endpoints();
 		Ok(())
 	}
 

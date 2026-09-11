@@ -282,8 +282,9 @@ fn no_op_save_is_a_touch_only() {
 		(proj.command_seq, n)
 	});
 	assert_eq!(head, 1, "no-op save keeps the head seq");
-	// The import wrote 12 nodes + 1 settings row; the no-op added none.
-	assert_eq!(count, 13, "only the import rows remain");
+	// The import wrote 12 content nodes + the 2 graph endpoints (M0b)
+	// + 1 settings row; the no-op added none.
+	assert_eq!(count, 15, "only the import rows remain");
 }
 
 // ---------------------------------------------------------------------------
@@ -461,7 +462,15 @@ fn undo_to_any_point() {
 	let at1 = load_at(&session, &uri, &uuid, 1);
 	{
 		let l = at1.lock().unwrap();
-		assert_eq!(l.graph.node_count(), 12, "fixture node count");
+		// The graph endpoints (M0b) are not part of the fixture's 12
+		// content nodes.
+		let content = l
+			.graph
+			.node_ids()
+			.into_iter()
+			.filter(|id| !l.graph.is_endpoint(*id))
+			.count();
+		assert_eq!(content, 12, "fixture node count");
 		let id = l
 			.graph
 			.node_ids()
@@ -474,12 +483,22 @@ fn undo_to_any_point() {
 		);
 	}
 
-	// Undo to seq 0: an empty project.
+	// Undo to seq 0: an empty project. The graph endpoints (M0b) are
+	// recreated at load time, so "empty" means no content nodes.
 	let session = DatabaseBackend::new();
 	let at0 = load_at(&session, &uri, &uuid, 0);
 	{
 		let l = at0.lock().unwrap();
-		assert_eq!(l.graph.node_count(), 0, "empty project at seq 0");
+		assert_eq!(
+			l.graph
+				.node_ids()
+				.into_iter()
+				.filter(|id| !l.graph.is_endpoint(*id))
+				.count(),
+			0,
+			"empty project at seq 0"
+		);
+		assert!(l.graph.endpoints().is_some(), "endpoints exist even in the empty state");
 	}
 
 	// Out of range -> E_INVALID.
@@ -636,7 +655,14 @@ fn journal_retention_truncation() {
 			l.graph.get(math_ids[0]).unwrap().core.standard_value("param_a_in", -1),
 			NodeValue::Float(4.5)
 		);
-		assert_eq!(l.graph.node_count(), 12);
+		assert_eq!(
+			l.graph
+				.node_ids()
+				.into_iter()
+				.filter(|id| !l.graph.is_endpoint(*id))
+				.count(),
+			12
+		);
 	}
 }
 
@@ -882,7 +908,14 @@ fn export_and_import_round_trip() {
 	assert_eq!(imported_uuid, imported);
 	{
 		let l = imported_proj.lock().unwrap();
-		assert_eq!(l.graph.node_count(), 12);
+		assert_eq!(
+			l.graph
+				.node_ids()
+				.into_iter()
+				.filter(|id| !l.graph.is_endpoint(*id))
+				.count(),
+			12
+		);
 		assert_eq!(l.settings.get("projectname").cloned(), Some("full-fixture".to_string()));
 	}
 

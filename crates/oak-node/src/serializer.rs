@@ -662,6 +662,12 @@ fn load_project_body(
 	// reattach each child to its bin folder.
 	resolve_folder_children(&mut project.graph, &id_map);
 
+	// Migration for projects saved before the endpoints existed (or whose
+	// file omitted them): create whatever is missing and default-wire the
+	// pair. A file that already carries both endpoints — and possibly a
+	// hand-wired output — is left untouched.
+	project.graph.ensure_endpoints();
+
 	Ok(id_map)
 }
 

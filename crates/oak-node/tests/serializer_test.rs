@@ -1207,3 +1207,130 @@ fn multicam_clip_round_trip_preserves_wiring() {
 		.expect("loaded node is a MultiCamNode");
 	assert_eq!(mc_node.sequence(), Some(seq_src));
 }
+
+/// The virtual endpoint pair round-trips: the saved file names both
+/// endpoint types, the loaded graph rebuilds them with their identities,
+/// and the default `input -> output` wiring survives.
+#[test]
+fn endpoints_round_trip_and_stay_wired() {
+	use oak_node::nodes::graphendpoints::{
+		GRAPH_INPUT_TYPE_ID, GRAPH_OUTPUT_INPUT, GRAPH_OUTPUT_TYPE_ID,
+	};
+	use oak_node::project::Project;
+
+	let project = Project::new();
+	let (input, output) = {
+		let mut p = project.lock().unwrap();
+		p.initialize().unwrap();
+		// Some real content so the round trip is not vacuous.
+		let (core, behavior) = (oak_node::factory::Factory::global()
+			.find("org.olivevideoeditor.Olive.math")
+			.unwrap()
+			.create)();
+		p.graph.add_node(core, behavior);
+		p.graph.endpoints().expect("initialize creates the pair")
+	};
+
+	let xml = {
+		let p = project.lock().unwrap();
+		oak_node::serializer::save(&p).unwrap()
+	};
+	assert!(
+		xml.contains(GRAPH_INPUT_TYPE_ID) && xml.contains(GRAPH_OUTPUT_TYPE_ID),
+		"both endpoints are written to the file"
+	);
+
+	let loaded = oak_node::serializer::load(&xml).unwrap();
+	{
+		let l = loaded.lock().unwrap();
+		let (li, lo) = l
+			.graph
+			.endpoints()
+			.expect("the endpoint pair survives the round trip");
+		assert_eq!(
+			(li, lo),
+			(input, output),
+			"loaded endpoints keep their identities"
+		);
+		assert_eq!(
+			l.graph.connected_output(lo, GRAPH_OUTPUT_INPUT, -1),
+			Some(li),
+			"the default wiring survives"
+		);
+	}
+
+	// Re-save is idempotent (no duplicate pair is added by the load-time
+	// `ensure_endpoints`).
+	let xml2 = {
+		let l = loaded.lock().unwrap();
+		oak_node::serializer::save(&l).unwrap()
+	};
+	assert_eq!(xml, xml2, "re-save is idempotent");
+}
+
+/// Migration: a project file saved before the endpoints existed (no
+/// endpoint nodes at all) loads with the pair created and default-wired,
+/// and re-loading the migrated save adds nothing further.
+#[test]
+fn legacy_project_without_endpoints_migrates_on_load() {
+	use oak_node::nodes::graphendpoints::{
+		GRAPH_INPUT_TYPE_ID, GRAPH_OUTPUT_INPUT, GRAPH_OUTPUT_TYPE_ID,
+	};
+	use oak_node::project::Project;
+
+	let project = Project::new();
+	let legacy_count = {
+		let mut p = project.lock().unwrap();
+		p.initialize().unwrap();
+		let (core, behavior) = (oak_node::factory::Factory::global()
+			.find("org.olivevideoeditor.Olive.math")
+			.unwrap()
+			.create)();
+		p.graph.add_node(core, behavior);
+		// Simulate a pre-endpoint file: detach the pair before saving.
+		// `remove_node` refuses endpoints by design, so the file-level
+		// simulation goes through the transfer seam (`take_node`).
+		let (input, output) = p.graph.endpoints().expect("initialize creates the pair");
+		assert!(p.graph.take_node(input).is_some());
+		assert!(p.graph.take_node(output).is_some());
+		assert!(p.graph.endpoints().is_none());
+		p.graph.node_count()
+	};
+
+	let xml = {
+		let p = project.lock().unwrap();
+		oak_node::serializer::save(&p).unwrap()
+	};
+	assert!(
+		!xml.contains(GRAPH_INPUT_TYPE_ID) && !xml.contains(GRAPH_OUTPUT_TYPE_ID),
+		"the simulated legacy file carries no endpoints"
+	);
+
+	let loaded = oak_node::serializer::load(&xml).unwrap();
+	let (li, lo) = {
+		let l = loaded.lock().unwrap();
+		let (li, lo) = l.graph.endpoints().expect("load migrates the pair in");
+		assert_eq!(
+			l.graph.connected_output(lo, GRAPH_OUTPUT_INPUT, -1),
+			Some(li),
+			"the migrated pair is default-wired"
+		);
+		assert_eq!(
+			l.graph.node_count(),
+			legacy_count + 2,
+			"exactly the missing pair is added"
+		);
+		(li, lo)
+	};
+
+	// The migrated save reloads without adding a second pair.
+	let xml2 = {
+		let l = loaded.lock().unwrap();
+		oak_node::serializer::save(&l).unwrap()
+	};
+	let reloaded = oak_node::serializer::load(&xml2).unwrap();
+	let r = reloaded.lock().unwrap();
+	assert_eq!(r.graph.endpoints(), Some((li, lo)));
+	assert_eq!(r.graph.node_count(), legacy_count + 2);
+	assert_eq!(r.graph.connected_output(lo, GRAPH_OUTPUT_INPUT, -1), Some(li));
+}

@@ -367,8 +367,23 @@ pub(crate) fn assert_full_state(orig: &Project, loaded: &Project) {
 		.collect();
 	assert_eq!(l_types, o_types, "node types");
 
-	// Math A: label, color, value, keyframes.
-	let (a_o, a_l) = (o_ids[1], l_ids[1]);
+	// Math A: label, color, value, keyframes. The graph endpoints (M0b)
+	// sit between the root folder and the content nodes, so pick the two
+	// math nodes by type instead of by position (slot order still lines
+	// them up pairwise).
+	let o_math: Vec<NodeId> = o_ids
+		.iter()
+		.copied()
+		.filter(|id| orig.graph.get(*id).unwrap().behavior.type_id() == MATH)
+		.collect();
+	let l_math: Vec<NodeId> = l_ids
+		.iter()
+		.copied()
+		.filter(|id| loaded.graph.get(*id).unwrap().behavior.type_id() == MATH)
+		.collect();
+	assert_eq!(l_math.len(), 2, "fixture math nodes");
+	let (a_o, a_l) = (o_math[0], l_math[0]);
+	let b_l = l_math[1];
 	assert_eq!(
 		loaded.graph.get(a_l).unwrap().core.label,
 		orig.graph.get(a_o).unwrap().core.label,
@@ -422,11 +437,11 @@ pub(crate) fn assert_full_state(orig: &Project, loaded: &Project) {
 
 	// Connection a -> b.param_b_in and the link.
 	assert_eq!(
-		loaded.graph.connected_output(l_ids[2], "param_b_in", -1),
+		loaded.graph.connected_output(b_l, "param_b_in", -1),
 		Some(a_l),
 		"connection"
 	);
-	assert!(loaded.graph.are_linked(a_l, l_ids[2]), "link");
+	assert!(loaded.graph.are_linked(a_l, b_l), "link");
 
 	// Timeline: sequence, track lists, track, clips, footage.
 	let mut seq: Option<(NodeId, Vec<NodeId>)> = None;

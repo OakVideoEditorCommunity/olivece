@@ -30,6 +30,7 @@ mod displaytransform;
 mod dropshadowfilter;
 mod flipdistortnode;
 mod generatorwithmerge;
+pub mod graphendpoints;
 pub mod group;
 mod mask;
 mod math;
@@ -189,6 +190,13 @@ pub fn register_all() {
 	colorbars::register(&mut meta);
 	ramp::register(&mut meta);
 	multicamnode::register(&mut meta);
+
+	// Oak-only virtual graph endpoints (see
+	// [`graphendpoints`](crate::nodes::graphendpoints)). No C++ menu
+	// entry exists; they are appended after the C++ order ends and are
+	// hidden from every create menu (`DONT_SHOW_IN_CREATE_MENU`), so the
+	// only observable effect on the factory table is two extra entries.
+	graphendpoints::register(&mut meta);
 
 	// OpenFX plugins have no static type ids (C++
 	// `factory.cpp::register_plugin_nodes`); the registration call is a

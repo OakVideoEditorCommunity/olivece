@@ -183,7 +183,14 @@ impl Graph {
 
 	/// Remove a node and all its edges (C++: ~Node + set_parent(null)
 	/// + disconnect_all side effects — see `// CPP-PARITY: node.cpp`).
+	///
+	/// Refused (`None`) for the virtual endpoints, which every graph keeps
+	/// for its lifetime — removing one would strand the evaluation walk's
+	/// anchor ([`Graph::ensure_endpoints`]).
 	pub fn remove_node(&mut self, id: NodeId) -> Option<Box<dyn NodeBehavior>> {
+		if self.is_endpoint(id) {
+			return None;
+		}
 		let entry = self.take_node(id)?;
 		Some(entry.behavior)
 	}
@@ -226,6 +233,100 @@ impl Graph {
 			}
 		}
 		ids
+	}
+
+	/// The graph's virtual endpoint pair `(input, output)`, or `None` when
+	/// either is missing. Endpoints are identified by their behavior's
+	/// type id (see [`crate::nodes::graphendpoints`]) — no node id is ever
+	/// stored for them.
+	pub fn endpoints(&self) -> Option<(NodeId, NodeId)> {
+		let input = self.endpoint_of_type(crate::nodes::graphendpoints::GRAPH_INPUT_TYPE_ID)?;
+		let output = self.endpoint_of_type(crate::nodes::graphendpoints::GRAPH_OUTPUT_TYPE_ID)?;
+		Some((input, output))
+	}
+
+	/// True when `id` names one of the virtual endpoints (`false` for a
+	/// stale id).
+	pub fn is_endpoint(&self, id: NodeId) -> bool {
+		match self.get(id) {
+			Some(entry) => {
+				let type_id = entry.behavior.type_id();
+				type_id == crate::nodes::graphendpoints::GRAPH_INPUT_TYPE_ID
+					|| type_id == crate::nodes::graphendpoints::GRAPH_OUTPUT_TYPE_ID
+			}
+			None => false,
+		}
+	}
+
+	/// The live node whose behavior reports `type_id`, if any.
+	fn endpoint_of_type(&self, type_id: &str) -> Option<NodeId> {
+		self.node_ids()
+			.into_iter()
+			.find(|&id| {
+				self.get(id)
+					.map(|e| e.behavior.type_id() == type_id)
+					.unwrap_or(false)
+			})
+	}
+
+	/// Create whichever virtual endpoints the graph is missing and wire the
+	/// default `input -> output` edge; returns the `(input, output)` pair.
+	///
+	/// Idempotent and safe to call on every project load: a graph that
+	/// already carries both endpoints is returned untouched, and a project
+	/// saved before the endpoints existed gets them here (the migration
+	/// path — see [`crate::serializer`]). A graph with only one of the pair
+	/// gets the missing node added next to it.
+	///
+	/// The default edge is only created when `output.tex_in` is free, so an
+	/// explicitly wired output is never overridden.
+	///
+	/// Constructed directly rather than through the factory: these are
+	/// built-in graph-internal nodes and must exist even in a process where
+	/// the factory table has not been installed yet.
+	pub fn ensure_endpoints(&mut self) -> (NodeId, NodeId) {
+		let input = match self.endpoint_of_type(crate::nodes::graphendpoints::GRAPH_INPUT_TYPE_ID) {
+			Some(id) => id,
+			None => {
+				let (core, behavior) = crate::nodes::graphendpoints::create_graph_input();
+				self.add_node(core, behavior)
+			}
+		};
+		let output =
+			match self.endpoint_of_type(crate::nodes::graphendpoints::GRAPH_OUTPUT_TYPE_ID) {
+				Some(id) => id,
+				None => {
+					let (core, behavior) = crate::nodes::graphendpoints::create_graph_output();
+					self.add_node(core, behavior)
+				}
+			};
+		if self
+			.connected_output(output, crate::nodes::graphendpoints::GRAPH_OUTPUT_INPUT, -1)
+			.is_none()
+		{
+			self.connect(
+				input,
+				output,
+				crate::nodes::graphendpoints::GRAPH_OUTPUT_INPUT,
+				-1,
+			)
+			.ok();
+		}
+		(input, output)
+	}
+
+	/// Test-only: insert an edge with none of [`Graph::connect`]'s
+	/// validation, so a test can build the cycle the production paths
+	/// reject at connect time.
+	#[cfg(test)]
+	pub(crate) fn force_connect(&mut self, from: NodeId, to: NodeId, input: &str, element: i32) {
+		let key = self.intern_input(input);
+		self.edges.insert(Edge {
+			from,
+			to,
+			input_key: key,
+			element,
+		});
 	}
 
 	/// Connect `from`'s output to `to.input[element]`
@@ -764,4 +865,193 @@ fn hash_str(input: &str) -> u64 {
 	let mut h = std::collections::hash_map::DefaultHasher::new();
 	input.hash(&mut h);
 	h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::input::Input;
+	use crate::nodes::graphendpoints::{
+		GRAPH_INPUT_TYPE_ID, GRAPH_OUTPUT_TYPE_ID, GRAPH_OUTPUT_INPUT,
+	};
+	use crate::value::{NodeValue, ValueType};
+
+	/// Minimal non-endpoint behavior for the model tests: one connectable
+	/// texture input, no output logic.
+	struct Plain;
+
+	impl NodeBehavior for Plain {
+		fn name(&self) -> &str {
+			"Plain"
+		}
+
+		fn type_id(&self) -> &str {
+			"org.olivevideoeditor.Olive.plain-test"
+		}
+
+		fn duplicate(&self, _core: &NodeCore) -> Option<Box<dyn NodeBehavior>> {
+			Some(Box::new(Plain))
+		}
+	}
+
+	fn add_plain(graph: &mut Graph) -> NodeId {
+		let mut core = NodeCore::new();
+		core.add_input(Input::new("x_in", ValueType::Texture, NodeValue::None));
+		graph.add_node(core, Box::new(Plain))
+	}
+
+	#[test]
+	fn ensure_endpoints_creates_a_wired_pair() {
+		let mut graph = Graph::new();
+		assert!(graph.endpoints().is_none());
+		assert_eq!(graph.node_count(), 0);
+
+		let (input, output) = graph.ensure_endpoints();
+		assert_eq!(graph.endpoints(), Some((input, output)));
+		assert!(graph.is_endpoint(input));
+		assert!(graph.is_endpoint(output));
+		assert_eq!(
+			graph
+				.get(input)
+				.map(|e| e.behavior.type_id())
+				.expect("input endpoint is live"),
+			GRAPH_INPUT_TYPE_ID
+		);
+		assert_eq!(
+			graph
+				.get(output)
+				.map(|e| e.behavior.type_id())
+				.expect("output endpoint is live"),
+			GRAPH_OUTPUT_TYPE_ID
+		);
+		// Default wiring: input -> output.tex_in.
+		assert_eq!(
+			graph.connected_output(output, GRAPH_OUTPUT_INPUT, -1),
+			Some(input)
+		);
+		assert_eq!(graph.node_count(), 2);
+
+		// Idempotent: a second call reuses the same pair and edge.
+		assert_eq!(graph.ensure_endpoints(), (input, output));
+		assert_eq!(graph.node_count(), 2);
+		assert_eq!(graph.output_connections(input).len(), 1);
+	}
+
+	#[test]
+	fn ensure_endpoints_completes_a_half_pair() {
+		let mut graph = Graph::new();
+		let (core, behavior) = crate::nodes::graphendpoints::create_graph_input();
+		let input = graph.add_node(core, behavior);
+		// One endpoint alone is not a pair.
+		assert!(graph.endpoints().is_none());
+		assert!(graph.is_endpoint(input));
+
+		let (input2, output) = graph.ensure_endpoints();
+		assert_eq!(input, input2);
+		assert_eq!(graph.endpoints(), Some((input, output)));
+		assert_eq!(
+			graph.connected_output(output, GRAPH_OUTPUT_INPUT, -1),
+			Some(input)
+		);
+	}
+
+	#[test]
+	fn ensure_endpoints_keeps_an_explicitly_wired_output() {
+		let mut graph = Graph::new();
+		let (input, output) = graph.ensure_endpoints();
+		graph.disconnect(input, output, GRAPH_OUTPUT_INPUT, -1);
+
+		let source = add_plain(&mut graph);
+		graph.connect(source, output, GRAPH_OUTPUT_INPUT, -1).unwrap();
+
+		// No default edge is forced over the explicit one.
+		assert_eq!(graph.ensure_endpoints(), (input, output));
+		assert_eq!(
+			graph.connected_output(output, GRAPH_OUTPUT_INPUT, -1),
+			Some(source)
+		);
+	}
+
+	#[test]
+	fn remove_node_refuses_endpoints() {
+		let mut graph = Graph::new();
+		let (input, output) = graph.ensure_endpoints();
+		let plain = add_plain(&mut graph);
+
+		assert!(graph.remove_node(input).is_none());
+		assert!(graph.remove_node(output).is_none());
+		assert!(graph.is_valid(input) && graph.is_valid(output));
+		assert_eq!(graph.endpoints(), Some((input, output)));
+		assert_eq!(
+			graph.connected_output(output, GRAPH_OUTPUT_INPUT, -1),
+			Some(input)
+		);
+
+		// Non-endpoint nodes still go away, and a removed id is not an
+		// endpoint (nor is a stale one).
+		assert!(graph.remove_node(plain).is_some());
+		assert!(!graph.is_valid(plain));
+		assert!(!graph.is_endpoint(plain));
+		assert!(!graph.is_endpoint(NodeId::INVALID));
+		assert!(graph.remove_node(NodeId::INVALID).is_none());
+	}
+
+	#[test]
+	fn duplicate_refuses_endpoints_and_dependency_copies_propagate() {
+		let mut graph = Graph::new();
+		let (input, output) = graph.ensure_endpoints();
+
+		assert!(graph
+			.copy_node_and_dependency_graph_minus_items(input)
+			.is_none());
+		assert!(graph
+			.copy_node_and_dependency_graph_minus_items(output)
+			.is_none());
+
+		// A node whose dependency graph contains an endpoint cannot be
+		// copied either: the recursion reaches the endpoint's
+		// `duplicate` -> None.
+		let plain = add_plain(&mut graph);
+		graph.connect(input, plain, "x_in", -1).unwrap();
+		assert!(graph
+			.copy_node_and_dependency_graph_minus_items(plain)
+			.is_none());
+	}
+
+	#[test]
+	fn dependency_copy_of_an_endpoint_free_subgraph_still_works() {
+		let mut graph = Graph::new();
+		let a = add_plain(&mut graph);
+		let b = add_plain(&mut graph);
+		graph.connect(a, b, "x_in", -1).unwrap();
+
+		let (copy, map) = graph
+			.copy_node_and_dependency_graph_minus_items(b)
+			.expect("an endpoint-free chain copies");
+		assert_ne!(copy, b);
+		assert_eq!(map.get(&b), Some(&copy));
+		let a_copy = map.get(&a).copied().expect("a is copied");
+		assert_ne!(a_copy, a);
+		assert_eq!(graph.connected_output(copy, "x_in", -1), Some(a_copy));
+	}
+
+	#[test]
+	fn force_connect_builds_the_cycle_connect_rejects() {
+		let mut graph = Graph::new();
+		let a = add_plain(&mut graph);
+		let b = add_plain(&mut graph);
+		graph.connect(a, b, "x_in", -1).unwrap();
+		assert_eq!(
+			graph.connect(b, a, "x_in", -1),
+			Err(crate::error::Error::State)
+		);
+
+		graph.force_connect(b, a, "x_in", -1);
+		assert!(graph.reaches(a, b));
+		assert!(graph.reaches(b, a));
+		assert_eq!(
+			graph.input_connections(a),
+			vec![(b, "x_in".to_string(), -1)]
+		);
+	}
 }

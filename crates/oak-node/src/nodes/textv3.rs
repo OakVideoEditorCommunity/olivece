@@ -1741,11 +1741,10 @@ mod tests {
 		);
 	}
 
-	/// Serializes the tests that install a process-global text backend.
-	/// (The `textbackend` module's own tests use a different lock, so they
-	/// are not mutually excluded — same exposure as the pre-existing
-	/// `measure_without_backend_returns_zero_size`.)
-	static BACKEND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+	/// Serializes the tests that install a process-global text backend;
+	/// shared with the `textbackend` module's own tests, so no test
+	/// observes another module's install.
+	use crate::nodes::textbackend::TEST_BACKEND_LOCK as BACKEND_LOCK;
 
 	/// Measure hook for tests that only need "a backend is installed".
 	fn noop_measure(_req: &TextLayoutRequest) -> TextLayoutSize {
@@ -1802,6 +1801,8 @@ mod tests {
 
 	#[test]
 	fn value_pushes_job_when_text_nonempty() {
+		let _guard = BACKEND_LOCK.lock().unwrap();
+		crate::nodes::textbackend::set_text_backends(None, None);
 		let (core, behavior) = create();
 		let mut row = NodeValueRow::default();
 		row.insert(
@@ -1819,6 +1820,8 @@ mod tests {
 
 	#[test]
 	fn value_expands_args_from_row() {
+		let _guard = BACKEND_LOCK.lock().unwrap();
+		crate::nodes::textbackend::set_text_backends(None, None);
 		let (core, behavior) = create();
 		let mut row = NodeValueRow::default();
 		row.insert(
@@ -1860,8 +1863,8 @@ mod tests {
 		let (core, behavior) = create();
 		let mut row = NodeValueRow::default();
 		// Both text inputs are emptied explicitly: which one `value` reads
-		// depends on the process-global backend state, which the tests that
-		// install one (own lock, and `textbackend`'s) change concurrently.
+		// depends on the process-global backend state, which the installer
+		// tests change and restore concurrently.
 		row.insert(PLAIN_TEXT_INPUT.to_string(), NodeValue::Text(String::new()));
 		row.insert(TEXT_INPUT.to_string(), NodeValue::Text(String::new()));
 		let mut table = NodeValueTable::default();

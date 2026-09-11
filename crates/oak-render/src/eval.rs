@@ -3989,5 +3989,122 @@ mod tests {
         }
     }
 
+    // ---- Endpoint-anchored BFS sweep (M0b) ------------------------------
+
+    /// The M0b integration path over real media and a real effect: a test
+    /// clip probed into a footage node feeds `GraphInput.feed_in`, a
+    /// Position node sits between the endpoints, and `eval_graph_bfs`
+    /// decodes the frame, runs the effect pass and returns the output
+    /// endpoint's texture. The Position offset is `(16, 0)`, so the frame
+    /// must come out shifted right by 16 pixels — the pixels alone prove
+    /// both the decode and the shader pass ran inside the sweep.
+    #[test]
+    fn bfs_endpoint_sweep_renders_footage_through_position() {
+        use oak_node::nodes::graphendpoints::{GRAPH_INPUT_FEED_INPUT, GRAPH_OUTPUT_INPUT};
+
+        if oak_core::backend::GpuContext::shared().is_none() {
+            eprintln!("no adapter; skipping");
+            return;
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "oakrender_bfs_endpoints_{}.mp4",
+            std::process::id()
+        ));
+        oak_codec::testmedia::write_test_clip_solid(
+            &path,
+            64,
+            64,
+            10,
+            10,
+            [0.9, 0.2, 0.1, 1.0],
+        )
+        .expect("test clip generation");
+
+        let mut graph = oak_node::graph::Graph::new();
+        let (input, output) = graph.ensure_endpoints();
+        // The default input -> output edge is replaced by the effect chain.
+        graph.disconnect(input, output, GRAPH_OUTPUT_INPUT, -1);
+
+        let (core, _) = oak_node::footage::FootageBehavior::create();
+        let mut footage = oak_node::footage::FootageBehavior::new(&path.to_string_lossy());
+        footage.probe().expect("probe the test clip");
+        let footage = graph.add_node(core, Box::new(footage));
+
+        let (core, behavior) = oak_node::factory::Factory::global()
+            .create_any("org.olivevideoeditor.Olive.position")
+            .expect("position node registered");
+        let position = graph.add_node(core, behavior);
+        graph
+            .get_mut(position)
+            .expect("the position node is live")
+            .core
+            .set_standard_value("offset_in", -1, NodeValue::Vec2([16.0, 0.0]));
+
+        graph
+            .connect(footage, input, GRAPH_INPUT_FEED_INPUT, -1)
+            .expect("footage -> GraphInput.feed_in");
+        graph
+            .connect(input, position, "tex_in", -1)
+            .expect("GraphInput.tex_out -> position.tex_in");
+        graph
+            .connect(position, output, GRAPH_OUTPUT_INPUT, -1)
+            .expect("position.tex_out -> GraphOutput.tex_in");
+
+        let mut hooks = RenderEvalHooks::new();
+        hooks.frame_size = Some((64, 64));
+        let value = oak_node::traverser::Traverser::new()
+            .eval_graph_bfs(&graph, Rational::new(0, 1), &mut hooks)
+            .expect("the endpoint sweep runs");
+
+        let NodeValue::Texture(handle) = value else {
+            panic!("the sweep must return the output endpoint's texture");
+        };
+        assert!(!handle.ctx.is_null(), "the returned box is still a job");
+        let texture = (unsafe { oak_node::handle::get_checked::<Texture>(&handle) })
+            .cloned()
+            .expect("the returned box holds a Texture");
+        assert_eq!(texture.size(), (64, 64));
+        let frame = texture.to_frame().expect("readback");
+
+        let reference = render_footage_frame(
+            &path.to_string_lossy(),
+            0,
+            Rational::new(0, 1),
+            (64, 64),
+            PixelFormat::F32,
+        )
+        .expect("reference decode");
+        let reference = reference.to_frame().expect("reference readback");
+        let reference_px = pixel_at(&reference, 32, 32);
+        assert!(
+            reference_px[0] > 0.3 && reference_px[0] > 4.0 * reference_px[1],
+            "the reference clip is red-dominant: {reference_px:?}"
+        );
+
+        // The vacated left columns are transparent, not a clamped edge
+        // column (the Position node's whole-pixel translation).
+        for (x, y) in [(0, 0), (8, 32), (15, 63)] {
+            assert!(
+                pixel_at(&frame, x, y)[3] < 1e-4,
+                "({x},{y}) must be transparent after the shift: {:?}",
+                pixel_at(&frame, x, y)
+            );
+        }
+        // The footage content arrives at (x + 16, y).
+        for (x, y) in [(16, 0), (32, 32), (63, 63)] {
+            let got = pixel_at(&frame, x, y);
+            let want = pixel_at(&reference, x - 16, y);
+            for (c, (g, w)) in got.iter().zip(want).enumerate() {
+                assert!(
+                    (g - w).abs() < 1e-3,
+                    "shifted pixel ({x},{y}) ch{c}: got {g}, want {w}"
+                );
+            }
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
 }
 

@@ -198,10 +198,24 @@ fn assert_roundtrip_fields(orig: &Project, loaded: &Project) {
 		.collect();
 	assert_eq!(l_types, o_types, "node types");
 
-	let a_o = o_ids[1];
-	let a_l = l_ids[1];
-	let b_o = o_ids[2];
-	let b_l = l_ids[2];
+	// The graph endpoints (M0b) sit between the root folder and the
+	// content nodes, so pick the two math nodes by type instead of by
+	// position (slot order still lines them up pairwise).
+	let o_math: Vec<NodeId> = o_ids
+		.iter()
+		.copied()
+		.filter(|id| orig.graph.get(*id).unwrap().behavior.type_id() == MATH)
+		.collect();
+	let l_math: Vec<NodeId> = l_ids
+		.iter()
+		.copied()
+		.filter(|id| loaded.graph.get(*id).unwrap().behavior.type_id() == MATH)
+		.collect();
+	assert_eq!(l_math.len(), 2, "fixture math nodes");
+	let a_o = o_math[0];
+	let a_l = l_math[0];
+	let b_o = o_math[1];
+	let b_l = l_math[1];
 
 	// Label + color.
 	assert_eq!(

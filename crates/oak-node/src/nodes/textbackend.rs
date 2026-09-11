@@ -163,18 +163,24 @@ static MEASURE: std::sync::Mutex<Option<TextMeasureBackend>> = std::sync::Mutex:
 /// Installed render hook (C++ global `g_text_render_backend`).
 static RENDER: std::sync::Mutex<Option<TextRenderBackend>> = std::sync::Mutex::new(None);
 
+/// Serializes every test that installs the process-global text backends:
+/// the tests below and `textv3`'s installer tests share it, so none of
+/// them observes another's install.
+#[cfg(test)]
+pub(crate) static TEST_BACKEND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 
-	// The two tests below share the process-global backend statics; a
-	// lock serializes them so `backend_hooks_default_none` cannot observe
-	// the hooks installed by `backend_hooks_install_and_query`.
-	static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+	// The two tests below share the process-global backend statics; the
+	// shared test lock also serializes them against `textv3`'s installer
+	// tests, so `backend_hooks_default_none` cannot observe the hooks
+	// installed by `backend_hooks_install_and_query`.
 
 	#[test]
 	fn backend_hooks_default_none() {
-		let _guard = LOCK.lock().unwrap();
+		let _guard = TEST_BACKEND_LOCK.lock().unwrap();
 		set_text_backends(None, None);
 		assert_eq!(text_measure_backend(), None);
 		assert_eq!(text_render_backend(), None);
@@ -182,7 +188,7 @@ mod tests {
 
 	#[test]
 	fn backend_hooks_install_and_query() {
-		let _guard = LOCK.lock().unwrap();
+		let _guard = TEST_BACKEND_LOCK.lock().unwrap();
 		fn measure(_r: &TextLayoutRequest) -> TextLayoutSize {
 			TextLayoutSize {
 				width: 12.0,
