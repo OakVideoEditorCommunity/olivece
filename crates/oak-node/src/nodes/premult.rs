@@ -47,7 +47,10 @@ pub const CHANNEL_INPUT: &str = "premult_channel_in";
 /// Channel selector values for [`CHANNEL_INPUT`], in combo order. The
 /// numeric values are the shader's channel indices: `0` selects nothing
 /// (the image passes through — a factor of 1) and `1..=4` select
-/// `r`/`g`/`b`/`a`.
+/// `r`/`g`/`b`/`a`. Only `Alpha` is constructed today (the runtime value
+/// is the raw combo index); the full upstream set is kept (with an
+/// `allow`) for parity.
+#[allow(dead_code)]
 #[repr(i64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channel {

@@ -334,6 +334,7 @@ impl TextGeneratorV3 {
 	/// Middle -> `TextGizmo::k_align_vcenter`, Bottom ->
 	/// `TextGizmo::k_align_bottom` (0 = top, 1 = bottom, 2 = vcenter in
 	/// the gizmo's numbering).
+	#[allow(dead_code)] // C++ parity helpers; covered by the tests.
 	pub fn get_gizmo_alignment_from_ours(v: VerticalAlignment) -> i32 {
 		match v {
 			VerticalAlignment::Top => 0,
@@ -413,6 +414,7 @@ impl TextGeneratorV3 {
 
 	/// Gizmo activated callback (C++ `gizmo_activated()`): sets
 	/// `use_args_in` to `false` and `dont_emit_valign_ = true`.
+	#[allow(dead_code)] // C++ parity callbacks; covered by the tests.
 	fn gizmo_activated(&mut self, core: &mut NodeCore) {
 		core.set_standard_value(USE_ARGS_INPUT, -1, NodeValue::Boolean(false));
 		self.dont_emit_valign = true;
@@ -420,6 +422,7 @@ impl TextGeneratorV3 {
 
 	/// Gizmo deactivated callback (C++ `gizmo_deactivated()`): sets
 	/// `use_args_in` to `true` and `dont_emit_valign_ = true`.
+	#[allow(dead_code)]
 	fn gizmo_deactivated(&mut self, core: &mut NodeCore) {
 		core.set_standard_value(USE_ARGS_INPUT, -1, NodeValue::Boolean(true));
 		self.dont_emit_valign = true;
@@ -431,6 +434,7 @@ impl TextGeneratorV3 {
 	/// command stack is not part of this crate, so only the resulting
 	/// standard-value write is performed (`// CPP-PARITY: textv3.cpp`
 	/// `set_vertical_alignment_undoable`).
+	#[allow(dead_code)]
 	fn set_vertical_alignment_undoable(&mut self, core: &mut NodeCore, a: i32) {
 		core.set_standard_value(
 			VERTICAL_ALIGNMENT_INPUT,
@@ -738,6 +742,7 @@ impl TextGeneratorV3 {
 	/// dots/meter) with the font taken from the markup. Both wrap to the
 	/// shape size X; the backend defaults are used when font family/size
 	/// are empty/zero.
+	#[allow(dead_code)]
 	pub fn layout_request(row: &NodeValueRow) -> TextLayoutRequest {
 		Self::layout_request_path(Self::plain_text_path(), row)
 	}
@@ -785,6 +790,7 @@ impl TextGeneratorV3 {
 	/// The C++ base offset (textv3.cpp `generate_frame()`): the shape
 	/// position re-centered into frame space — `pos - size/2 + frame/2`
 	/// (the frame halves are integer division in C++).
+	#[allow(dead_code)] // C++ parity helpers; the tests drive them.
 	pub fn base_offset(
 		pos: [f64; 2],
 		size: [f64; 2],
@@ -846,6 +852,7 @@ impl TextGeneratorV3 {
 	/// The render step needs the frame's pixel buffer, which the Rust
 	/// frame handle does not expose; it is not representable here
 	/// (`// CPP-PARITY: textv3.cpp` `generate_frame`).
+	#[allow(dead_code)]
 	pub fn measure_and_layout(row: &NodeValueRow) -> (TextLayoutRequest, TextLayoutSize) {
 		let req = Self::layout_request(row);
 		let doc = match super::textbackend::text_measure_backend() {

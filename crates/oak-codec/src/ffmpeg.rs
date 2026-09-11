@@ -70,8 +70,13 @@ use crate::footagedescription::{FootageDescription, StreamEntry};
 use crate::frame::Frame;
 
 /// `oak_core_COLOR_RANGE_FULL`.
+///
+/// Both range constants keep the C ABI's spelling (they name the frozen
+/// `oak_core_COLOR_RANGE_*` values), hence the lint allowance.
+#[allow(non_upper_case_globals)]
 const oak_core_COLOR_RANGE_FULL: i32 = 1;
 /// `oak_core_COLOR_RANGE_LIMITED`.
+#[allow(non_upper_case_globals)]
 const oak_core_COLOR_RANGE_LIMITED: i32 = 0;
 /// `AVCOL_RANGE_JPEG` (full range; AVCOL_RANGE_MPEG = 1 is limited).
 const AVCOL_RANGE_JPEG: i32 = 2;
@@ -1893,27 +1898,6 @@ fn convert_rgba_f32_le(data: &[u8], w: u32, h: u32, stride: usize) -> Vec<u8> {
 			&mut out[y * (w as usize) * PIXEL_F32_BYTES..(y + 1) * (w as usize) * PIXEL_F32_BYTES];
 		dst.copy_from_slice(row);
 		for px in dst.chunks_exact_mut(PIXEL_F32_BYTES) {
-			px[12..16].copy_from_slice(&1.0f32.to_le_bytes());
-		}
-	}
-	out
-}
-
-/// Copy a packed u16-RGBA buffer (RGBA64LE) into F32 RGBA bytes.
-fn convert_rgba64_to_f32(data: &[u8], w: u32, h: u32, stride: usize) -> Vec<u8> {
-	let mut out = vec![0u8; (w as usize) * (h as usize) * PIXEL_F32_BYTES];
-	for y in 0..h as usize {
-		let row = &data[y * stride..y * stride + (w as usize) * 8];
-		let dst =
-			&mut out[y * (w as usize) * PIXEL_F32_BYTES..(y + 1) * (w as usize) * PIXEL_F32_BYTES];
-		for (px, src_px) in dst
-			.chunks_exact_mut(PIXEL_F32_BYTES)
-			.zip(row.chunks_exact(8))
-		{
-			for c in 0..3 {
-				let v = u16::from_le_bytes([src_px[c * 2], src_px[c * 2 + 1]]);
-				px[c * 4..c * 4 + 4].copy_from_slice(&(v as f32 / 65535.0).to_le_bytes());
-			}
 			px[12..16].copy_from_slice(&1.0f32.to_le_bytes());
 		}
 	}

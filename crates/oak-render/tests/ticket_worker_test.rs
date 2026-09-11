@@ -24,12 +24,12 @@ mod common;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
-use oak_core::{Rational, TimeRange};
+use oak_core::Rational;
 
 use oak_render::error::Error;
 use oak_core::frame::VideoParamsPod;
 use oak_core::texture::{Frame, Texture};
-use oak_render::ticket::{TicketArena, TicketId, VideoTicketParams};
+use oak_render::ticket::{TicketArena, VideoTicketParams};
 use oak_render::worker::{GraphSnapshotStore, InlineDispatcher, JobDispatch};
 
 /// Unwrap a video ticket payload for assertions.

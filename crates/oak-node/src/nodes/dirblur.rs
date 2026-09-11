@@ -53,7 +53,9 @@ pub struct DirBlurNode;
 
 /// Number of taps averaged per pixel. Fixed (upstream has no tap-count
 /// knob either): a power-of-two constant keeps the division exact and
-/// the shader otherwise branch-free.
+/// the shader otherwise branch-free. Only the shader-source test reads
+/// it, so it is kept (with an `allow`) to document the GLSL define.
+#[allow(dead_code)]
 const TAP_COUNT: i32 = 16;
 
 /// Fragment shader: one direction vector from `angle_in`, then a

@@ -18,7 +18,6 @@
 //! `src/node/src/input/multicam/multicamnode.{h,cpp}`,
 //! `olive::MultiCamNode`).
 
-use std::any::Any;
 use crate::factory::NodeMeta;
 use crate::id::NodeId;
 use crate::node::{Category, NodeBehavior, NodeCore};

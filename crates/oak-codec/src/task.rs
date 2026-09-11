@@ -107,6 +107,10 @@ enum SubmitCb {
 	/// No callback registered.
 	None,
 	/// Extern-C callback registered via `oakcodec_set_task_submit_cb`.
+	///
+	/// Only constructed by the tests below and by the extern-C entry point
+	/// that the removed C ABI used to expose; kept for that lane.
+	#[allow(dead_code)]
 	Extern {
 		/// The C function pointer.
 		cb: OakCodecTaskSubmitFn,
@@ -151,6 +155,8 @@ pub fn set_task_submit_cb(cb: Option<&'static TaskSubmitFn>, userdata: *mut std:
 /// Register an extern-C submit callback (used by `ffi::task`).
 ///
 /// Mirrors `oakcodec_set_task_submit_cb`: a `None` pointer clears it.
+/// Only the tests below call it (the extern-C lane is exercised there).
+#[allow(dead_code)]
 pub(crate) fn set_task_submit_cb_extern(
 	cb: Option<OakCodecTaskSubmitFn>,
 	userdata: *mut std::ffi::c_void,

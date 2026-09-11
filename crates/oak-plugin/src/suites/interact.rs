@@ -490,10 +490,6 @@ mod tests {
 	use std::ffi::{c_char, CStr};
 	use std::sync::Mutex;
 
-	fn cs(s: &str) -> CString {
-		CString::new(s).unwrap()
-	}
-
 	/// interact 属性表：PixelScale/ViewportSize/SuggestedColour/
 	/// SlaveToParam/BitDepth/HasAlpha 等按头文件预置，经 property suite
 	/// 可读写。

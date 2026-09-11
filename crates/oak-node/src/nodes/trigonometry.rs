@@ -190,7 +190,7 @@ pub fn create() -> (NodeCore, Box<dyn NodeBehavior>) {
 	)];
 	core.add_input(method);
 
-	let mut x = crate::input::Input::new(
+	let x = crate::input::Input::new(
 		X_INPUT,
 		crate::value::ValueType::Float,
 		crate::value::NodeValue::Float(0.0),

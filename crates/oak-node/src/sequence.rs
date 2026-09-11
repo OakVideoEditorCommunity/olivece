@@ -24,11 +24,11 @@ use crate::input::Input;
 use crate::node::{Category, NodeBehavior, NodeCore};
 use crate::value::{AudioParams, NodeValue, ValueType, VideoParams};
 
-/// Sequence texture/samples input ids (ViewerOutput::k_texture_input /
-/// k_samples_input) and the track input id format (Sequence::
-/// k_track_input_format).
+/// Sequence texture input id (C++ `ViewerOutput::k_texture_input`).
 pub const TEXTURE_INPUT: &str = "tex_in";
+/// Sequence audio samples input id (C++ `ViewerOutput::k_samples_input`).
 pub const SAMPLES_INPUT: &str = "samples_in";
+/// Sequence per-track input id format (C++ `Sequence::k_track_input_format`).
 pub const TRACK_INPUT_FORMAT: &str = "track_in_%1";
 
 /// Sequence behavior (viewer node).

@@ -73,6 +73,7 @@ fn to_text(v: &NodeValue) -> String {
 }
 
 /// `Variant::to_vec2()` for the inherited position/size inputs.
+#[allow(dead_code)] // C++ parity accessor used by the tests.
 fn to_vec2(v: &NodeValue) -> [f64; 2] {
 	match v {
 		NodeValue::Vec2(a) => *a,
@@ -86,6 +87,7 @@ impl TextGeneratorV2 {
 	/// replaced by `<br>` when `html_in` is set, 72 DPI
 	/// (`dots_per_meter = 2835`), and the wrap width at the shape
 	/// size X.
+	#[allow(dead_code)]
 	pub fn layout_request(row: &NodeValueRow) -> TextLayoutRequest {
 		let text = row
 			.get(TEXT_INPUT)
@@ -124,6 +126,7 @@ impl TextGeneratorV2 {
 	/// position re-centered into frame space —
 	/// `pos - size/2 + frame/2` (the frame halves are integer division in
 	/// C++).
+	#[allow(dead_code)]
 	pub fn base_offset(
 		pos: [f64; 2],
 		size: [f64; 2],
@@ -140,6 +143,7 @@ impl TextGeneratorV2 {
 	/// offset plus the vertical alignment delta — top: none; center:
 	/// `size.y/2 - doc_height/2` (the halving is integer on the
 	/// `int(doc.height)`); bottom: `size.y - doc_height`.
+	#[allow(dead_code)]
 	pub fn draw_offset(
 		valign: i32,
 		base: (f64, f64),
@@ -163,6 +167,7 @@ impl TextGeneratorV2 {
 	/// scale, the draw offset, and the clip rect at the base offset
 	/// covering the shape size (set before the vertical-alignment
 	/// translate in the C++).
+	#[allow(dead_code)]
 	pub fn render_transform(
 		scale: f64,
 		draw: (f64, f64),
@@ -190,6 +195,7 @@ impl TextGeneratorV2 {
 	/// The render step and the alpha transplant need the frame's pixel
 	/// buffer, which the Rust frame handle does not expose; they are not
 	/// representable here (`// CPP-PARITY: textv2.cpp` `generate_frame`).
+	#[allow(dead_code)]
 	pub fn measure_and_layout(
 		row: &NodeValueRow,
 		frame_width: i32,

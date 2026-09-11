@@ -498,7 +498,7 @@ unsafe extern "C" fn prop_get_string(
 			let r = get_string(set, name, index);
 			if std::env::var_os("OAK_OFX_TRACE").is_some() {
 				let rendered = match &r {
-					Ok(p) => format!("0 <- {:?}", unsafe { std::ffi::CStr::from_ptr(*p) }),
+					Ok(p) => format!("0 <- {:?}", std::ffi::CStr::from_ptr(*p)),
 					Err(c) => format!("{c}"),
 				};
 				eprintln!("[ofx] propGetString(h={handle:p}, {name}[{index}]) -> {rendered}");

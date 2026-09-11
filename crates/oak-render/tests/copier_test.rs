@@ -22,7 +22,6 @@
 //! tests assert those failures.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use oak_core::{Rational, TimeRange};
 
@@ -89,7 +88,7 @@ fn sync_without_established_copy_fails() {
 /// detach (lifetime discipline).
 #[test]
 fn autocacher_attach_detach() {
-	let (mut c, mut pool) = cacher();
+	let (mut c, pool) = cacher();
 	c.attach(42).unwrap();
 	assert_eq!(c.copied_project, 42);
 	c.on_cache_request(
@@ -111,7 +110,7 @@ fn autocacher_attach_detach() {
 #[test]
 fn cancel_video_tasks_semantics() {
 	let (mut c, d) = cacher();
-	c.attach(1);
+	c.attach(1).unwrap();
 	c.force_range(TimeRange::new(Rational::new(0, 1), Rational::new(5, 1)));
 	assert_eq!(c.live_jobs().len(), 1);
 

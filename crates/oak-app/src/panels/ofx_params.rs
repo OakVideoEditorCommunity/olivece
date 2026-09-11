@@ -862,29 +862,28 @@ fn wire_controls<E: AppEngine>(view: &OfxParamsView<E>, cx: &mut Context<OfxPara
 			ControlKind::Combo(combo) => {
 				let combo = combo.clone();
 				cx.subscribe(&combo, move |_, _, event: &ComboBoxEvent, cx| {
-					if let ComboBoxEvent::Selected { value, .. } = event {
-						// Integer combos carry the index; string combos map
-						// the picked option back to its string value.
-						let param = engine.update(cx, |engine, cx| {
-							engine
-								.effect_params(effect)
-								.unwrap_or_default()
-								.into_iter()
-								.find(|p| p.input_id == input_id)
-						});
-						let nv = match &param {
-							Some(p) if p.value_type == ValueType::StrCombo => {
-								let haystack = combo_haystack(p);
-								NodeValue::StrCombo(
-									haystack.get(*value).cloned().unwrap_or_default(),
-								)
-							}
-							_ => NodeValue::Combo(*value as i64),
-						};
-						engine.update(cx, |engine, cx| {
-							let _ = engine.set_effect_param(effect, &input_id, nv, cx);
-						});
-					}
+					let ComboBoxEvent::Selected { value, .. } = event;
+					// Integer combos carry the index; string combos map
+					// the picked option back to its string value.
+					let param = engine.update(cx, |engine, _cx| {
+						engine
+							.effect_params(effect)
+							.unwrap_or_default()
+							.into_iter()
+							.find(|p| p.input_id == input_id)
+					});
+					let nv = match &param {
+						Some(p) if p.value_type == ValueType::StrCombo => {
+							let haystack = combo_haystack(p);
+							NodeValue::StrCombo(
+								haystack.get(*value).cloned().unwrap_or_default(),
+							)
+						}
+						_ => NodeValue::Combo(*value as i64),
+					};
+					engine.update(cx, |engine, cx| {
+						let _ = engine.set_effect_param(effect, &input_id, nv, cx);
+					});
 				})
 				.detach();
 			}
@@ -972,7 +971,6 @@ fn wire_controls<E: AppEngine>(view: &OfxParamsView<E>, cx: &mut Context<OfxPara
 						use gpui_widgets::curve_editor::CurveEditorEvent as E;
 						match event {
 							E::PointMoved { .. } | E::HandleMoved { .. } | E::PointAdded { .. } => {}
-							_ => return,
 						}
 						let curves: Vec<oak_plugin::param_curve::Curve> = editors_all
 							.iter()
@@ -1441,7 +1439,7 @@ impl OfxColorPicker {
 		let values = [a as f64, b as f64, c as f64, self.draft.a as f64];
 		let sliders = [&self.c0, &self.c1, &self.c2, &self.a];
 		for (slider, value) in sliders.iter().zip(values.iter()) {
-			let slider = slider.clone();
+			let slider = *slider;
 			slider.update(cx, |slider, _| {
 				slider.set_value(SliderValue::Float(*value));
 			});
@@ -2155,6 +2153,9 @@ fn sv_from_point(bounds: Bounds<Pixels>, pos: Point<Pixels>) -> (f32, f32) {
 }
 
 /// Inverse of [`sv_from_point`] — the palette position of a (s, v) pair.
+// Only the unit tests below call this helper (the lib build sees it as dead
+// code), so it is kept with an explicit allow.
+#[allow(dead_code)]
 fn point_from_sv(bounds: Bounds<Pixels>, s: f32, v: f32) -> Point<Pixels> {
 	let width = f32::from(bounds.size.width).max(1.0);
 	let height = f32::from(bounds.size.height).max(1.0);
@@ -2319,7 +2320,7 @@ mod tests {
 		});
 		cx.run_until_parked();
 
-		let mut visual = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+		let visual = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
 		visual.update(|window, cx| {
 			window.draw(cx).clear();
 		});
@@ -2355,7 +2356,7 @@ mod tests {
 		});
 		cx.run_until_parked();
 
-		let mut visual = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+		let visual = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
 		visual.update(|window, cx| {
 			window.draw(cx).clear();
 		});
@@ -2447,7 +2448,7 @@ mod tests {
 		});
 		cx.run_until_parked();
 
-		let mut visual = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+		let visual = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
 		visual.update(|window, cx| {
 			window.draw(cx).clear();
 		});
@@ -2537,7 +2538,7 @@ mod tests {
 		});
 		cx.run_until_parked();
 
-		let mut visual = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+		let visual = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
 		visual.update(|window, cx| {
 			window.draw(cx).clear();
 		});
@@ -2704,7 +2705,7 @@ mod tests {
 		});
 		cx.run_until_parked();
 
-		let mut visual = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+		let visual = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
 		visual.update(|window, cx| {
 			window.draw(cx).clear();
 		});
@@ -2988,7 +2989,7 @@ mod tests {
 
 		// Draw once: the render pass is where `sync_values` reapplies the
 		// engine snapshot to the widgets (the sliders snap to their grid).
-		let mut visual = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+		let visual = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
 		visual.update(|window, cx| {
 			window.draw(cx).clear();
 		});

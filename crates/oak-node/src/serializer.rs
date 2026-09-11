@@ -39,7 +39,7 @@ use crate::graph::Graph;
 use crate::id::NodeId;
 use crate::keyframe::{Interpolation, Keyframe};
 use crate::node::NodeCore;
-use crate::project::{NodeRef, Project};
+use crate::project::Project;
 use crate::value::{NodeValue, ValueType};
 
 /// Minimal XML reader surface the serializer needs (implemented over
@@ -565,7 +565,6 @@ fn load_project_body(
 	reader: &mut dyn XmlRead,
 	project: &mut Project,
 ) -> crate::error::Result<std::collections::HashMap<u64, NodeId>> {
-	use crate::error::Error;
 	// Identity -> NodeId map for connection resolution.
 	let mut id_map: std::collections::HashMap<u64, NodeId> = std::collections::HashMap::new();
 	// Deferred connections: (output_identity, input_node_id, input_id, element).
@@ -693,7 +692,7 @@ fn load_node(
 	// types fall back to an error. `create_any` also covers the dynamic
 	// (runtime-registered OpenFX plugin) entries — `find` alone would
 	// reject every project that carries a plugin node.
-	let (mut core, behavior): (NodeCore, Box<dyn crate::node::NodeBehavior>) =
+	let (core, behavior): (NodeCore, Box<dyn crate::node::NodeBehavior>) =
 		match create_timeline_type(&type_id) {
 			Some(x) => x,
 			None => match crate::factory::Factory::global().create_any(&type_id) {

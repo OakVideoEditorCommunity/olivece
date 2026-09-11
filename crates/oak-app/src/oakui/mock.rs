@@ -51,7 +51,7 @@ use gpui::node_graph::{
 };
 use gpui::timeline::{
     ClipData, ClipId, Frame, FrameRange, FrameRate, Marker, TimelineDataSource, TimelineEvent,
-    TrackData, TrackKind, TrimEdge,
+    TrackData, TrackKind,
 };
 use gpui::{
     hsla, point, prelude::*, px, App, Context, Entity, Hsla, Pixels, Point, RenderImage,
@@ -3259,6 +3259,7 @@ impl MockEngine {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+    use gpui::timeline::TrimEdge;
 
     fn demo_engine(app: &mut gpui::App) -> Entity<MockEngine> {
 		app.new(|cx| MockEngine::demo(cx))

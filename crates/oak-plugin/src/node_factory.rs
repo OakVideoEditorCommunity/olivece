@@ -1304,7 +1304,7 @@ mod tests {
 		) -> i32 {
 			0
 		}
-		let mut def = ParamDef::new("curve", ofx::TYPE_PARAMETRIC);
+		let def = ParamDef::new("curve", ofx::TYPE_PARAMETRIC);
 		def.props
 			.set_one(ofx::PROP_LABEL, PropValue::String(CString::new("Curve").unwrap()));
 		def.props

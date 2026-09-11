@@ -124,6 +124,9 @@ void main() {
 /// Vertex shader (C++ loads the `:/shaders/cornerpin.vert` resource in
 /// `get_shader_code`). Text copied verbatim from
 /// `engine/shaders/cornerpin.vert`.
+// C++ parity: shader resource text kept alongside the frag shader; only
+// the tests read it (via `shader_vert`).
+#[allow(dead_code)]
 const SHADER_VERT: &str = r#"uniform bool perspective_in;
 uniform vec2 top_left_in;
 uniform vec2 top_right_in;
@@ -234,6 +237,7 @@ impl CornerPinDistortNode {
 
 	/// Vertex shader (C++ `get_shader_code()` vert half; the request id
 	/// is ignored).
+	#[allow(dead_code)] // C++ parity accessor; exercised by the tests only.
 	fn shader_vert() -> &'static str {
 		SHADER_VERT
 	}
@@ -403,6 +407,7 @@ impl CornerPinDistortNode {
 	/// origin, so corner 0 (top-left) maps straight, corner 1 (top-right)
 	/// adds `(resolution.x, 0)`, corner 2 (bottom-right) adds the full
 	/// resolution, and corner 3 (bottom-left) adds `(0, resolution.y)`.
+	#[allow(dead_code)] // C++ parity helper; exercised by the tests only.
 	fn value_to_pixel(
 		value: i32,
 		row: &crate::value::NodeValueRow,

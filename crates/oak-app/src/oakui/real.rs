@@ -1353,7 +1353,6 @@ impl RealEngine {
 			},
 			{
 				let p = project.clone();
-				let nf = new_footage;
 				move || {
 					let mut g = graphops::lock(&p);
 					for (from, input, element) in g.graph.input_connections(aclip) {
@@ -3773,7 +3772,7 @@ impl EngineGateway for RealEngine {
 			// The audio master anchor is dropped too — the next play run
 			// re-anchors at its own first push.
 			self.audio_playback = None;
-			if let Some(mut manager) = oak_audio::manager::instance() {
+			if let Some(manager) = oak_audio::manager::instance() {
 				let _ = manager.clear_buffered_output();
 				let _ = manager.reset_output_clock();
 			}
@@ -5361,7 +5360,7 @@ impl AppEngine for RealEngine {
 		// A video-with-audio file needs BOTH a video and an audio track —
 		// missing kinds are created (the NLE convention — Premiere
 		// auto-creates on drop).
-		let mut ensure_track = |this: &mut Self, kind: TrackKind, cx: &mut Context<Self>| {
+		let ensure_track = |this: &mut Self, kind: TrackKind, cx: &mut Context<Self>| {
 			if let Some(track) = this.tracks.get(track_index) {
 				if track.kind == kind {
 					return Some(track_index);

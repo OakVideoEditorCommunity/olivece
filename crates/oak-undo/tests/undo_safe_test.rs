@@ -106,7 +106,11 @@ fn command_drop_frees_exactly_once() {
 		name: "a",
 		trace: trace.clone(),
 	};
-	let cmd = UndoCommand::from_closures(move || {}, move || drop(&probe));
+	let cmd = UndoCommand::from_closures(move || {}, move || {
+		// `probe` must be captured by value so that dropping the command
+		// frees it; dropping a reference (the previous body) did nothing.
+		let _ = &probe;
+	});
 
 	drop(cmd);
 	assert_eq!(events(&trace), vec!["free:a"]);
@@ -320,7 +324,7 @@ fn stack_caps_at_k_max() {
 
 #[test]
 fn stack_query_bounds_errors() {
-	let mut s = UndoStack::new();
+	let s = UndoStack::new();
 	assert!(matches!(s.command_name(-1), Err(Error::NotFound)));
 	assert!(matches!(s.command_name(1), Err(Error::NotFound)));
 	assert!(matches!(s.command_is_done(-1), Err(Error::NotFound)));

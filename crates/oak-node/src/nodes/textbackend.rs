@@ -182,8 +182,8 @@ mod tests {
 	fn backend_hooks_default_none() {
 		let _guard = TEST_BACKEND_LOCK.lock().unwrap();
 		set_text_backends(None, None);
-		assert_eq!(text_measure_backend(), None);
-		assert_eq!(text_render_backend(), None);
+		assert!(text_measure_backend().is_none());
+		assert!(text_render_backend().is_none());
 	}
 
 	#[test]
@@ -195,7 +195,7 @@ mod tests {
 				height: 34.0,
 			}
 		}
-		fn render(_r: &TextLayoutRequest, _t: &TextRenderTransform, mut target: TextRenderTarget) {
+		fn render(_r: &TextLayoutRequest, _t: &TextRenderTransform, target: TextRenderTarget) {
 			for b in target.data.iter_mut() {
 				*b = 255;
 			}

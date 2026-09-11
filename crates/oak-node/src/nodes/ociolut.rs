@@ -90,6 +90,7 @@ impl OCIOLutNode {
 	/// Human-readable description of why no LUT processor is active
 	/// (C++ `last_error()`); empty when a valid LUT processor is in use
 	/// or no LUT file has been selected yet.
+	#[allow(dead_code)] // C++ parity accessor; read back by the tests.
 	pub fn last_error(&self) -> String {
 		self.state.lock().unwrap().last_error.clone()
 	}
@@ -98,6 +99,8 @@ impl OCIOLutNode {
 	/// unchanged. The Qt version surfaced the error on the main-window
 	/// status bar; here it is only recorded and read back via
 	/// [`Self::last_error`].
+	#[allow(dead_code)] // C++ parity setter; the tests feed it through
+	// `last_error`.
 	fn set_last_error(&self, error: &str) {
 		let mut state = self.state.lock().unwrap();
 		if state.last_error == error {
@@ -139,6 +142,8 @@ impl OCIOLutNode {
 	/// Whether this is the main GUI process (C++ file-static
 	/// `is_main_process()`): true when a render manager exists (the
 	/// render worker never creates one).
+	#[allow(dead_code)] // C++ parity probe; constants-only in the Rust model.
+	// The tests assert the worker answer directly.
 	fn is_main_process() -> bool {
 		// The C++ probes `oakrender_manager_available()`, which the
 		// oakrender bridge does not expose. Without a render manager (the
@@ -153,6 +158,7 @@ impl OCIOLutNode {
 	/// ensures the processor is current, then — in the main process
 	/// only — invalidates the texture-input cache and cancels background
 	/// video cache tasks so in-flight renders cannot write stale frames.
+	#[allow(dead_code)] // C++ parity entry point; the tests drive it.
 	fn generate_processor(&mut self, core: &mut NodeCore) {
 		self.ensure_processor(core);
 		// The C++ main-process half (`invalidate_all(k_texture_input)`

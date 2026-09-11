@@ -81,7 +81,7 @@ use crate::ipc::{
 	FrameSlotMeta, FrameSlotPool, HandshakeMsg, HelloCapsMsg, PluginProgressMsg, RenderAudioBatchMsg,
 	RenderBatchMsg, SharedMemoryRegion, ShmMode, WireMontageClip, SLOT_FORMAT_BGRA8,
 	TYPE_BATCH_ACCEPTED, TYPE_ERROR, TYPE_FRAME_FAILED, TYPE_FRAME_READY, TYPE_HANDSHAKE,
-	TYPE_HELLO_CAPS, TYPE_PLUGIN_CANCEL, TYPE_PLUGIN_PROGRESS, TYPE_RENDER_AUDIO_BATCH,
+	TYPE_HELLO_CAPS, TYPE_PLUGIN_PROGRESS, TYPE_RENDER_AUDIO_BATCH,
 	plugin_cancel_json,
 };
 use crate::scheduler::{FrameKey, FrameRequest, PreviewScheduler, SubmitOutcome};
@@ -901,7 +901,6 @@ enum WorkerEvent {
 }
 
 struct WorkerHandle {
-	index: usize,
 	/// Spawn generation (increments on every restart): reader-thread
 	/// events carry the generation of the child they read from, so a
 	/// late EOF from a dead child cannot kill its replacement.
@@ -941,14 +940,12 @@ struct WorkerHandle {
 
 impl WorkerHandle {
 	fn shell(
-		index: usize,
 		generation: u64,
 		shm: Arc<ShmRegionView>,
 		slots: u32,
 		slot_bytes: usize,
 	) -> WorkerHandle {
 		WorkerHandle {
-			index,
 			generation,
 			state: WorkerState::Starting,
 			child: None,
@@ -1528,7 +1525,7 @@ impl ProcessDispatcher {
 			handle.retire_sent_at = Some(Instant::now());
 		}
 		let mut reaped_flags: Vec<bool> = Vec::with_capacity(inner.workers.len());
-		for (i, handle) in inner.workers.iter_mut().enumerate() {
+		for handle in inner.workers.iter_mut() {
 			if !handle.retiring {
 				reaped_flags.push(false);
 				continue;
@@ -2007,7 +2004,8 @@ impl ProcessDispatcher {
 			})
 			.map_err(|e| Error::Failed(format!("spawn reader thread: {e}")))?;
 
-		let mut handle = WorkerHandle::shell(index, generation, shm, inner.slots, inner.slot_bytes);
+		let mut handle =
+			WorkerHandle::shell(generation, shm, inner.slots, inner.slot_bytes);
 		handle.child = Some(child);
 		handle.stdin = stdin;
 		handle.spawned_at = Instant::now();
@@ -2749,7 +2747,9 @@ mod tests {
 			let mut inner = dispatcher.inner.lock().unwrap_or_else(|e| e.into_inner());
 			let key = SharedMemoryRegion::make_key(std::process::id() as i64, 999);
 			let shm = ShmRegionView::create(&key, 2, 256).expect("shm");
-			inner.workers.push(WorkerHandle::shell(0, 0, shm, 2, 256));
+			inner
+				.workers
+				.push(WorkerHandle::shell(0, shm, 2, 256));
 		}
 
 		let mut fired = Vec::new();

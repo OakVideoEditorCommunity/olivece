@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{
-	BufferSize, Device, Host, SampleFormat, SampleRate, Stream, StreamConfig,
+	BufferSize, Device, Host, SampleFormat, Stream, StreamConfig,
 	SupportedBufferSize,
 };
 use crate::previewdevice::PreviewAudioDevice;
@@ -104,7 +104,7 @@ impl PortAudioOutput {
 			self.host = Some(cpal::default_host())
 		}
 
-		let host = self.host.as_ref().unwrap().clone();
+		let host = self.host.as_ref().unwrap();
 
 		let output_device = resolve_device(&host, device)
 			.ok_or_else(|| "no output device available".to_string())?;

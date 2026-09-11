@@ -198,14 +198,6 @@ void main() {
 }
 "#;
 
-impl ChromaKeyNode {
-	/// Fragment shader with the `%1` OCIO stub marker still in place
-	/// (C++ `get_shader_code()` before the stub substitution).
-	fn shader_frag() -> &'static str {
-		SHADER_FRAG
-	}
-}
-
 impl NodeBehavior for ChromaKeyNode {
 	/// Human-readable name (C++ `name()`).
 	fn name(&self) -> &str {

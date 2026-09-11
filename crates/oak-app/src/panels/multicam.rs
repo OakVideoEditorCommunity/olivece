@@ -480,7 +480,7 @@ impl<E: AppEngine> DockPanel for MulticamPanel<E> {
 mod tests {
 	use super::*;
 	use crate::actions::MulticamSwitch5;
-	use gpui::{point, size, Focusable, TestAppContext, VisualTestContext};
+	use gpui::{size, Focusable, TestAppContext, VisualTestContext};
 	use std::cell::Cell;
 	use std::rc::Rc;
 

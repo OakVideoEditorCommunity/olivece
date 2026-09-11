@@ -42,7 +42,7 @@ use oak_node::track::TrackType;
 
 use super::engine::{MulticamState, WizardFootage};
 use super::graphops::{
-	self, lock, sequence_behavior, track_list_behavior, track_list_of, ProjectRef,
+	self, lock, sequence_behavior, track_list_of, ProjectRef,
 };
 
 /// Whether `id` names a sequence node (C++ `dynamic_cast<Sequence*>` /
@@ -287,11 +287,11 @@ pub fn build_multicam_sequence(
 		return Err("angle/offset count mismatch".to_string());
 	}
 
-	let mut seq: Option<NodeId> = None;
-	let mut mc: Option<NodeId> = None;
+	let seq: Option<NodeId>;
+	let mc: Option<NodeId>;
 	{
 		let mut g = lock(p);
-		let (score, sbehavior) = oak_node::sequence::SequenceBehavior::create();
+		let (_score, sbehavior) = oak_node::sequence::SequenceBehavior::create();
 		let mut core = oak_node::node::NodeCore::new();
 		core.label = name.to_string();
 		let seq_id = g.graph.add_node(core, sbehavior);
@@ -444,7 +444,7 @@ pub fn build_multicam_sequence(
 			// AFV: the angle's audio clip on its own source audio track —
 			// same range as the video angle (the sync offset aligns them),
 			// fed from the footage's audio stream.
-			if let (Some(audio_list), Some(audio_track)) = (audio_list, audio_track_ids.get(i)) {
+			if let (Some(_audio_list), Some(audio_track)) = (audio_list, audio_track_ids.get(i)) {
 				if entry.has_audio.unwrap_or(false) {
 					let (acore, abehavior) = oak_node::block::clip_create();
 					let aclip = g.graph.add_node(acore, abehavior);

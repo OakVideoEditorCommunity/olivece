@@ -97,6 +97,9 @@ impl ProxyParams {
 		cstr_slice(&self.extension)
 	}
 
+	/// Only the proxy-params tests read the preset through this accessor
+	/// (the struct field itself is `pub`).
+	#[allow(dead_code)]
 	fn preset_str(&self) -> &str {
 		cstr_slice(&self.preset)
 	}

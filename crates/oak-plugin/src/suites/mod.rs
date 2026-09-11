@@ -212,9 +212,6 @@ pub(crate) fn gl_ctx() -> Option<GlCtx> {
 	GL_CTX.with(|c| c.borrow().clone())
 }
 
-/// 宿主进程身份（fetchSuite 的 version 检查用；= OFX API 1.5）。
-pub(crate) const OFX_API_VERSION: i32 = 105;
-
 /// fetchSuite 宿主入口：按名字与版本返回函数表指针；不认识或版本
 /// 不符返回 `None`（FFI 层转 NULL）。
 ///

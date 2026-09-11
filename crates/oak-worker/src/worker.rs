@@ -1537,7 +1537,7 @@ mod tests {
 		let _pool =
 			unsafe { FrameSlotPool::create(out_region.data(), slots as u32, slot_bytes as usize) };
 
-		let (in_key, in_bytes, in_region) = if input {
+		let (in_key, _in_bytes, in_region) = if input {
 			let in_key = test_key("in");
 			let in_bytes = FrameSlotPool::bytes_needed(slots as u32, slot_bytes as usize);
 			let mut in_region = SharedMemoryRegion::new();

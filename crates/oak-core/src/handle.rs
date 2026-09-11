@@ -37,7 +37,7 @@ use std::ffi::c_void;
 /// empty handles). Structurally identical to every `Oak<Mod><Type>` value
 /// handle, so a handle can cross any module boundary by value.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct CHandle {
 	/// Opaque box pointer.
 	pub ctx: *mut c_void,
@@ -48,6 +48,20 @@ pub struct CHandle {
 	/// ABI version.
 	pub abi_version: u32,
 }
+
+impl PartialEq for CHandle {
+	fn eq(&self, other: &Self) -> bool {
+		// `ctx` and `abi_version` by value; the callbacks by address
+		// (`==` on fn pointers is rejected by the compiler, and
+		// `std::ptr::fn_addr_eq` rejects the `Option<fn>` fields).
+		self.ctx == other.ctx
+			&& self.addref.map(|f| f as usize) == other.addref.map(|f| f as usize)
+			&& self.release.map(|f| f as usize) == other.release.map(|f| f as usize)
+			&& self.abi_version == other.abi_version
+	}
+}
+
+impl Eq for CHandle {}
 
 impl CHandle {
 	/// The empty handle.

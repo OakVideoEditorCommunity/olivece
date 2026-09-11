@@ -114,9 +114,9 @@ pub fn copy_inputs(
 /// node ids (source order). Undo packaging happens at the caller via
 /// oakundo's `UndoCommand`.
 pub fn copy_subgraph(
-	graph: &mut Graph,
-	nodes: &[NodeId],
-	exclude_items: bool,
+	_graph: &mut Graph,
+	_nodes: &[NodeId],
+	_exclude_items: bool,
 ) -> crate::error::Result<Vec<NodeId>> {
 	todo!()
 }
@@ -124,22 +124,22 @@ pub fn copy_subgraph(
 /// Transform a time range from one node's frame of reference to
 /// another's along the connection path (C++ `Node::transform_time_to`).
 pub fn transform_time_to(
-	graph: &Graph,
-	time: TimeRange,
-	from: NodeId,
-	to: NodeId,
+	_graph: &Graph,
+	_time: TimeRange,
+	_from: NodeId,
+	_to: NodeId,
 ) -> crate::error::Result<TimeRange> {
 	todo!()
 }
 
 /// Undo-command display strings (C++
 /// `get_connect_command_string`/`get_disconnect_command_string`).
-pub fn connect_command_string(output: NodeId, input: NodeId, input_id: &str) -> String {
+pub fn connect_command_string(_output: NodeId, _input: NodeId, _input_id: &str) -> String {
 	todo!()
 }
 
 /// See [`connect_command_string`].
-pub fn disconnect_command_string(output: NodeId, input: NodeId, input_id: &str) -> String {
+pub fn disconnect_command_string(_output: NodeId, _input: NodeId, _input_id: &str) -> String {
 	todo!()
 }
 
@@ -181,8 +181,9 @@ pub fn set_value_at_time_command(
 	use crate::error::Error;
 	use crate::keyframe::{Interpolation, Keyframe};
 
-	// Determine the mutation from the current state.
-	let declared = graph
+	// Determine the mutation from the current state. The declared type is
+	// validated but not otherwise used yet.
+	let _declared = graph
 		.get(node)
 		.and_then(|e| e.core.input_data_type(input))
 		.ok_or(Error::NotFound)?;

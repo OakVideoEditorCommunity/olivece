@@ -111,7 +111,6 @@ pub struct ClaimedBatch<P> {
 
 struct Claim<P> {
 	worker: usize,
-	batch_id: u64,
 	request: FrameRequest<P>,
 }
 
@@ -314,7 +313,6 @@ impl<P: Clone> PreviewScheduler<P> {
 					entry.request.key,
 					Claim {
 						worker,
-						batch_id,
 						request: entry.request.clone(),
 					},
 				);

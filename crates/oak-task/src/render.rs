@@ -1051,9 +1051,9 @@ impl RenderTask {
 		unsafe {
 			drop(Box::from_raw(dispatch));
 		}
-		// The pump closure borrows `private_dispatch`; drop it before the
-		// take below.
-		drop(pump);
+		// `pump`'s shared borrow of `private_dispatch` ends at its last use
+		// above (NLL); the closure needs no explicit drop, which would be a
+		// no-op because a closure capture is `Copy` here.
 		if let Some(d) = private_dispatch.take() {
 			d.shutdown();
 		}

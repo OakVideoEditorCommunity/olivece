@@ -16,6 +16,11 @@
 
 //! Shared helpers for the integration tests.
 
+// Every integration-test binary in this crate compiles this module on its
+// own and uses only the helpers it needs, so items unused in one binary are
+// still part of the shared fixture API.
+#![allow(dead_code)]
+
 use std::sync::{Mutex, MutexGuard};
 
 /// Serializes tests that initialize the process-wide RenderManager
@@ -60,7 +65,7 @@ impl Drop for ManagerGuard {
 // symbols.
 
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int, c_void};
+use std::ffi::{c_int, c_void};
 use std::sync::OnceLock;
 
 // The bundled OpenColorIO's macos system monitor references

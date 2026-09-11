@@ -362,7 +362,7 @@ impl ParamDef {
 	/// 按 OFX 类型构建定义（镜像 HS ofxhParam.cpp:224-352：
 	/// universalProps + addStandardParamProps 的分类型属性表）。
 	pub(crate) fn new(name: &str, ofx_type: &str) -> Self {
-		let mut props = PropertySet::new();
+		let props = PropertySet::new();
 		let uname = name.to_string();
 		let utype = ofx_type.to_string();
 

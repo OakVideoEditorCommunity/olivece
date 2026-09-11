@@ -24,17 +24,15 @@
 //! Recording goes through the oakcodec encoder C ABI ([`crate::bridge`]);
 //! device/config lookups go through oak_core.
 
-use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use cpal::{Device, DeviceId};
+use cpal::Device;
 use cpal::traits::{DeviceTrait, HostTrait};
 use oak_codec::encoder::Encoder;
 use oak_codec::encodingparams::EncodingParams;
 use crate::error::{Error, Result};
 use crate::params::AudioParams;
 use crate::previewdevice::PreviewAudioDevice;
-use crate::error::Error::NotFound;
 
 /// `paNoDevice` (PortAudio "no device" sentinel; also the default when no
 /// device is configured).
@@ -138,9 +136,9 @@ impl ManagerInner {
 			return None;
 		}
 		match MANAGER.get() {
-			Some(m) => {
-				// SAFETY: `m` is the process-wide singleton; borrowed handles do
-				// not free it, so it outlives every handle.
+			Some(_) => {
+				// SAFETY: the process-wide singleton is never freed; borrowed
+				// handles do not free it, so it outlives every handle.
 				Some(self)
 			}
 			None => None,

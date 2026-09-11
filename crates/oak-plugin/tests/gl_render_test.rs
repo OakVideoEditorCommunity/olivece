@@ -36,7 +36,7 @@
 
 mod common;
 
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::Arc;
 
 use oak_core::{PixelFormat, Rational};
@@ -89,10 +89,6 @@ unsafe extern "C" fn capture_msg(
 			.into_owned(),
 	));
 	1
-}
-
-fn cs(s: &str) -> CString {
-	CString::new(s).unwrap()
 }
 
 fn first_pixel(texture: &Texture) -> [f32; 4] {

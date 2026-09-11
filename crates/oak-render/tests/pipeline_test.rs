@@ -76,7 +76,7 @@ fn blit_applies_ocio_in_float() {
 		return;
 	}
 
-	let mut renderer = DisplayRenderer::new(BackendKind::Cpu);
+	let renderer = DisplayRenderer::new(BackendKind::Cpu);
 	let mut pod = VideoParamsPod::default();
 	pod.width = 4;
 	pod.height = 4;

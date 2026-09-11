@@ -17,7 +17,7 @@
 //! Project: owns the graph, the folder tree, settings, and the undo
 //! stack binding. Mirrors C++ `olive::Project`.
 
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 use crate::graph::Graph;
 use crate::id::NodeId;
@@ -451,7 +451,3 @@ pub enum ChangeRecord {
 	},
 }
 
-/// Weak-project handle used by the identity registry (node_from_identity
-/// upgrades it; a freed project leaves a dead weak entry that upgrades
-/// to `None`).
-pub(crate) type WeakProject = Weak<Mutex<Project>>;

@@ -787,7 +787,7 @@ mod tests {
 
 	/// 用 paramDefine 建一个实例（describe 产物 → createInstance）。
 	fn make_instance() -> (Arc<Instance>, *mut c_void) {
-		let mut desc = EffectDescriptor::new();
+		let desc = EffectDescriptor::new();
 		let s = suite_v1();
 		let dhandle = descriptor_handle(&desc);
 		unsafe {
@@ -836,7 +836,7 @@ mod tests {
 
 	#[test]
 	fn describe_define_and_get() {
-		let mut desc = EffectDescriptor::new();
+		let desc = EffectDescriptor::new();
 		let s = suite_v1();
 		let handle = descriptor_handle(&desc);
 		let t = cs("OfxParamTypeDouble");

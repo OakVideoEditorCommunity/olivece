@@ -32,7 +32,10 @@ pub const VALUE_INPUT: &str = "opacity_in";
 /// Opacity effect node. Multiplies a texture's alpha by a 0..1 factor.
 pub struct OpacityEffect {
 	/// Owned child math node configured to `multiply` (C++ `math_`,
-	/// formerly a QObject child).
+	/// formerly a QObject child). Held for its construction side effect;
+	/// the multiply actually runs through `NodeCore`, so the handle is
+	/// never read — kept (with an `allow`) rather than removed.
+	#[allow(dead_code)]
 	math: Box<super::math::MathNode>,
 }
 
@@ -84,20 +87,6 @@ void main() {
   frag_color = c;
 }
 "#;
-
-impl OpacityEffect {
-	/// Fragment shader for the plain opacity path (C++
-	/// `get_shader_code()` default branch).
-	fn shader_frag() -> &'static str {
-		SHADER_FRAG
-	}
-
-	/// Fragment shader for the `rgbmult` request (C++
-	/// `get_shader_code()` `"rgbmult"` branch).
-	fn shader_rgb_mult_frag() -> &'static str {
-		SHADER_RGB_MULT_FRAG
-	}
-}
 
 impl NodeBehavior for OpacityEffect {
 	/// Human-readable name (C++ `name()`).

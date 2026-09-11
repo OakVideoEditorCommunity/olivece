@@ -79,6 +79,7 @@ impl TextGeneratorV1 {
 	/// and the wrap width at 80% of the frame width (the "title safe"
 	/// area — `(width / 10) * 8`). The measure backend is not consulted
 	/// here.
+	#[allow(dead_code)] // C++ parity helper; the tests drive it.
 	pub fn layout_request(row: &NodeValueRow, frame_width: i32) -> TextLayoutRequest {
 		let text = row
 			.get(TEXT_INPUT)
@@ -115,6 +116,7 @@ impl TextGeneratorV1 {
 	/// valign combo (top: 10% top margin; center: frame center; bottom:
 	/// 10% bottom margin). The C++ math is integer (`width()/10`,
 	/// `height()/2 - doc_height/2`, ...), mirrored here.
+	#[allow(dead_code)]
 	pub fn draw_offsets(
 		valign: i32,
 		frame_width: i32,
@@ -144,6 +146,7 @@ impl TextGeneratorV1 {
 	/// The render step and the alpha transplant need the frame's pixel
 	/// buffer, which the Rust frame handle does not expose; they are not
 	/// representable here (`// CPP-PARITY: textv1.cpp` `generate_frame`).
+	#[allow(dead_code)]
 	pub fn measure_and_layout(
 		row: &NodeValueRow,
 		frame_width: i32,

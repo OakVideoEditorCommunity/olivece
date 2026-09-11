@@ -84,7 +84,7 @@ fn identity_convert_passthrough() {
 	let planes = ramp_planes(32);
 	let in_ptrs = plane_ptrs(&planes);
 	let mut out = vec![vec![0f32; 32]; 2];
-	let mut out_ptrs = plane_mut_ptrs(&mut out);
+	let out_ptrs = plane_mut_ptrs(&mut out);
 
 	let n = p.convert(in_ptrs.as_ptr(), 32, out_ptrs.as_ptr(), 32).unwrap();
 	assert_eq!(n, 32);
@@ -110,7 +110,7 @@ fn convert_capacity_truncation() {
 	let planes = ramp_planes(32);
 	let in_ptrs = plane_ptrs(&planes);
 	let mut out = vec![vec![9.9f32; 10]; 2];
-	let mut out_ptrs = plane_mut_ptrs(&mut out);
+	let out_ptrs = plane_mut_ptrs(&mut out);
 
 	let n = p.convert(in_ptrs.as_ptr(), 32, out_ptrs.as_ptr(), 10).unwrap();
 	assert_eq!(n, 10);
@@ -122,7 +122,7 @@ fn convert_capacity_truncation() {
 
 	// The graph has already drained; nothing further to pull.
 	let mut out2 = vec![vec![0f32; 32]; 2];
-	let mut out2_ptrs = plane_mut_ptrs(&mut out2);
+	let out2_ptrs = plane_mut_ptrs(&mut out2);
 	let n = p.convert(in_ptrs.as_ptr(), 0, out2_ptrs.as_ptr(), 32).unwrap();
 	assert_eq!(n, 0);
 }
@@ -171,7 +171,7 @@ fn resample_and_flush() {
 	let planes = ramp_planes(frames);
 	let in_ptrs = plane_ptrs(&planes);
 	let mut out = vec![vec![0f32; frames]; 2];
-	let mut out_ptrs = plane_mut_ptrs(&mut out);
+	let out_ptrs = plane_mut_ptrs(&mut out);
 
 	let mut total = p
 		.convert(in_ptrs.as_ptr(), frames as i32, out_ptrs.as_ptr(), frames as i32)
@@ -205,7 +205,7 @@ fn tempo_stretch() {
 	let planes = ramp_planes(frames);
 	let in_ptrs = plane_ptrs(&planes);
 	let mut out = vec![vec![0f32; frames]; 2];
-	let mut out_ptrs = plane_mut_ptrs(&mut out);
+	let out_ptrs = plane_mut_ptrs(&mut out);
 
 	let mut total = p
 		.convert(in_ptrs.as_ptr(), frames as i32, out_ptrs.as_ptr(), frames as i32)

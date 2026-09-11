@@ -24,7 +24,6 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use oak_core::{Rational, TimeRange};
-use oak_timeline::common::EditToInfo;
 use oak_timeline::handle::{get, make_owned, CHandle};
 use oak_timeline::marker::{
 	MarkerAddCommand, MarkerChangeColorCommand, MarkerChangeNameCommand, MarkerChangeTimeCommand,

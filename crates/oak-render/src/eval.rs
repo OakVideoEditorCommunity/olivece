@@ -40,11 +40,9 @@ use std::sync::{Arc, Mutex};
 use crate::error::{Error, Result};
 use crate::shaderfx::{compile_effect, run_effect};
 use oak_codec::decoder::{
-    CodecStream, Decoder as _, RenderMode, RetrieveAudioStatus, RetrieveVideoParams,
-    K_COLOR_RANGE_DEFAULT,
+    CodecStream, RenderMode, RetrieveAudioStatus, RetrieveVideoParams, K_COLOR_RANGE_DEFAULT,
 };
 use oak_codec::ffmpeg::FFmpegDecoder;
-use oak_core::color::ColorProcessor;
 use oak_core::frame::VideoParamsPod;
 use oak_core::texture::{Frame, Texture};
 use oak_core::{PixelFormat, Rational, TimeRange};
@@ -287,6 +285,7 @@ fn purple_frame(time: Rational, size: (i32, i32)) -> Texture {
 }
 
 impl RenderEvalHooks {
+    /// A hook set with every optional hook unset (`use_cache` off).
     pub fn new() -> Self {
         Self {
             use_cache: false,
@@ -346,6 +345,10 @@ impl RenderEvalHooks {
 
     /// C++ process_frame_generation: fill the destination with a generated
     /// F32 frame (transparent black for now).
+    ///
+    /// Only the `generation_fills_cpu_texture` unit test drives this today;
+    /// the live eval path uses the shader/graph hooks instead.
+    #[allow(dead_code)]
     fn process_frame_generation(
         &mut self,
         destination: &mut Texture,
@@ -3407,7 +3410,9 @@ mod tests {
             }
         }
         let payload = ColorTransformJobPayload {
-            color_processor: std::sync::Arc::new(ColorProcessor::pass_through()),
+            color_processor: std::sync::Arc::new(
+                oak_core::color::ColorProcessor::pass_through(),
+            ),
             input: NodeValue::Texture(oak_node::handle::make_owned(Texture::wrap_frame(frame))),
             time: Rational::new(0, 1),
         };

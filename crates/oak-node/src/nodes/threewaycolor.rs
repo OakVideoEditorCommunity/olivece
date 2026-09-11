@@ -102,14 +102,6 @@ void main(void)
 }
 "#;
 
-impl ThreeWayColorNode {
-	/// Fragment shader for any request (C++ `get_shader_code()` ignores
-	/// the request id and always returns this shader).
-	fn shader_frag() -> &'static str {
-		SHADER_FRAG
-	}
-}
-
 impl NodeBehavior for ThreeWayColorNode {
 	/// Human-readable name (C++ `name()`, inline in the header).
 	fn name(&self) -> &str {

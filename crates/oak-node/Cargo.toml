@@ -14,6 +14,12 @@ oak-core = { path = "../oak-core" }
 oak-codec = { path = "../oak-codec" }
 thiserror = "2"
 
+[features]
+# Declared so tests can gate on it; nothing in this crate enables it.
+# It used to pull in the oakcodec host-mocks, which no longer exist (the
+# single-lib unification removed the oakcore_*/oakrender_* C ABI calls).
+test-stubs = []
+
 [dev-dependencies]
 # oakcodec is also a plain dependency above; the dev-dependency re-entry
 # used to enable oakcodec's `test-stubs` host-mocks, which no longer exist

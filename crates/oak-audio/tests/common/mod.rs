@@ -22,6 +22,11 @@
 //! `waveform::extract` goes through oakcodec's in-process FFmpeg
 //! decoder; the processor drives a real FFmpeg filter graph.
 
+// Every integration-test binary in this crate compiles this module on its
+// own and uses only the helpers it needs, so items unused in one binary are
+// still part of the shared fixture API.
+#![allow(dead_code)]
+
 use std::path::Path;
 use std::sync::Mutex;
 

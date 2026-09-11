@@ -85,6 +85,9 @@ pub const GIZMO_SCALE_COUNT: usize = 8;
 /// Auto-scale mode (C++ `AutoScaleType`); values match the
 /// `autoscale_in` combo indices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// C++ parity value set (`AutoScaleType`); only `None` is constructed at
+// runtime (the combo indices are still resolved through this enum).
+#[allow(dead_code)]
 pub enum AutoScaleType {
 	/// No auto-scaling.
 	None = 0,
@@ -99,6 +102,7 @@ pub enum AutoScaleType {
 /// Rotation direction for wrap-around detection (C++ private enum
 /// `RotationDirection`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // C++ parity value set; see `AutoScaleType`.
 enum RotationDirection {
 	/// No direction established yet.
 	None,
@@ -110,6 +114,7 @@ enum RotationDirection {
 
 /// Which axes a scale gizmo drags (C++ private enum `GizmoScaleType`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // C++ parity value set; see `AutoScaleType`.
 enum GizmoScaleType {
 	/// Horizontal center handles (C++ `k_gizmo_scale_x_only`).
 	XOnly,
@@ -191,6 +196,8 @@ impl TransformDistortNode {
 	/// representable: `generate_auto_scaled_matrix` needs the texture
 	/// params from the C++ `VideoParams` (the Rust texture handle carries
 	/// no params) and `is_a_scale_gizmo` compares gizmo pointers.
+	#[allow(dead_code)] // C++ parity helpers; the pure ones are covered by
+	// the tests, the rest are not representable in the Rust model.
 	fn adjust_matrix_by_resolutions(
 		mat: [f64; 16],
 		sequence_res: (f64, f64),
@@ -264,6 +271,7 @@ impl TransformDistortNode {
 	/// C++ `Matrix4x4::map(PointF)` equivalent: maps `p` through the
 	/// row-major matrix treating it as `(x, y, 0, 1)`, dividing by the
 	/// resulting `w` whenever it is not exactly 1.
+	#[allow(dead_code)]
 	fn map_point(mat: [f64; 16], p: (f64, f64)) -> (f64, f64) {
 		let x = p.0 * mat[0] + p.1 * mat[1] + mat[3];
 		let y = p.0 * mat[4] + p.1 * mat[5] + mat[7];
@@ -278,6 +286,7 @@ impl TransformDistortNode {
 	/// Scale-point gizmo placement (C++ `create_scale_point()`): maps the
 	/// unit-square position through `mat` and adds the sequence half
 	/// resolution.
+	#[allow(dead_code)]
 	fn create_scale_point(x: f64, y: f64, half_res: (f64, f64), mat: [f64; 16]) -> (f64, f64) {
 		let p = Self::map_point(mat, (x, y));
 		(p.0 + half_res.0, p.1 + half_res.1)
@@ -286,6 +295,7 @@ impl TransformDistortNode {
 	/// Rotation direction of a mouse angle step (C++
 	/// `get_direction_from_angles()`): positive when `current` is greater
 	/// than `last`, negative otherwise.
+	#[allow(dead_code)]
 	fn get_direction_from_angles(last: f64, current: f64) -> RotationDirection {
 		if current > last {
 			RotationDirection::Positive

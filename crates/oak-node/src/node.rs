@@ -24,7 +24,7 @@ use oak_core::{Rational, TimeRange};
 use crate::id::NodeId;
 use crate::input::{Input, ValueHint};
 use crate::keyframe::KeyframeTrack;
-use crate::value::{NodeValue, NodeValueRow, NodeValueTable};
+use crate::value::{NodeValueRow, NodeValueTable};
 
 /// Node category (mirrors C++ `Node::CategoryID` order).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

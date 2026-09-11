@@ -693,7 +693,7 @@ fn node_behavior_defaults() {
 
 	// value / process_samples / generate_frame no-ops.
 	let mut table = NodeValueTable::default();
-	let mut row = std::collections::BTreeMap::new();
+	let row = std::collections::BTreeMap::new();
 	b.value(&core, &row, Rational::new(0, 1), &mut table);
 	assert!(table.is_empty());
 	let mut samples = SampleBuffer::default();

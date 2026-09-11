@@ -551,11 +551,11 @@ pub fn display_transform_result(
 		return Ok(None);
 	}
 
-	// OCIO's ROLE_REFERENCE role name ("reference"): `get_color_space`
+	// OCIO's ROLE_REFERENCE role name ("reference"): `color_space`
 	// resolves name-or-role (C++ `getColorSpace(ROLE_REFERENCE)`); the
 	// role-name lookups are the fallback for configs that do not bind it.
 	let src = config
-		.get_color_space("reference")
+		.color_space("reference")
 		.and_then(|cs| cs.name())
 		.filter(|s| !s.is_empty())
 		.or_else(|| {
@@ -875,15 +875,15 @@ mod tests {
 			return;
 		}
 		let config = default_config().unwrap();
-		if config.get_num_displays_all() <= 0 {
+		if config.num_displays_all() <= 0 {
 			return;
 		}
-		let display = config.get_display_all(0).unwrap();
-		let n = config.get_num_views_v2(ocio_rs::SearchReferenceSpaceType::Scene, &display);
+		let display = config.display_all(0).unwrap();
+		let n = config.num_views_by_reference_space(ocio_rs::SearchReferenceSpaceType::Scene, &display);
 		assert!(n >= 0);
 		if n > 0 {
 			let view = config
-				.get_view_v2(ocio_rs::SearchReferenceSpaceType::Scene, &display, 0)
+				.view_by_reference_space(ocio_rs::SearchReferenceSpaceType::Scene, &display, 0)
 				.unwrap();
 			let id = display_transform(&display, &view);
 			assert!(id.is_some());

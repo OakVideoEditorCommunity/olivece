@@ -505,7 +505,7 @@ mod tests {
 	/// 重复定义整体替换（HS map 覆盖）。
 	#[test]
 	fn describe_clip_define_and_props() {
-		let mut desc = EffectDescriptor::new();
+		let desc = EffectDescriptor::new();
 		let s = suite_v1();
 		let h = descriptor_handle(&desc);
 

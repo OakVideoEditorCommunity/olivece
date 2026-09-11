@@ -40,7 +40,7 @@ use std::sync::Arc;
 
 use gpui::{
 	colors::{Colors, DefaultColors},
-	div, App, Div, ElementId, Hsla, IntoElement, ParentElement, Styled, WeakEntity, Window,
+	div, App, Div, ElementId, Hsla, IntoElement, ParentElement, Styled, WeakEntity,
 };
 use gpui_elements::editable_text::actions::{default_bindings, DEFAULT_INPUT_CONTEXT};
 use gpui_elements::editable_text::{EditableTextElement, EditableTextState};

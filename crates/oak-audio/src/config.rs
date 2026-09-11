@@ -18,7 +18,6 @@
 //! audio-specific configuration read through the oak_core C ABI.
 
 use std::error::Error;
-use std::ffi::CString;
 use std::str::FromStr;
 use oak_core::configstore::*;
 /// PortAudio output buffer size in frames; 0 = let PortAudio choose.
@@ -47,7 +46,6 @@ pub fn device_name(is_output_device: bool) -> Result<String, Box<dyn Error>> {
 		// Absent (oak_core_E_NOT_FOUND) or empty
 		return Err(Box::new(crate::error::Error::NotFound));
 	}
-	let mut buf = vec![0u8; size as usize];
 	let name = store.get(None, key)?;
 	Ok(name)
 }

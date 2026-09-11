@@ -130,16 +130,6 @@ impl Level {
 			Level::Error | Level::Fatal => log::Level::Error,
 		}
 	}
-
-	/// From a facade filter level (for [`log_get_level`]).
-	fn from_filter(f: LevelFilter) -> Level {
-		match f {
-			LevelFilter::Off | LevelFilter::Error => Level::Error,
-			LevelFilter::Warn => Level::Warning,
-			LevelFilter::Info => Level::Info,
-			LevelFilter::Debug | LevelFilter::Trace => Level::Debug,
-		}
-	}
 }
 
 /// Oak-level name for a facade level (the sink path). `log::Level` has

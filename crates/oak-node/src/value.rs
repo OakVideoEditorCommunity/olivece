@@ -203,11 +203,6 @@ impl SampleBuffer {
 			return None;
 		}
 		let bps = self.format.bytes_per_sample();
-		let stride = if self.format.is_planar() {
-			self.sample_count
-		} else {
-			self.channels
-		};
 		let pos = if self.format.is_planar() {
 			channel * self.sample_count + index
 		} else {
@@ -695,7 +690,7 @@ impl Clone for NodeValue {
 	fn clone(&self) -> Self {
 		match self {
 			NodeValue::Texture(h) => {
-				let mut h2 = h.clone();
+				let h2 = h.clone();
 				if let Some(f) = h2.addref {
 					// Safety: `h2` is a valid handle; addref only touches
 					// the refcount.
@@ -771,7 +766,7 @@ impl OakNodeValue {
 	/// Map an oaknode_value POD into a [`NodeValue`] of the input's
 	/// declared type (C++ `variant_from_value`). `OAKNODE_VALUE_STRING`
 	/// and unknown kinds are rejected with [`Error::Invalid`].
-	pub fn to_node_value(self, declared: ValueType) -> crate::error::Result<NodeValue> {
+	pub fn to_node_value(self, _declared: ValueType) -> crate::error::Result<NodeValue> {
 		use crate::error::Error;
 		match self.kind {
 			oak::INT | oak::COMBO => Ok(NodeValue::Int(self.num)),
@@ -858,10 +853,7 @@ impl OakNodeValue {
 				out.f = a;
 				Ok(out)
 			}
-			_ => {
-				out.kind = oak::NONE;
-				Err(Error::Failed("type has no POD representation".to_string()))
-			}
+			_ => Err(Error::Failed("type has no POD representation".to_string())),
 		}
 	}
 }

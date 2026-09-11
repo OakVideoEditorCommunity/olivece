@@ -50,7 +50,7 @@ impl NodeBehavior for TestNode {
 fn build(n: usize) -> (Graph, Vec<NodeId>) {
 	let mut g = Graph::new();
 	let mut ids = Vec::new();
-	for i in 0..n {
+	for _ in 0..n {
 		let mut core = NodeCore::new();
 		core.add_input(Input::new(
 			"val_in",
@@ -159,7 +159,7 @@ fn cycle_rejection() {
 /// yields empty order; diamond graph has a valid (stable) order.
 #[test]
 fn topological_order() {
-	let mut g = Graph::new();
+	let g = Graph::new();
 	assert!(g.topological_order().is_empty());
 
 	let (mut g, ids) = build(4);

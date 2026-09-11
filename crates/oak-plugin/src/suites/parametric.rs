@@ -42,10 +42,8 @@
 //!   BadHandle/BadIndex）。
 
 use std::borrow::Cow;
-use std::ffi::{c_char, c_double, c_int, c_void};
+use std::ffi::{c_double, c_int, c_void};
 
-use crate::descriptor::EffectDescriptor;
-use crate::instance::Instance;
 use crate::param::{ParamDef, ParamInstance, ParamValue};
 use crate::param_curve::Curve;
 use crate::property::{PropertySet, Value};
@@ -414,10 +412,12 @@ pub fn suite_v1() -> &'static ParametricParameterSuiteV1 {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use std::ffi::CString;
+	use std::ffi::{c_char, CString};
 	use std::sync::Arc;
 
+	use crate::descriptor::EffectDescriptor;
 	use crate::host::Plugin;
+	use crate::instance::Instance;
 	use crate::param::{ParamInstance, ParamSetInstance};
 	use crate::property::PropertySet;
 

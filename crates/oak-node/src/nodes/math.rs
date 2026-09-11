@@ -35,7 +35,9 @@ pub const PARAM_A_INPUT: &str = "param_a_in";
 pub const PARAM_B_INPUT: &str = "param_b_in";
 
 /// Operand C input id (C++ `k_param_c_in`). Declared as a static but
-/// never added in the constructor — reserved/unused upstream.
+/// never added in the constructor — reserved/unused upstream, so it is
+/// kept (with an `allow`) as the parity constant rather than deleted.
+#[allow(dead_code)]
 pub const PARAM_C_INPUT: &str = "param_c_in";
 
 /// Math node: applies a binary arithmetic operation to two values.

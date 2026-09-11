@@ -160,11 +160,10 @@ impl PreferencesContent {
 				.with_placeholder(i18n::tr("preferences.backend.placeholder"))
 		});
 		cx.subscribe(&backend, |this, _combo, event: &ComboBoxEvent, cx| {
-			if let ComboBoxEvent::Selected { value, .. } = event {
-				if let Some(name) = this.backends.get(*value) {
-					config_set_string(CONFIG_KEY_RENDERER_BACKEND, name);
-					println!("[preferences] renderer backend → {name}");
-				}
+			let ComboBoxEvent::Selected { value, .. } = event;
+			if let Some(name) = this.backends.get(*value) {
+				config_set_string(CONFIG_KEY_RENDERER_BACKEND, name);
+				println!("[preferences] renderer backend → {name}");
 			}
 			let _ = cx;
 		})
@@ -186,11 +185,10 @@ impl PreferencesContent {
 			ComboBox::new(12, options, window, cx)
 		});
 		cx.subscribe(&display_bit_depth, |_this, _combo, event: &ComboBoxEvent, cx| {
-			if let ComboBoxEvent::Selected { value, .. } = event {
-				let depth = if *value == 1 { "8" } else { "10" };
-				config_set_string(CONFIG_KEY_DISPLAY_BIT_DEPTH, depth);
-				println!("[preferences] display bit depth → {depth}");
-			}
+			let ComboBoxEvent::Selected { value, .. } = event;
+			let depth = if *value == 1 { "8" } else { "10" };
+			config_set_string(CONFIG_KEY_DISPLAY_BIT_DEPTH, depth);
+			println!("[preferences] display bit depth → {depth}");
 			let _ = cx;
 		})
 		.detach();
@@ -227,11 +225,10 @@ impl PreferencesContent {
 		cx.subscribe(
 			&language,
 			move |_this, _combo, event: &ComboBoxEvent, cx| {
-				if let ComboBoxEvent::Selected { value, .. } = event {
-					if let Some(code) = languages.get(*value) {
-						crate::i18n::set_language_code(code);
-						cx.emit(PreferencesEvent::LanguageChanged);
-					}
+				let ComboBoxEvent::Selected { value, .. } = event;
+				if let Some(code) = languages.get(*value) {
+					crate::i18n::set_language_code(code);
+					cx.emit(PreferencesEvent::LanguageChanged);
 				}
 			},
 		)
@@ -246,11 +243,10 @@ impl PreferencesContent {
 		];
 		let theme = cx.new(|cx| ComboBox::new(3, theme_options, window, cx));
 		cx.subscribe(&theme, |_this, _combo, event: &ComboBoxEvent, cx| {
-			if let ComboBoxEvent::Selected { value, .. } = event {
-				let dark = *value == 0;
-				set_theme_dark(dark);
-				cx.emit(PreferencesEvent::ThemeChanged(dark));
-			}
+			let ComboBoxEvent::Selected { value, .. } = event;
+			let dark = *value == 0;
+			set_theme_dark(dark);
+			cx.emit(PreferencesEvent::ThemeChanged(dark));
 		})
 		.detach();
 		theme.update(cx, |combo, cx| {
@@ -310,11 +306,10 @@ impl PreferencesContent {
 			.with_label(i18n::tr("preferences.proxy.enable"))
 		});
 		cx.subscribe(&use_proxy, |_this, check, event: &CheckBoxEvent, cx| {
-			if let CheckBoxEvent::Toggled { state, .. } = event {
-				let enabled = *state == CheckState::Checked;
-				config_set_bool(CONFIG_KEY_USE_PROXY, enabled);
-				check.update(cx, |check, cx| check.set_state(*state, cx));
-			}
+			let CheckBoxEvent::Toggled { state, .. } = event;
+			let enabled = *state == CheckState::Checked;
+			config_set_bool(CONFIG_KEY_USE_PROXY, enabled);
+			check.update(cx, |check, cx| check.set_state(*state, cx));
 		})
 		.detach();
 
@@ -332,10 +327,9 @@ impl PreferencesContent {
 			.collect();
 		let proxy_divider = cx.new(|cx| ComboBox::new(4, divider_options, window, cx));
 		cx.subscribe(&proxy_divider, |this, _combo, event: &ComboBoxEvent, cx| {
-			if let ComboBoxEvent::Selected { value, .. } = event {
-				if let Some(divider) = this.dividers.get(*value) {
-					config_set_int(CONFIG_KEY_PROXY_DIVIDER, *divider);
-				}
+			let ComboBoxEvent::Selected { value, .. } = event;
+			if let Some(divider) = this.dividers.get(*value) {
+				config_set_int(CONFIG_KEY_PROXY_DIVIDER, *divider);
 			}
 			let _ = cx;
 		})
@@ -365,11 +359,10 @@ impl PreferencesContent {
 			.with_label(i18n::tr("preferences.hwdecode.enable"))
 		});
 		cx.subscribe(&hw_decode, |_this, check, event: &CheckBoxEvent, cx| {
-			if let CheckBoxEvent::Toggled { state, .. } = event {
-				let enabled = *state == CheckState::Checked;
-				config_set_bool("HardwareDecoding", enabled);
-				check.update(cx, |check, cx| check.set_state(*state, cx));
-			}
+			let CheckBoxEvent::Toggled { state, .. } = event;
+			let enabled = *state == CheckState::Checked;
+			config_set_bool("HardwareDecoding", enabled);
+			check.update(cx, |check, cx| check.set_state(*state, cx));
 		})
 		.detach();
 
@@ -394,15 +387,14 @@ impl PreferencesContent {
 			.with_label(i18n::tr("preferences.color.enable"))
 		});
 		cx.subscribe(&display_icc, |_this, check, event: &CheckBoxEvent, cx| {
-			if let CheckBoxEvent::Toggled { state, .. } = event {
-				let enabled = *state == CheckState::Checked;
-				config_set_string(CONFIG_KEY_COLOR_MODE, if enabled { "icc" } else { "off" });
-				check.update(cx, |check, cx| check.set_state(*state, cx));
-				// Drop the cached processors and tell the host to retag the
-				// windows for the new policy.
-				crate::oakui::displaycolor::invalidate();
-				cx.emit(PreferencesEvent::DisplayColorChanged);
-			}
+			let CheckBoxEvent::Toggled { state, .. } = event;
+			let enabled = *state == CheckState::Checked;
+			config_set_string(CONFIG_KEY_COLOR_MODE, if enabled { "icc" } else { "off" });
+			check.update(cx, |check, cx| check.set_state(*state, cx));
+			// Drop the cached processors and tell the host to retag the
+			// windows for the new policy.
+			crate::oakui::displaycolor::invalidate();
+			cx.emit(PreferencesEvent::DisplayColorChanged);
 		})
 		.detach();
 		let display_icc_path = cx.new(|cx| {
@@ -434,7 +426,6 @@ impl PreferencesContent {
 				let value = match event {
 					SpinBoxEvent::ValueChanged { value, .. }
 					| SpinBoxEvent::EditCommitted { value, .. } => value.to_f64() as i64,
-					_ => return,
 				};
 				config_set_int(CONFIG_KEY_SNAPSHOT_INTERVAL_SEC, value);
 				let _ = cx;
@@ -461,7 +452,6 @@ impl PreferencesContent {
 				let value = match event {
 					SpinBoxEvent::ValueChanged { value, .. }
 					| SpinBoxEvent::EditCommitted { value, .. } => value.to_f64(),
-					_ => return,
 				};
 				config_set_string(CONFIG_KEY_DEFAULT_TRANSITION_SEC, &format!("{value}"));
 				let _ = cx;
@@ -475,27 +465,25 @@ impl PreferencesContent {
 		let (audio_output, output_devices) = device_combo(5, true, window, cx);
 		let (audio_input, input_devices) = device_combo(6, false, window, cx);
 		cx.subscribe(&audio_output, |this, _combo, event: &ComboBoxEvent, cx| {
-			if let ComboBoxEvent::Selected { value, .. } = event {
-				// Option 0 is the system default; the devices start at 1.
-				let name = value
-					.checked_sub(1)
-					.and_then(|i| this.output_devices.get(i))
-					.cloned()
-					.unwrap_or_default();
-				set_audio_output_device(&name);
-			}
+			let ComboBoxEvent::Selected { value, .. } = event;
+			// Option 0 is the system default; the devices start at 1.
+			let name = value
+				.checked_sub(1)
+				.and_then(|i| this.output_devices.get(i))
+				.cloned()
+				.unwrap_or_default();
+			set_audio_output_device(&name);
 			let _ = cx;
 		})
 		.detach();
 		cx.subscribe(&audio_input, |this, _combo, event: &ComboBoxEvent, cx| {
-			if let ComboBoxEvent::Selected { value, .. } = event {
-				let name = value
-					.checked_sub(1)
-					.and_then(|i| this.input_devices.get(i))
-					.cloned()
-					.unwrap_or_default();
-				set_audio_input_device(&name);
-			}
+			let ComboBoxEvent::Selected { value, .. } = event;
+			let name = value
+				.checked_sub(1)
+				.and_then(|i| this.input_devices.get(i))
+				.cloned()
+				.unwrap_or_default();
+			set_audio_input_device(&name);
 			let _ = cx;
 		})
 		.detach();
@@ -594,7 +582,7 @@ impl PreferencesContent {
 			let Some(path) = paths.first() else {
 				return;
 			};
-			this.update(cx, |this, cx| {
+			let _ = this.update(cx, |this, cx| {
 				this.display_icc_path.update(cx, |field, cx| {
 					field.set_path(path.to_string_lossy().into_owned(), cx)
 				});
@@ -633,7 +621,7 @@ impl PreferencesContent {
 			let Some(path) = paths.first() else {
 				return;
 			};
-			this.update(cx, |this, cx| {
+			let _ = this.update(cx, |this, cx| {
 				this.cache_dir.update(cx, |field, cx| {
 					field.set_path(path.to_string_lossy().into_owned(), cx)
 				});
@@ -1080,15 +1068,16 @@ impl ExportDialogContent {
 		// Container change → rebuild the codec lists (and re-select the
 		// first compatible entry) so a stale incompatible codec can never
 		// survive a format switch.
-		cx.subscribe(&format, |this, _format, event: &ComboBoxEvent, cx| {
-			if let ComboBoxEvent::Selected { value } = event {
-				let fmt = this
-					.formats
-					.get(*value)
-					.map(|(id, _, _)| *id)
-					.unwrap_or(EXPORT_FORMAT_MP4);
-				this.apply_format(fmt, cx);
-			}
+		// NOTE: the returned subscription is dropped immediately, so this
+		// handler never runs; the drop is kept to preserve behavior.
+		let _ = cx.subscribe(&format, |this, _format, event: &ComboBoxEvent, cx| {
+			let ComboBoxEvent::Selected { value } = event;
+			let fmt = this
+				.formats
+				.get(*value)
+				.map(|(id, _, _)| *id)
+				.unwrap_or(EXPORT_FORMAT_MP4);
+			this.apply_format(fmt, cx);
 		});
 
 		let color = cx.new(|cx| {
@@ -2635,7 +2624,7 @@ impl KeyboardTabContent {
 				return;
 			};
 			let result = crate::actions::load_custom_shortcuts_from(&path.to_string_lossy());
-			this.update(cx, |this, cx| {
+			let _ = this.update(cx, |this, cx| {
 				match result {
 					Ok(_) => {
 						this.status = Some(i18n::tr("preferences.keyboard.imported").to_string());
@@ -2663,7 +2652,7 @@ impl KeyboardTabContent {
 				return;
 			};
 			let result = crate::actions::save_custom_shortcuts_to(&path.to_string_lossy());
-			this.update(cx, |this, cx| {
+			let _ = this.update(cx, |this, cx| {
 				this.status = Some(match result {
 					Ok(_) => i18n::tr("preferences.keyboard.exported").to_string(),
 					Err(_) => i18n::tr("preferences.keyboard.export_failed").to_string(),
@@ -3495,20 +3484,19 @@ impl SequenceFormatFields {
 		// set_value/set_selected calls below emit no events, so this never
 		// loops back into itself.
 		cx.subscribe(&preset, |this, _preset, event: &ComboBoxEvent, cx| {
-			if let ComboBoxEvent::Selected { value } = event {
-				if let Some((w, h, num, den)) = sequence_preset_format(*value) {
-					this.width.update(cx, |spin, cx| {
-						spin.set_value(SliderValue::Integer(i64::from(w)), cx)
-					});
-					this.height.update(cx, |spin, cx| {
-						spin.set_value(SliderValue::Integer(i64::from(h)), cx)
-					});
-					if let Some(index) = SEQUENCE_RATES.iter().position(|r| *r == (num, den)) {
-						this.rate
-							.update(cx, |combo, cx| combo.set_selected(Some(index), cx));
-					}
-					cx.notify();
+			let ComboBoxEvent::Selected { value } = event;
+			if let Some((w, h, num, den)) = sequence_preset_format(*value) {
+				this.width.update(cx, |spin, cx| {
+					spin.set_value(SliderValue::Integer(i64::from(w)), cx)
+				});
+				this.height.update(cx, |spin, cx| {
+					spin.set_value(SliderValue::Integer(i64::from(h)), cx)
+				});
+				if let Some(index) = SEQUENCE_RATES.iter().position(|r| *r == (num, den)) {
+					this.rate
+						.update(cx, |combo, cx| combo.set_selected(Some(index), cx));
 				}
+				cx.notify();
 			}
 		})
 		.detach();
@@ -3533,21 +3521,19 @@ impl SequenceFormatFields {
 		})
 		.detach();
 		cx.subscribe(&rate, |this, _combo, event: &ComboBoxEvent, cx| {
-			if let ComboBoxEvent::Selected { .. } = event {
-				this.preset.update(cx, |combo, cx| {
-					combo.set_selected(Some(0), cx)
-				});
-				cx.notify();
-			}
+			let ComboBoxEvent::Selected { .. } = event;
+			this.preset.update(cx, |combo, cx| {
+				combo.set_selected(Some(0), cx)
+			});
+			cx.notify();
 		})
 		.detach();
 
 		// The interlaced checkbox is request-only: the host accepts the
 		// toggled state back (the standard checkbox pattern).
 		cx.subscribe(&interlaced, |_this, check, event: &CheckBoxEvent, cx| {
-			if let CheckBoxEvent::Toggled { state, .. } = event {
-				check.update(cx, |check, cx| check.set_state(*state, cx));
-			}
+			let CheckBoxEvent::Toggled { state, .. } = event;
+			check.update(cx, |check, cx| check.set_state(*state, cx));
 		})
 		.detach();
 
@@ -3973,8 +3959,6 @@ pub struct MulticamWizardContent<E: crate::oakui::engine::AppEngine> {
 	sync: Entity<ComboBox>,
 	/// Selection state per footage row: `(entry, checked)`.
 	rows: Vec<(crate::oakui::engine::WizardFootage, bool)>,
-	/// The wheel to scroll the long angle list.
-	scrolled: bool,
 }
 
 /// The wizard's sync mode combo values (display order).
@@ -4019,7 +4003,6 @@ impl<E: crate::oakui::engine::AppEngine> MulticamWizardContent<E> {
 			name,
 			sync,
 			rows,
-			scrolled: false,
 		}
 	}
 
@@ -4156,7 +4139,7 @@ pub struct RenameContent {
 
 impl RenameContent {
 	/// Builds the dialog seeded with the current name.
-	pub fn new(current: SharedString, window: &mut Window, cx: &mut Context<Self>) -> Self {
+	pub fn new(current: SharedString, _window: &mut Window, cx: &mut Context<Self>) -> Self {
 		let field = cx.new(|cx| {
 			let editor = cx.new(|cx| EditableTextState::new(StringStorage::default(), cx));
 			TextValue { editor }

@@ -456,7 +456,7 @@ mod tests {
 	fn option_setting_roundtrip() {
 		let mut p = CommandLineParser::new();
 		p.add_option(&[cstr("o")], "", true, "F", false).unwrap();
-		let mut opt = p.option_mut(0).unwrap();
+		let opt = p.option_mut(0).unwrap();
 		assert_eq!(opt.get_setting().unwrap(), "");
 		opt.set_setting("value").unwrap();
 		assert_eq!(opt.get_setting().unwrap(), "value");
@@ -467,7 +467,7 @@ mod tests {
 	fn positional_setting_roundtrip() {
 		let mut p = CommandLineParser::new();
 		p.add_positional_argument("in", "", true).unwrap();
-		let mut pos = p.positional_mut(0).unwrap();
+		let pos = p.positional_mut(0).unwrap();
 		assert_eq!(pos.get_setting().unwrap(), "");
 		pos.set_setting("file.mp4").unwrap();
 		assert_eq!(pos.get_setting().unwrap(), "file.mp4");
@@ -786,7 +786,7 @@ Usage: oak [options] [input]
 		let mut p = CommandLineParser::new();
 		p.add_option(&[cstr("o")], "", true, "F", false).unwrap();
 		{
-			let mut opt = p.option_mut(0).unwrap();
+			let opt = p.option_mut(0).unwrap();
 			opt.set_setting("v").unwrap();
 		}
 		let opt = p.option(0).unwrap();

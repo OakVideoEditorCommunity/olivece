@@ -550,7 +550,7 @@ mod tests {
 			EffectLibraryPanel::new(engine, window, cx)
 		});
 		cx.run_until_parked();
-		let mut visual = VisualTestContext::from_window(window.into(), cx).into_mut();
+		let visual = VisualTestContext::from_window(window.into(), cx).into_mut();
 		visual.update(|window, cx| {
 			window.draw(cx).clear();
 		});

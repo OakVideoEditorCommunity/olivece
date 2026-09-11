@@ -178,6 +178,7 @@ impl OCIOGradingTransformLogNode {
 	/// Set the per-component widget colors of a vec4 input (C++
 	/// `set_vec4_input_colors()`): master `#c0c0c0`, R `#ff0000`, G
 	/// `#00ff00`, B `#0000ff`.
+	#[allow(dead_code)] // C++ parity helper; see the linear sibling.
 	fn set_vec4_input_colors(core: &mut NodeCore, input: &str) {
 		set_input_property(
 			core,
@@ -448,7 +449,7 @@ impl NodeBehavior for OCIOGradingTransformLogNode {
 			.to_double() != 0.0;
 		let white_enabled = row_or_standard(core, inputs, CLAMP_WHITE_ENABLE_INPUT, time)
 			.to_double() != 0.0;
-		let mut black =
+		let black =
 			row_or_standard(core, inputs, CLAMP_BLACK_INPUT, time).to_double();
 		let mut white =
 			row_or_standard(core, inputs, CLAMP_WHITE_INPUT, time).to_double();

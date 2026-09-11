@@ -258,7 +258,7 @@ impl NodeBehavior for Echo {
 /// track read at its midpoint feeds 5.
 #[test]
 fn unconnected_input_evaluates_keyframes_at_time() {
-	use oak_node::keyframe::{Keyframe, KeyframeTrack};
+	use oak_node::keyframe::Keyframe;
 	let mut g = Graph::new();
 	let mut core = NodeCore::new();
 	core.add_input(Input::new("val_in", ValueType::Float, NodeValue::Float(0.0)));

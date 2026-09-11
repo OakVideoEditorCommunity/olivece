@@ -23,6 +23,10 @@
 //! 单库化后像素路径经 oakrender 值模型（`oak_core::texture::Texture`）
 //! 驱动；渲染 goldens 待该迁移落地。
 
+// 每个集成测试二进制都会独立编译本模块，只用到自己需要的那部分辅助件，
+// 因此某个二进制里未用到的条目仍属于共享夹具 API。
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 
 /// 构建系统注入插件路径的环境变量名。

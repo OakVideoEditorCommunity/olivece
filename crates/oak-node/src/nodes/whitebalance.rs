@@ -73,12 +73,6 @@ void main(void)
 "#;
 
 impl WhiteBalanceNode {
-	/// Fragment shader for any request (C++ `get_shader_code()` ignores
-	/// the request id and always returns this shader).
-	fn shader_frag() -> &'static str {
-		SHADER_FRAG
-	}
-
 	/// RGB gains for a given illuminant temperature and tint (C++
 	/// `get_gain_for_temperature()`, extracted for testability). Kelvin
 	/// is clamped to [1000, 40000]; the Tanner Helland blackbody

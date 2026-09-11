@@ -813,7 +813,7 @@ impl Tool {
 }
 
 /// Extension trait mapping the timeline widget's tool back to the app tool
-/// (for the toolbar highlight). Unmodeled tools fall back to the pointer.
+/// (for the toolbar highlight).
 pub trait TimelineToolExt {
 	fn app_tool(self) -> Tool;
 }
@@ -829,7 +829,6 @@ impl TimelineToolExt for gpui::timeline::TimelineTool {
 			gpui::timeline::TimelineTool::Slip => Tool::Slip,
 			gpui::timeline::TimelineTool::Slide => Tool::Slide,
 			gpui::timeline::TimelineTool::Zoom => Tool::Zoom,
-			_ => Tool::Pointer,
 		}
 	}
 }

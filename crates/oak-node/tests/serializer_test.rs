@@ -526,7 +526,7 @@ fn assert_full_roundtrip_fields(orig: &oak_node::project::Project, loaded: &oak_
 	use oak_node::folder::FolderBehavior;
 	use oak_node::footage::FootageBehavior;
 	use oak_node::sequence::SequenceBehavior;
-	use oak_node::track::{TrackBehavior, TrackListBehavior, TrackType};
+	use oak_node::track::{TrackBehavior, TrackType};
 
 	// Project shell: uuid + settings.
 	assert_eq!(loaded.uuid, orig.uuid, "uuid");

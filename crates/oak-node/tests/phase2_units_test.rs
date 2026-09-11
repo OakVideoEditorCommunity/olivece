@@ -79,7 +79,7 @@ fn block_behaviors_and_inputs() {
 	assert!(clip.footage.is_none());
 
 	// Gap.
-	let (core, behavior) = oak_node::block::gap_create();
+	let (_core, behavior) = oak_node::block::gap_create();
 	assert_eq!(behavior.name(), "Gap");
 	assert_eq!(behavior.type_id(), "org.olivevideoeditor.Olive.gapblock");
 	let gap = GapBlockBehavior::new();
@@ -287,7 +287,7 @@ fn color_manager_state() {
 	cm.set_up_default_config().unwrap();
 	assert!(cm.is_loaded());
 
-	let mut empty = ColorManager::new();
+	let empty = ColorManager::new();
 	assert!(empty.list_colorspaces().is_empty());
 }
 

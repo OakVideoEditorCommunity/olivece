@@ -414,6 +414,10 @@ impl FileFunctions {
 
 /// Location query helper reserved for the two-stage C getters; returns a
 /// path suitable for `std::fs`.
+///
+/// Only the configuration-location tests in this module call it today, so
+/// it is kept (with an `allow`) as the reserved helper rather than deleted.
+#[allow(dead_code)]
 pub(crate) fn config_location_path() -> Result<PathBuf> {
 	FileFunctions::new()
 		.get_configuration_location()

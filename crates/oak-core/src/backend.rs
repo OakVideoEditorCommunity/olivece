@@ -1542,7 +1542,7 @@ mod tests {
 		assert!(r2.is_vulkan());
 		assert!(!r2.is_open_gl());
 
-		let mut r3 = DisplayRenderer::new(BackendKind::Cpu);
+		let r3 = DisplayRenderer::new(BackendKind::Cpu);
 		let mut pod = VideoParamsPod::default();
 		pod.width = 4;
 		pod.height = 4;
@@ -1577,7 +1577,7 @@ mod tests {
 
 	#[test]
 	fn cpu_blit_applies_color_and_copy() {
-		let mut r = DisplayRenderer::new(BackendKind::Cpu);
+		let r = DisplayRenderer::new(BackendKind::Cpu);
 		let mut pod = VideoParamsPod::default();
 		pod.width = 2;
 		pod.height = 2;

@@ -191,7 +191,7 @@ fn concurrent_access() {
 	}
 
 	// 数据自洽：32 个属性全部存活、维度未被撑大。
-	for (i, name) in names.iter().enumerate() {
+	for name in names.iter() {
 		assert_eq!(s.dimension(name), 1);
 		assert!(s.get(name, 0).is_some());
 	}

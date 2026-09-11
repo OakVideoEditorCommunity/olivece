@@ -73,6 +73,7 @@ impl ShapeNodeBase {
 	/// signature. The property write and the gizmo point placements are
 	/// therefore not representable here (`// CPP-PARITY:
 	/// shapenodebase.cpp` `update_gizmo_positions`).
+	#[allow(dead_code)] // C++ parity helpers; covered by the no-op tests.
 	pub fn update_gizmo_positions(
 		core: &mut crate::node::NodeCore,
 		row: &crate::value::NodeValueRow,
@@ -88,6 +89,7 @@ impl ShapeNodeBase {
 	/// command stack; neither is carried by this signature or this
 	/// crate's data model, so the writes are not representable here
 	/// (`// CPP-PARITY: shapenodebase.cpp` `set_rect`).
+	#[allow(dead_code)]
 	pub fn set_rect(core: &mut crate::node::NodeCore, rect: (f64, f64, f64, f64)) {
 		let _ = (core, rect);
 	}
@@ -106,6 +108,7 @@ impl ShapeNodeBase {
 	/// Rust `NodeCore::gizmos` has no dragger state, so the drag is not
 	/// representable here (`// CPP-PARITY: shapenodebase.cpp`
 	/// `gizmo_drag_move`).
+	#[allow(dead_code)]
 	pub fn gizmo_drag_move(core: &mut crate::node::NodeCore, x: f64, y: f64, modifiers: u32) {
 		let _ = (core, x, y, modifiers);
 	}

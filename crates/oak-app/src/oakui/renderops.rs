@@ -30,7 +30,7 @@ use std::sync::mpsc;
 
 use gpui::RenderImage;
 use oak_core::texture::Texture;
-use oak_core::{PixelFormat, Rational, TimeRange};
+use oak_core::{Rational, TimeRange};
 use oak_node::id::NodeId;
 use oak_node::track::TrackType;
 use oak_render::manager::RenderManager;

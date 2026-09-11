@@ -664,7 +664,6 @@ impl Graph {
 		if index < 0 || index > size as i32 {
 			return Err(Error::Invalid);
 		}
-		drop(input_);
 		let entry = self.get_mut(id).ok_or(Error::NotFound)?;
 		entry.core.input_array_insert(input, index as usize);
 
@@ -703,7 +702,6 @@ impl Graph {
 		if index < 0 || index >= size as i32 {
 			return Err(Error::Invalid);
 		}
-		drop(input_);
 		let entry = self.get_mut(id).ok_or(Error::NotFound)?;
 		entry.core.input_array_remove(input, index as usize);
 

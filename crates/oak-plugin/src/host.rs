@@ -276,8 +276,6 @@ fn global_ofx_host() -> *mut OfxHost {
 
 /// kOfxActionLoad。
 pub(crate) const ACTION_LOAD: &str = "OfxActionLoad";
-/// kOfxActionUnload。
-pub(crate) const ACTION_UNLOAD: &str = "OfxActionUnload";
 /// kOfxActionDescribe。
 pub(crate) const ACTION_DESCRIBE: &str = "OfxActionDescribe";
 /// kOfxActionCreateInstance。
@@ -552,8 +550,6 @@ pub(crate) const PROP_CLIP_COLOURSPACE: &str = "OfxImageClipPropColourspace";
 /// kOfxImageClipPropPreferredColourspaces（ofxColour.h:201）：clip 偏好
 /// 色彩空间（GetClipPreferences 的 out args 可写）。
 pub(crate) const PROP_CLIP_PREFERRED_COLOURSPACES: &str = "OfxImageClipPropPreferredColourspaces";
-/// 工作空间（任务要求：全链路 ACEScg）。
-pub(crate) const WORKING_COLOURSPACE: &str = "ACEScg";
 /// 宿主支持的 native 色彩配置标识（ofxColour.h:78 的唯一现行值）。
 pub(crate) const NATIVE_CONFIG_ID: &str = "ofx-native-v1.5_aces-v1.3_ocio-v2.3";
 /// 宿主 OCIO 配置 URI（ofxColour.h:110 允许 ocio:// 内建配置；本宿主

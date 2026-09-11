@@ -55,6 +55,8 @@ impl DisplayTransformNode {
 	/// Selected display name (C++ `get_display()`): the display combo
 	/// index mapped through the color manager's display list; empty
 	/// string when no manager is attached or the index is out of range.
+	#[allow(dead_code)] // C++ parity getter; the Rust model never attaches a
+	// color manager, so callers have nothing to query yet.
 	fn get_display(&self, core: &NodeCore) -> String {
 		// The C++ reads the display combo index through
 		// `manager()->list_available_displays()`. The Rust model has no
@@ -69,6 +71,7 @@ impl DisplayTransformNode {
 	/// Selected view name (C++ `get_view()`): the view combo index
 	/// mapped through the manager's views for [`Self::get_display`];
 	/// empty when unavailable.
+	#[allow(dead_code)] // See `get_display`.
 	fn get_view(&self, core: &NodeCore) -> String {
 		// See [`Self::get_display`]: no manager is ever attached in the
 		// Rust model, so the empty string is returned.
@@ -80,6 +83,7 @@ impl DisplayTransformNode {
 	/// Transform direction (C++ `get_direction()`): the direction combo
 	/// value cast to `ColorProcessor::Direction` (`0` = normal/forward,
 	/// `1` = inverse).
+	#[allow(dead_code)] // C++ parity getter; read back by the tests only.
 	fn get_direction(&self, core: &NodeCore) -> i64 {
 		core.standard_value(DIRECTION_INPUT, -1).to_double() as i64
 	}

@@ -50,6 +50,10 @@ pub const MIRROR_Y_INPUT: &str = "mirrory_in";
 
 /// Anchor point for tiling (C++ private enum `Anchor`); values match
 /// the `anchor_in` combo indices and the shader's `anchor_in` defines.
+/// Only `MiddleCenter` is constructed today (the runtime value is the
+/// raw combo index); the full upstream set is kept (with an `allow`)
+/// for parity.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Anchor {
 	/// Top-left corner.

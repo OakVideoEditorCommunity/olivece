@@ -71,14 +71,6 @@ void main(void) {
 }
 "#;
 
-impl MergeNode {
-	/// Fragment shader (C++ `get_shader_code()`; the request id is
-	/// ignored — the same alpha-over shader serves every request).
-	fn shader_frag() -> &'static str {
-		SHADER_FRAG
-	}
-}
-
 impl NodeBehavior for MergeNode {
 	/// Human-readable name (C++ `name()`).
 	fn name(&self) -> &str {

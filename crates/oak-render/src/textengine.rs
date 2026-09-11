@@ -196,7 +196,7 @@ pub fn render(req: &TextLayoutRequest, transform: &TextRenderTransform, target: 
 	}
 
 	let mut sys = lock_system();
-	let mut buffer = layout(&mut sys.font_system, req, &text);
+	let buffer = layout(&mut sys.font_system, req, &text);
 	let TextSystem {
 		font_system,
 		swash_cache,

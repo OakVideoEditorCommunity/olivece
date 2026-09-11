@@ -347,7 +347,7 @@ mod tests {
 		// deterministic on the queued inline dispatcher: the first job stays
 		// queued until `run`, so the superseding submit's cancel lands first.
 		let (mut c, d) = new_cacher_slow();
-		c.attach(7);
+		c.attach(7).unwrap();
 		let first = c.single_frame(Rational::new(0, 1));
 		let second = c.single_frame(Rational::new(1, 1));
 		assert_ne!(first, second);
@@ -381,7 +381,7 @@ mod tests {
 	#[test]
 	fn ignore_requests_suppresses_jobs() {
 		let (mut c, d) = new_cacher();
-		c.attach(7);
+		c.attach(7).unwrap();
 		c.ignore_requests = true;
 		c.on_cache_request(7, TimeRange::new(Rational::new(0, 1), Rational::new(5, 1)));
 		assert!(c.live_jobs().is_empty());
@@ -391,7 +391,7 @@ mod tests {
 	#[test]
 	fn renders_paused_queues_but_does_not_start() {
 		let (mut c, d) = new_cacher();
-		c.attach(7);
+		c.attach(7).unwrap();
 		c.renders_paused = true;
 		c.on_cache_request(7, TimeRange::new(Rational::new(0, 1), Rational::new(5, 1)));
 		assert!(c.live_jobs().is_empty(), "paused: no jobs started");
@@ -402,7 +402,7 @@ mod tests {
 	#[test]
 	fn cancel_video_tasks_wait_blocks_until_idle() {
 		let (mut c, d) = new_cacher();
-		c.attach(7);
+		c.attach(7).unwrap();
 		c.force_range(TimeRange::new(Rational::new(0, 1), Rational::new(1, 1)));
 		assert!(c.is_rendering_custom_range() || c.live_jobs().len() == 1);
 		// Drain so the wait below observes every job finished.
@@ -452,7 +452,7 @@ mod tests {
 	#[test]
 	fn clear_finished_single_frames_removes_done() {
 		let (mut c, d) = new_cacher();
-		c.attach(7);
+		c.attach(7).unwrap();
 		let id = c.single_frame(Rational::new(0, 1));
 		d.run();
 		c.arena.wait(id).unwrap();

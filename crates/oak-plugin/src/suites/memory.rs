@@ -81,17 +81,6 @@ pub(crate) fn free(ptr: *mut u8) -> bool {
 	}
 }
 
-/// 兜底回收全部在账块（destroyInstance 的泄漏防线）。返回回收块数
-/// （泄漏断言用）。
-pub(crate) fn sweep_leaked() -> usize {
-	let mut ledger = lock();
-	let n = ledger.len();
-	for b in ledger.drain(..) {
-		unsafe { std::alloc::dealloc(b.ptr as *mut u8, b.layout) };
-	}
-	n
-}
-
 /// 函数表布局（与 SDK `OfxMemorySuiteV1` 一致；`size_t` 在本平台
 /// 与 `usize` 同宽，stable Rust 用 `usize` 表达——骨架的 `c_size_t`
 /// 是不稳定特性，弃用）。

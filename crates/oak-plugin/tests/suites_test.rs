@@ -24,8 +24,7 @@
 
 mod common;
 
-use std::ffi::{c_char, c_double, c_int, c_uint, c_void, CStr, CString};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
 
 use oak_plugin::descriptor::EffectDescriptor;
 use oak_plugin::instance::Instance;
@@ -83,7 +82,7 @@ fn dummy_plugin(descriptor: EffectDescriptor) -> std::sync::Arc<oak_plugin::host
 
 /// 用 param suite 的 paramDefine 造一个含 6 参数的实例。
 fn make_instance() -> (std::sync::Arc<Instance>, *mut c_void) {
-	let mut desc = EffectDescriptor::new();
+	let desc = EffectDescriptor::new();
 	let s = param_suite();
 	let dhandle = tag::make(&desc.props as *const PropertySet, tag::DESCRIPTOR);
 	unsafe {
@@ -253,7 +252,7 @@ fn memory_suite_ledger() {
 /// [`oak_plugin::clip::ClipInstance::fetch_image`] 与存活表记账验证。
 #[test]
 fn image_effect_clip_image_pairing() {
-	let mut desc = EffectDescriptor::new();
+	let desc = EffectDescriptor::new();
 	let s = image_effect_suite();
 	let h = tag::make(&desc.props as *const PropertySet, tag::DESCRIPTOR);
 
@@ -384,7 +383,7 @@ fn image_effect_clip_image_pairing() {
 #[test]
 fn param_suite_roundtrip_and_change_action() {
 	// describe 期。
-	let mut desc = EffectDescriptor::new();
+	let desc = EffectDescriptor::new();
 	let s = param_suite();
 	let dhandle = tag::make(&desc.props as *const PropertySet, tag::DESCRIPTOR);
 	let t = cs("OfxParamTypeDouble");
@@ -478,7 +477,6 @@ fn param_suite_roundtrip_and_change_action() {
 		assert_eq!(CStr::from_ptr(p).to_bytes(), b"hello");
 
 		// AtTime == 当前值（无动画）。
-		let mut v2 = 0.0;
 		assert_eq!((s.param_get_value_at_time)(gain, 12.0, &mut iv), OK);
 		assert_eq!(iv, 7);
 		assert_eq!((s.param_set_value_at_time)(gain, 12.0, 9), OK);

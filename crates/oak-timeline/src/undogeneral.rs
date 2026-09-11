@@ -40,8 +40,8 @@ use crate::util::{
 	block_set_length_and_media_in, block_set_length_and_media_out, block_set_range, block_track,
 	clip_media_in, clip_set_media_in, same_block, track_append_block, track_create,
 	track_insert_block_after, track_insert_block_before, track_replace_block,
-	track_ripple_remove_block, tracklist_append, tracklist_remove, tracklist_remove_last,
-	tracklist_track_at, tracklist_track_count, tracklist_type, transition_offsets,
+	track_ripple_remove_block, tracklist_append, tracklist_remove, tracklist_track_at,
+	tracklist_track_count, tracklist_type, transition_offsets,
 	transition_set_offsets, BlockKind, NodeRef,
 };
 

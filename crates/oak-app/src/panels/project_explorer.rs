@@ -258,7 +258,7 @@ impl<E: AppEngine> Render for ProjectExplorerPanel<E> {
 			.tooltip(move |window, cx| {
 				tooltip_view(crate::i18n::tr("project.new_sequence").into(), window, cx)
 			})
-			.on_click(cx.listener(|this, _event: &ClickEvent, _window, cx| {
+			.on_click(cx.listener(|_this, _event: &ClickEvent, _window, cx| {
 				cx.emit(NewSequenceRequested);
 			}))
 			.child(crate::i18n::tr("project.new_sequence"));

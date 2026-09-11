@@ -425,7 +425,7 @@ fn push_start_element(
 			// value (XML_ERROR_INVALID_TOKEN).
 			return None;
 		}
-		let value = match attr.unescape_value() {
+		let value = match attr.normalized_value(quick_xml::XmlVersion::Implicit1_0) {
 			Ok(v) => v.into_owned(),
 			Err(_) => return None,
 		};
@@ -714,19 +714,19 @@ mod tests {
 
 	#[test]
 	fn reader_unclosed_element_is_error() {
-		let mut r = XmlReader::new("<a>").unwrap();
+		let r = XmlReader::new("<a>").unwrap();
 		assert!(r.has_error().unwrap());
 	}
 
 	#[test]
 	fn reader_empty_document_is_error() {
-		let mut r = XmlReader::new("").unwrap();
+		let r = XmlReader::new("").unwrap();
 		assert!(r.has_error().unwrap());
 	}
 
 	#[test]
 	fn reader_undefined_entity_is_error() {
-		let mut r = XmlReader::new("<a>&foo;</a>").unwrap();
+		let r = XmlReader::new("<a>&foo;</a>").unwrap();
 		assert!(r.has_error().unwrap());
 	}
 
@@ -742,7 +742,7 @@ mod tests {
 
 	#[test]
 	fn reader_name_before_read_is_empty() {
-		let mut r = XmlReader::new("<a></a>").unwrap();
+		let r = XmlReader::new("<a></a>").unwrap();
 		assert_eq!(r.name().unwrap(), "");
 		assert_eq!(r.attribute_count().unwrap(), 0);
 	}
@@ -824,7 +824,7 @@ mod tests {
 	/// (XML_ERROR_DUPLICATE_ATTRIBUTE).
 	#[test]
 	fn reader_duplicate_attribute_is_error() {
-		let mut r = XmlReader::new("<e a=\"1\" a=\"2\"/>").unwrap();
+		let r = XmlReader::new("<e a=\"1\" a=\"2\"/>").unwrap();
 		assert!(r.has_error().unwrap());
 	}
 
@@ -832,7 +832,7 @@ mod tests {
 	/// (XML_ERROR_INVALID_TOKEN).
 	#[test]
 	fn reader_lt_in_attribute_value_is_error() {
-		let mut r = XmlReader::new("<e a=\"x<y\"/>").unwrap();
+		let r = XmlReader::new("<e a=\"x<y\"/>").unwrap();
 		assert!(r.has_error().unwrap());
 	}
 
@@ -885,13 +885,13 @@ mod tests {
 
 	#[test]
 	fn reader_text_before_root_is_error() {
-		let mut r = XmlReader::new("junk<a/>").unwrap();
+		let r = XmlReader::new("junk<a/>").unwrap();
 		assert!(r.has_error().unwrap());
 	}
 
 	#[test]
 	fn reader_text_after_root_is_error() {
-		let mut r = XmlReader::new("<a/>junk").unwrap();
+		let r = XmlReader::new("<a/>junk").unwrap();
 		assert!(r.has_error().unwrap());
 	}
 
@@ -899,10 +899,10 @@ mod tests {
 	/// element").
 	#[test]
 	fn reader_second_root_element_is_error() {
-		let mut r = XmlReader::new("<a/><b/>").unwrap();
+		let r = XmlReader::new("<a/><b/>").unwrap();
 		assert!(r.has_error().unwrap());
 
-		let mut r = XmlReader::new("<a></a><b></b>").unwrap();
+		let r = XmlReader::new("<a></a><b></b>").unwrap();
 		assert!(r.has_error().unwrap());
 	}
 

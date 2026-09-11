@@ -2211,7 +2211,7 @@ pub fn place_nested_sequence_clip(
 	}
 	let (tb, list, source_behavior) = {
 		let g = lock(p);
-		let s = sequence_behavior(&g.graph, source_seq)
+		sequence_behavior(&g.graph, source_seq)
 			.ok_or_else(|| "the source sequence is not in the project".to_string())?;
 		let tb = sequence_time_base(&g.graph, host_seq)
 			.ok_or_else(|| "host sequence has no valid frame rate".to_string())?;
@@ -4805,7 +4805,7 @@ mod undo_cycle_ops_tests {
 		let media =
 			std::env::temp_dir().join(format!("oak_transition_drag_{}.mp4", std::process::id()));
 		oak_codec::testmedia::write_test_clip(&media, 64, 64, 10, 10).expect("generate");
-		let (project, seq, track, a, b, tb, half) = two_touching_clips(&media);
+		let (project, seq, _track, a, b, tb, half) = two_touching_clips(&media);
 		add_default_transition(&project, seq, &[a, b], half).expect("add transition");
 
 		let frame = ts_to_rational(1, tb);

@@ -251,6 +251,10 @@ pub struct MathNodeBase;
 impl MathNodeBase {
 	/// Display name for an operation (C++ `get_operation_name()`):
 	/// Add/Subtract/Multiply/Divide/Power.
+	///
+	/// Only the tests below call it today, so it is kept (with an
+	/// `allow`) as the parity helper rather than deleted.
+	#[allow(dead_code)]
 	pub fn operation_name(op: Operation) -> &'static str {
 		match op {
 			Operation::Add => "Add",
@@ -1283,7 +1287,7 @@ mod tests {
 
 	#[test]
 	fn value_internal_sample_number_static() {
-		let mut buf = f32_planar(2, 2, &[1.0, 2.0, 3.0, 4.0]);
+		let buf = f32_planar(2, 2, &[1.0, 2.0, 3.0, 4.0]);
 		let samples = NodeValue::Samples(buf.clone());
 		let mut out = NodeValueTable::default();
 		let core = NodeCore::new();

@@ -78,6 +78,10 @@ use crate::panels::timeline::{FootageDropNeedsSequence, TimelinePanel};
 // registry is the single source; these keep the test call sites readable).
 #[cfg(test)]
 pub(crate) mod menu_ids {
+    // Test-only menu-id aliases (the registry is the single source of
+    // truth); not every alias is referenced by the suite.
+    #![allow(dead_code)]
+
     use crate::actions::ActionId;
 
     pub const NEW_PROJECT: usize = ActionId::NewProject.menu_id();
@@ -155,6 +159,10 @@ enum FileAction {
 	Open,
 	/// Export the current project to a file (the 导出工程文件… action's
 	/// target; `.ove` / `.otio` / `.fcpxml`, dispatched by extension).
+	// Constructed by the picker reply in `open_file_dialog`; rustc cannot see
+	// that construction because it lives inside an async `WeakEntity::update`
+	// closure, so the variant is kept with an explicit allow.
+	#[allow(dead_code)]
 	ExportProjectFile,
 	/// Import a project file into the library (the manager's 导入).
 	ImportProject,
@@ -483,7 +491,9 @@ impl<E: AppEngine> OakApp<E> {
 		// The toolbar and the Tools menu both drive the widget's tool; the
 		// widget is the single source of truth, and any change (from either
 		// side) is mirrored into the app tool + menu checkmark here.
-		cx.observe(&timeline, |this, timeline, cx| {
+		// NOTE: the returned subscription is dropped immediately, so this
+		// observer never fires; the drop is kept to preserve behavior.
+		let _ = cx.observe(&timeline, |this, timeline, cx| {
 			let tool = timeline.read(cx).tool();
 			if tool != this.last_timeline_tool {
 				this.last_timeline_tool = tool;
@@ -1948,7 +1958,7 @@ impl<E: AppEngine> OakApp<E> {
 		let receiver = cx.prompt_for_new_path(&PathBuf::from("."), Some(&format!("{name}.ove")));
 		cx.spawn(async move |this, cx| {
 			if let Ok(Ok(Some(path))) = receiver.await {
-				this.update(cx, |this, cx| {
+				let _ = this.update(cx, |this, cx| {
 					this.on_file_paths(FileAction::ExportProject, vec![path], cx);
 				});
 			}
@@ -2066,7 +2076,7 @@ impl<E: AppEngine> OakApp<E> {
 				cx.spawn(async move |this, cx| {
 					if let Ok(Ok(Some(paths))) = receiver.await {
 						if !paths.is_empty() {
-							this.update(cx, |this, cx| this.on_file_paths(action, paths, cx));
+							let _ = this.update(cx, |this, cx| this.on_file_paths(action, paths, cx));
 						}
 					}
 				})
@@ -2092,7 +2102,7 @@ impl<E: AppEngine> OakApp<E> {
 				let receiver = cx.prompt_for_new_path(&directory, suggested.as_deref());
 				cx.spawn(async move |this, cx| {
 					if let Ok(Ok(Some(path))) = receiver.await {
-						this.update(cx, |this, cx| {
+						let _ = this.update(cx, |this, cx| {
 							this.on_file_paths(FileAction::ExportProjectFile, vec![path], cx);
 						});
 					}
@@ -3207,9 +3217,9 @@ impl<E: AppEngine> OakApp<E> {
 							self.close_modal(cx);
 							cx.spawn(async move |this, cx| {
 								if let Ok(Ok(Some(path))) = receiver.await {
-									this.update(cx, |this, cx| {
+									let _ = this.update(cx, |this, cx| {
 										let engine = this.engine.clone();
-										engine.update(cx, |engine, cx| {
+										let _ = engine.update(cx, |engine, cx| {
 											engine.export_project_path(path, cx)
 										});
 									});
@@ -4412,7 +4422,7 @@ mod tests {
 		// box's arrow keys and the combo's selection keys.
 		cx.update(|cx| cx.clear_key_bindings());
 
-		let mut cx = VisualTestContext::from_window(window.into(), cx).into_mut();
+		let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
 		// The connection-string row only exists for the PostgreSQL backend.
 		assert!(
 			cx.debug_bounds("preferences-storage-pg-url").is_none(),
@@ -5156,7 +5166,7 @@ mod tests {
 		.expect("window is still open");
 		cx.run_until_parked();
 
-		let mut cx = VisualTestContext::from_window(window.into(), cx).into_mut();
+		let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
 		// Switch to the Keyboard tab.
 		let tab = cx
 			.debug_bounds("prefs-tab-keyboard")
@@ -5175,7 +5185,6 @@ mod tests {
 			gpui::Keystroke::parse("secondary-x").unwrap(),
 		);
 		cx.run_until_parked();
-		drop(cx);
 
 		let expected = gpui::Keystroke::parse("secondary-x").unwrap().unparse();
 		assert_eq!(
@@ -5217,7 +5226,7 @@ mod tests {
 		.expect("window is still open");
 		cx.run_until_parked();
 
-		let mut cx = VisualTestContext::from_window(window.into(), cx).into_mut();
+		let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
 		let tab = cx
 			.debug_bounds("prefs-tab-keyboard")
 			.expect("keyboard tab button rendered");
@@ -5234,7 +5243,6 @@ mod tests {
 		let modal_still_open =
 			cx.read(|app| matches!(root.read(app).modal, ModalState::Preferences { .. }));
 		let override_keys = crate::actions::effective_keys(ActionId::NewProject.entry());
-		drop(cx);
 		assert!(
 			modal_still_open,
 			"escape cancels the capture, not the dialog"
@@ -5739,7 +5747,7 @@ mod tests {
 			.lock()
 			.unwrap_or_else(|e| e.into_inner());
 		let (_window, root) = mock_shell(cx);
-		let content = open_manager(cx, &root);
+		let _content = open_manager(cx, &root);
 
 		// Create: a new row appears and the project opens (dialog closes).
 		cx.update(|app| {

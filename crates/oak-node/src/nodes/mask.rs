@@ -256,25 +256,6 @@ void main(void) {
 }
 "#;
 
-impl MaskDistortNode {
-	/// Merge fragment shader (C++ `get_shader_code()` `"mrg"` branch).
-	fn shader_mrg_frag() -> &'static str {
-		SHADER_MRG_FRAG
-	}
-
-	/// Invert fragment shader (C++ `get_shader_code()` `"invert"`
-	/// branch).
-	fn shader_invert_frag() -> &'static str {
-		SHADER_INVERT_FRAG
-	}
-
-	/// Feather blur fragment shader (C++ `get_shader_code()`
-	/// `"feather"` branch).
-	fn shader_feather_frag() -> &'static str {
-		SHADER_FEATHER_FRAG
-	}
-}
-
 /// Combined mask fragment shader for the `"mask"` shader id, replacing
 /// the C++ chain — matte rasterize -> optional invert -> optional 2-pass
 /// feather blur -> multiply over base — with a single GPU pass: the base

@@ -202,7 +202,7 @@ impl SubtitleParams {
 			return Err(Error::Failed("missing root element".into()));
 		}
 
-		self.clear();
+		self.clear()?;
 
 		while let Some(ev) = reader.read_next_start() {
 			match ev.name.as_str() {
@@ -399,9 +399,7 @@ enum XmlEvent {
 		name: String,
 		attrs: Vec<(String, String)>,
 	},
-	End {
-		name: String,
-	},
+	End,
 	Characters(String),
 }
 
@@ -449,7 +447,7 @@ impl XmlReader {
 				name: name.clone(),
 				attrs: attrs.clone(),
 			}),
-			XmlEvent::End { .. } => XmlToken::End,
+			XmlEvent::End => XmlToken::End,
 			XmlEvent::Characters(t) => XmlToken::Characters(t.clone()),
 		}
 	}
@@ -549,8 +547,7 @@ fn parse_events(data: &str) -> Result<Vec<XmlEvent>> {
 				if j >= n {
 					return Err(Error::Failed("unterminated end element".into()));
 				}
-				let name = data[i + 2..j].trim().to_string();
-				events.push(XmlEvent::End { name });
+				events.push(XmlEvent::End);
 				i = j + 1;
 			}
 			b'!' => {
@@ -615,9 +612,8 @@ fn parse_events(data: &str) -> Result<Vec<XmlEvent>> {
 					}
 					if b[i] == b'/' && i + 1 < n && b[i + 1] == b'>' {
 						i += 2;
-						let end_name = name.clone();
 						events.push(XmlEvent::Start { name, attrs });
-						events.push(XmlEvent::End { name: end_name });
+						events.push(XmlEvent::End);
 						break;
 					}
 

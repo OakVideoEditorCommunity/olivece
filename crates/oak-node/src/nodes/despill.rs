@@ -115,14 +115,6 @@ void main(void) {
 }
 "#;
 
-impl DespillNode {
-	/// Fragment shader (C++ `get_shader_code()`; the request is
-	/// ignored — there is a single shader).
-	fn shader_frag() -> &'static str {
-		SHADER_FRAG
-	}
-}
-
 impl NodeBehavior for DespillNode {
 	/// Human-readable name (C++ `name()`).
 	fn name(&self) -> &str {
