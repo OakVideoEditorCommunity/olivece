@@ -5950,7 +5950,14 @@ impl AppEngine for RealEngine {
 			return Err("no video track".to_string());
 		};
 		let video_index = self.tracks[video_target].track_index;
-		let placed = {
+		// Plan under the graph lock, execute AFTER dropping it: the
+		// add_transition_* builders lock the project internally (a held
+		// guard deadlocks them).
+		enum DropPlan {
+			Seam(NodeId, NodeId),
+			Edge(NodeId, bool),
+		}
+		let (plan, half) = {
 			let guard = graphops::lock(&project);
 			let Some(track) = graphops::track_ids(&guard.graph, host_seq, TrackType::Video)
 				.get(video_index)
@@ -5958,8 +5965,11 @@ impl AppEngine for RealEngine {
 			else {
 				return Err("the target track is not in the sequence".to_string());
 			};
-			let Some(tb) = graphops::sequence_time_base(&guard.graph, track) else {
-				return Err("the track has no frame rate".to_string());
+			// The time base is the SEQUENCE's frame rate (tracks carry no
+			// video params of their own — `sequence_time_base` on a track
+			// id always returns None).
+			let Some(tb) = graphops::sequence_time_base(&guard.graph, host_seq) else {
+				return Err("the sequence has no frame rate".to_string());
 			};
 			// Snap to the nearest clip edge on the target track (within one
 			// second): a junction when the edge is a contiguous cut,
@@ -6004,11 +6014,20 @@ impl AppEngine for RealEngine {
 			let fps = tb.1 as f64 / tb.0.max(1) as f64;
 			let half_frames = (0.5 * fps).round().max(1.0) as i64;
 			let half = graphops::ts_to_rational(half_frames, tb);
-			if start_edge && prev_touch {
-				graphops::add_transition_at_seam(&project, prev.unwrap(), clip, half)
+			let plan = if start_edge && prev_touch {
+				DropPlan::Seam(prev.unwrap(), clip)
 			} else if !start_edge && next_touch {
-				graphops::add_transition_at_seam(&project, clip, next.unwrap(), half)
+				DropPlan::Seam(clip, next.unwrap())
 			} else {
+				DropPlan::Edge(clip, start_edge)
+			};
+			(plan, half)
+		};
+		let placed = match plan {
+			DropPlan::Seam(out_clip, in_clip) => {
+				graphops::add_transition_at_seam(&project, out_clip, in_clip, half)
+			}
+			DropPlan::Edge(clip, start_edge) => {
 				graphops::add_transition_at_edge(&project, clip, start_edge, half + half)
 			}
 		};
@@ -10862,6 +10881,84 @@ mod tests {
 			assert!(
 				graphops::clip_ids(&guard.graph, track).is_empty(),
 				"the undo removes the dropped clip"
+			);
+		}
+		oak_undo::global::clear().unwrap();
+	}
+
+	/// Dropping a transition near a clip edge snaps to it. The time base
+	/// comes from the SEQUENCE (tracks carry no video params — regression
+	/// coverage for the drop failing with "the track has no frame rate"),
+	/// and a head-edge drop with no previous clip lands a single-sided
+	/// transition wired into the clip only.
+	#[gpui::test]
+	async fn engine_drops_a_transition_at_a_clip_edge(cx: &mut gpui::TestAppContext) {
+		let _media = media_lock();
+		let engine = cx.update(|cx| cx.new(|cx| RealEngine::create(cx)));
+		cx.update(|app| engine.update(app, |engine, cx| engine.new_project(cx)));
+		let seq = cx.update(|app| {
+			engine.update(app, |engine, cx| {
+				engine
+					.create_sequence_with_params(
+						"Transition Drop".to_string(),
+						VideoFormat {
+							width: 1920,
+							height: 1080,
+							rate: FrameRate::new(30000, 1001),
+						},
+						false,
+						cx,
+					)
+					.expect("create sequence")
+			})
+		});
+		let project = cx.read(|app| engine.read(app).project.clone().expect("project"));
+
+		// A clip on the track to drop against (the generator drop is the
+		// shortest path to a clip with a real range).
+		cx.update(|app| {
+			engine.update(app, |engine, cx| {
+				engine
+					.drop_generator_clip(
+						"org.olivevideoeditor.Olive.colorbars",
+						0,
+						Frame(0),
+						cx,
+					)
+					.expect("drop generator clip")
+			})
+		});
+
+		// Exactly on the clip's head edge, no previous clip: a single-sided
+		// head transition.
+		cx.update(|app| {
+			engine.update(app, |engine, cx| {
+				engine
+					.drop_transition_at(
+						"org.olivevideoeditor.Olive.transitionfx",
+						0,
+						Frame(0),
+						cx,
+					)
+					.expect("drop transition at the clip head")
+			})
+		});
+
+		let seq_node = graphops::id_of(seq).expect("sequence node");
+		let target_row = cx.read(|app| engine.read(app).tracks[0].track_index);
+		{
+			let guard = graphops::lock(&project);
+			let track = graphops::track_ids(&guard.graph, seq_node, TrackType::Video)[target_row];
+			let clips = graphops::clip_ids(&guard.graph, track);
+			assert_eq!(clips.len(), 1, "exactly one clip on the track: {clips:?}");
+			let transition = graphops::transition_of_clip(&guard.graph, clips[0], true)
+				.expect("a single-sided transition sits on the clip's head edge");
+			assert_eq!(
+				guard
+					.graph
+					.connected_output(transition, oak_node::block::transition_input::OUT_BLOCK, -1),
+				None,
+				"a head transition wires no outgoing clip"
 			);
 		}
 		oak_undo::global::clear().unwrap();
