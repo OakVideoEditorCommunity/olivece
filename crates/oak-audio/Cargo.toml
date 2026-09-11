@@ -16,7 +16,7 @@ oak-codec = { path = "../oak-codec" }
 # ffmpeg_bridge library existed only to absorb FFmpeg API churn; the Rust
 # crate calls ffmpeg-next directly (same as oakcodec). The oak-ffmpeg-link
 # dependency above emits the transitive link flags of the static FFmpeg.
-ffmpeg-next = "8"
+ffmpeg-next = "9"
 
 # ASIO is intentionally not enabled: the asio-sys crate needs the proprietary
 # Steinberg ASIO SDK at link time, which CI and most dev machines do not have.
