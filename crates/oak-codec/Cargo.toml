@@ -25,6 +25,6 @@ oak-core = { path = "../oak-core" }
 # release/<crate-version>, and every such pairing is broken upstream
 # (9.0.0 -> FFmpeg 9.0 removed AVCodec fields; 8.1.0 -> FFmpeg 8.1 added
 # enum variants; 8.0.0 -> FFmpeg 8.0 renamed FF_PROFILE_*).
-ffmpeg-next = { version = "9.0", features = ["static"] }
+ffmpeg-next = { version = "8", features = ["static"] }
 # `std::error::Error` impls for the crate-internal error enum.
 thiserror = "2"

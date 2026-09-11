@@ -46,7 +46,7 @@
 	"overrides": [
 		{
 			"name": "ffmpeg",
-			"version": "9.0.1#1"
+			"version": "8.1.2#3"
 		}
 	]
 }
