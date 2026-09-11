@@ -102,7 +102,7 @@ jobs:
       # ------------------------------------------------------------------
       - name: Bootstrap vcpkg
         run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git .cache/vcpkg
+          git clone https://github.com/microsoft/vcpkg.git .cache/vcpkg
           .cache/vcpkg/bootstrap-vcpkg.sh -disableMetrics
           echo "$PWD/.cache/vcpkg" >> "$GITHUB_PATH"
           echo "VCPKG_ROOT=$PWD/.cache/vcpkg" >> "$GITHUB_ENV"
@@ -286,7 +286,7 @@ jobs:
       # ------------------------------------------------------------------
       - name: Bootstrap vcpkg
         run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git .cache/vcpkg
+          git clone https://github.com/microsoft/vcpkg.git .cache/vcpkg
           .cache/vcpkg/bootstrap-vcpkg.sh -disableMetrics
           echo "$PWD/.cache/vcpkg" >> "$GITHUB_PATH"
           echo "VCPKG_ROOT=$PWD/.cache/vcpkg" >> "$GITHUB_ENV"
@@ -392,7 +392,7 @@ jobs:
       # a recent vcpkg-tool, and every OS job must behave alike.
       - name: Bootstrap vcpkg
         run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:GITHUB_WORKSPACE\.cache\vcpkg"
+          git clone https://github.com/microsoft/vcpkg.git "$env:GITHUB_WORKSPACE\.cache\vcpkg"
           & "$env:GITHUB_WORKSPACE\.cache\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "$env:GITHUB_WORKSPACE\.cache\vcpkg" >> $env:GITHUB_PATH
