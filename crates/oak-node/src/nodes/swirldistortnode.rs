@@ -76,7 +76,7 @@ void main(void) {
     tc = vec2(dot(tc, vec2(c, -s)), dot(tc, vec2(s, c)));
   }
   tc += center;
-  vec2 uv = tc / resolution_in;
+  uv = tc / resolution_in;
   // A swirl displacing content past the frame edge leaves transparent
   // pixels, not the clamped edge pixels.
   vec4 col = texture(tex_in, uv);
