@@ -36,7 +36,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::effect_stack::{EffectId, EffectStackDataSource, EffectStackEvent};
-use gpui::node_graph::{NodeGraphDataSource, NodeGraphEvent};
+use gpui::node_graph::{NodeGraphDataSource, NodeGraphEvent, NodeId};
 use gpui::timeline::{
 	ClipId, Frame, FrameRate, TimelineDataSource, TimelineEvent, TrackData, TrackKind,
 };
@@ -375,6 +375,15 @@ pub trait AppEngine:
 	/// stack target and card highlight from it. Default: none.
 	fn selected_graph_node(&self) -> Option<u64> {
 		None
+	}
+
+	/// The graph nodes the UI must not let the user edit: the virtual
+	/// endpoints (`GraphInput` / `GraphOutput`), which every project graph
+	/// carries as fixed furniture. The node-editor panel hides these nodes'
+	/// edit entries and drops delete requests naming them, so the model
+	/// never sees that edit. Default: none (engines without endpoints).
+	fn protected_graph_nodes(&self) -> Vec<NodeId> {
+		Vec::new()
 	}
 
 	/// The effect types the user can add to the selected clip's chain — the

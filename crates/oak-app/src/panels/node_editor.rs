@@ -30,8 +30,8 @@ use std::collections::BTreeSet;
 use gpui::colors::DefaultColors;
 use gpui::dock::{DockPanel, PanelEvent};
 use gpui::node_graph::{
-	NodeData, NodeElement, NodeGraphEvent, NodeGraphView, NodeId, NodeVisualState, MAX_ZOOM,
-	MIN_ZOOM,
+	EdgeData, EdgeId, NodeData, NodeElement, NodeGraphEvent, NodeGraphView, NodeId,
+	NodeVisualState, MAX_ZOOM, MIN_ZOOM,
 };
 use gpui::{
 	div, point, prelude::*, px, AnyElement, App, Bounds, ClickEvent, Context, Entity,
@@ -79,10 +79,15 @@ impl<E: AppEngine> NodeEditorPanel<E> {
 	pub fn new(engine: Entity<E>, window: &mut Window, cx: &mut Context<Self>) -> Self {
 		let graph = cx.new(|cx| NodeGraphView::new(engine.clone(), window, cx));
 		// The "edits are requests" loop: every graph gesture goes to the
-		// engine, which applies it to its model and notifies.
+		// engine, which applies it to its model and notifies. The one
+		// exception is the fixed endpoint pair, which the panel filters out
+		// of delete requests before the engine can see them.
 		cx.subscribe(&graph, |this, _graph, event: &NodeGraphEvent, cx| {
+			let Some(event) = this.filter_delete_request(event, cx) else {
+				return;
+			};
 			this.engine
-				.update(cx, |engine, cx| engine.apply_node_graph_event(event, cx));
+				.update(cx, |engine, cx| engine.apply_node_graph_event(&event, cx));
 		})
 		.detach();
 		// The panel-side half of the graph events: the context menus.
@@ -99,8 +104,9 @@ impl<E: AppEngine> NodeEditorPanel<E> {
 						this.context_menu.show(window_position, menu, cx);
 					}
 				}
-				NodeGraphEvent::NodeContextMenuRequested { position, .. } => {
-					this.context_menu.show(*position, node_menu(), cx);
+				NodeGraphEvent::NodeContextMenuRequested { node, position } => {
+					let protected = this.engine.read(cx).protected_graph_nodes().contains(node);
+					this.context_menu.show(*position, node_menu(protected), cx);
 				}
 				_ => {}
 			},
@@ -133,6 +139,53 @@ impl<E: AppEngine> NodeEditorPanel<E> {
 		// the next engine notify).
 		panel.sync_graph_selection(cx);
 		panel
+	}
+
+	/// The UI-layer guard for the fixed endpoint pair: a graph gesture that
+	/// names a protected node (the `GraphInput` / `GraphOutput` cards the
+	/// engine reports) never reaches the engine's model. Only delete requests
+	/// can name nodes today, so every other event passes through untouched; a
+	/// delete request that names an endpoint is narrowed to the rest of the
+	/// selection — the endpoints stay, and so do the wires hanging off them.
+	/// A request left with nothing to delete is dropped whole (`None`).
+	fn filter_delete_request(&self, event: &NodeGraphEvent, cx: &App) -> Option<NodeGraphEvent> {
+		let NodeGraphEvent::DeleteRequested { nodes, edges } = event else {
+			return Some(event.clone());
+		};
+		let protected = self.engine.read(cx).protected_graph_nodes();
+		if protected.is_empty() || !nodes.iter().any(|node| protected.contains(node)) {
+			return Some(event.clone());
+		}
+		let kept_nodes: Vec<NodeId> = nodes
+			.iter()
+			.filter(|node| !protected.contains(node))
+			.copied()
+			.collect();
+		// The widget packs every edge incident to a deleted node into the
+		// request; an edge that touches a surviving endpoint would be
+		// stranded, so it stays with its node.
+		let stranded: Vec<EdgeId> = self
+			.engine
+			.read(cx)
+			.edges()
+			.iter()
+			.filter(|edge| {
+				protected.contains(&edge.from_node()) || protected.contains(&edge.to_node())
+			})
+			.map(|edge| edge.id())
+			.collect();
+		let kept_edges: Vec<EdgeId> = edges
+			.iter()
+			.filter(|edge| !stranded.contains(edge))
+			.copied()
+			.collect();
+		if kept_nodes.is_empty() && kept_edges.is_empty() {
+			return None;
+		}
+		Some(NodeGraphEvent::DeleteRequested {
+			nodes: kept_nodes,
+			edges: kept_edges,
+		})
 	}
 
 	/// Pushes the engine's selection mirror into the graph widget: the
@@ -440,11 +493,17 @@ const LOCAL_ADD_NODE_BASE: usize = 2420;
 
 /// The node context menu: the shared edit section, grouping, color labels,
 /// viewer/parameter-editor reveals and properties (the C++ node branch).
-pub(crate) fn node_menu() -> Menu {
+/// With `protected` (the fixed endpoint pair) the whole edit section is left
+/// out: the endpoints cannot be cut, copied, pasted over, duplicated,
+/// renamed or deleted, so none of those entries are offered.
+pub(crate) fn node_menu(protected: bool) -> Menu {
 	use crate::i18n::tr;
-	let mut items = menu::edit_section(false);
-	if let Some(last) = items.last_mut() {
-		last.separator_after = true;
+	let mut items = Vec::new();
+	if !protected {
+		items = menu::edit_section(false);
+		if let Some(last) = items.last_mut() {
+			last.separator_after = true;
+		}
 	}
 	items.push(MenuItem::new(LOCAL_GROUP, tr("node.context.group")));
 	items.push(MenuItem::new(LOCAL_UNGROUP, tr("node.context.ungroup")));
@@ -516,8 +575,11 @@ pub(crate) fn background_menu(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::actions::ActionId;
+	use crate::oakui::nodegraph::GraphEndpoint;
 	use crate::oakui::MockEngine;
 	use gpui::effect_stack::{EffectId, EffectStackEvent};
+	use gpui::node_graph::{NodeGraphDataSource, PortData, PortId};
 	use gpui::{size, TestAppContext, VisualTestContext};
 
 	/// Builds the panel in a window and returns a `VisualTestContext` for
@@ -578,7 +640,7 @@ mod tests {
 		// en-US under the shared language lock.
 		let _guard = crate::i18n::lang_test_lock().lock().unwrap_or_else(|e| e.into_inner());
 		crate::i18n::set_language_code("en-US");
-		let menu = node_menu();
+		let menu = node_menu(false);
 		let ids: Vec<usize> = menu.items.iter().map(|item| item.id).collect();
 		assert!(ids.contains(&LOCAL_GROUP));
 		assert!(ids.contains(&LOCAL_UNGROUP));
@@ -709,5 +771,169 @@ mod tests {
 			selection.contains(&NodeId(2)),
 			"the card click highlights the matching node (got {selection:?})"
 		);
+	}
+
+	/// The demo graph carries the fixed endpoint pair as real graph data: two
+	/// endpoint-marked cards, the input one with the output port the walk
+	/// pulls from, the output one a pure sink. Both are reported as protected,
+	/// and the connection rules follow the ports — the input's `feed_in` takes
+	/// a wire, its output starts one, and the sink can never source a wire
+	/// (it has no output port to drag from).
+	#[gpui::test]
+	async fn demo_endpoints_are_protected_and_marked(cx: &mut TestAppContext) {
+		let (cx, panel) = panel_window(cx);
+
+		let protected = cx.read(|app| panel.read(app).engine.read(app).protected_graph_nodes());
+		assert_eq!(protected.len(), 2, "the endpoint pair is protected");
+
+		let nodes = cx.read(|app| panel.read(app).engine.read(app).nodes());
+		assert_eq!(
+			nodes
+				.iter()
+				.filter(|node| node.endpoint().is_some())
+				.count(),
+			2,
+			"exactly the fixed pair is marked as endpoints"
+		);
+		let input = nodes
+			.iter()
+			.find(|node| node.endpoint() == Some(GraphEndpoint::Input))
+			.expect("the demo graph has a graph-input endpoint");
+		let output = nodes
+			.iter()
+			.find(|node| node.endpoint() == Some(GraphEndpoint::Output))
+			.expect("the demo graph has a graph-output endpoint");
+		assert!(protected.contains(&input.id()));
+		assert!(protected.contains(&output.id()));
+		assert_eq!((input.inputs().len(), input.outputs().len()), (1, 1));
+		assert_eq!((output.inputs().len(), output.outputs().len()), (1, 0));
+
+		let can_connect = |from: PortId, to: PortId| {
+			cx.read(|app| panel.read(app).engine.read(app).can_connect(from, to))
+		};
+		let feed_in = input.inputs()[0].id();
+		let tex_out = input.outputs()[0].id();
+		let tex_in = output.inputs()[0].id();
+		assert!(can_connect(PortId(42), feed_in), "feed_in accepts a wire");
+		assert!(
+			can_connect(tex_out, PortId(22)),
+			"the input endpoint sources a wire"
+		);
+		assert!(
+			!can_connect(tex_in, PortId(42)),
+			"the sink has no output port, so no wire can leave it"
+		);
+	}
+
+	/// The UI-layer guard over the endpoint pair: a delete request that names
+	/// an endpoint is narrowed by the panel before the engine sees it — the
+	/// endpoints (and the wires hanging off them) survive, the rest of the
+	/// request still lands, and a request left with nothing to delete is
+	/// dropped whole. The last step goes behind the panel to show the model
+	/// itself has no protection: the panel is the only thing standing between
+	/// a Delete/Backspace gesture and the pair.
+	#[gpui::test]
+	async fn delete_requests_cannot_remove_endpoints(cx: &mut TestAppContext) {
+		let (cx, panel) = panel_window(cx);
+
+		// The widget's Delete/Backspace path: the request is emitted by the
+		// graph entity (a node selection plus the incident edges it packs),
+		// exactly as the widget emits it.
+		let emit_delete = |cx: &mut VisualTestContext, nodes: Vec<NodeId>, edges: Vec<EdgeId>| {
+			let graph = cx.read(|app| panel.read(app).graph.clone());
+			graph.update(cx, |_graph, cx| {
+				cx.emit(NodeGraphEvent::DeleteRequested { nodes, edges })
+			});
+			cx.run_until_parked();
+		};
+		let counts = |cx: &VisualTestContext| {
+			cx.read(|app| {
+				let engine = panel.read(app).engine.read(app);
+				(engine.nodes().len(), engine.edges().len())
+			})
+		};
+		assert_eq!(counts(cx), (8, 6));
+
+		// A mixed request: the ordinary node goes, the endpoint stays — and so
+		// does the wire it carries, even though the request named it.
+		emit_delete(cx, vec![NodeId(2), NodeId(6)], vec![EdgeId(6)]);
+		assert_eq!(counts(cx), (7, 4));
+		let input_survived = cx.read(|app| {
+			panel
+				.read(app)
+				.engine
+				.read(app)
+				.nodes()
+				.iter()
+				.any(|node| node.endpoint() == Some(GraphEndpoint::Input))
+		});
+		assert!(input_survived, "the endpoint survives the mixed request");
+
+		// A request naming only the pair is dropped whole: nothing changes.
+		emit_delete(cx, vec![NodeId(6), NodeId(7)], Vec::new());
+		assert_eq!(counts(cx), (7, 4));
+
+		// A plain edge deletion names no node and passes through untouched.
+		emit_delete(cx, Vec::new(), vec![EdgeId(4)]);
+		assert_eq!(counts(cx), (7, 3));
+
+		// Behind the panel, the mock model deletes an endpoint happily, so the
+		// survival above is the panel's doing.
+		cx.update(|_window, app| {
+			let engine = panel.read(app).engine.clone();
+			engine.update(app, |engine, cx| {
+				engine.apply_node_graph_event(
+					&NodeGraphEvent::DeleteRequested {
+						nodes: vec![NodeId(6)],
+						edges: Vec::new(),
+					},
+					cx,
+				);
+			});
+		});
+		cx.run_until_parked();
+		assert_eq!(counts(cx), (6, 2));
+	}
+
+	/// The endpoint cards get the protected node menu: the whole edit section
+	/// (undo/redo, cut/copy/paste, duplicate, rename, delete) is left out,
+	/// while the grouping, reveal and properties entries stay. The ordinary
+	/// node menu keeps its edit entries.
+	#[test]
+	fn protected_node_menu_has_no_edit_section() {
+		let ids = |menu: &Menu| -> Vec<usize> { menu.items.iter().map(|item| item.id).collect() };
+
+		let protected = node_menu(true);
+		let protected_ids = ids(&protected);
+		let edit_items = [
+			ActionId::Undo,
+			ActionId::Redo,
+			ActionId::Cut,
+			ActionId::Copy,
+			ActionId::Paste,
+			ActionId::PasteInsert,
+			ActionId::Duplicate,
+			ActionId::Rename,
+			ActionId::Delete,
+		];
+		for action in edit_items {
+			assert!(
+				!protected_ids.contains(&action.menu_id()),
+				"the endpoint menu hides {action:?}"
+			);
+		}
+		assert!(protected_ids.contains(&LOCAL_GROUP));
+		assert!(protected_ids.contains(&LOCAL_UNGROUP));
+		assert!(protected_ids.contains(&LOCAL_OPEN_IN_VIEWER));
+		assert!(protected_ids.contains(&LOCAL_SHOW_IN_PARAM_EDITOR));
+		assert!(protected_ids.contains(&LOCAL_NODE_PROPERTIES));
+
+		let ordinary_ids = ids(&node_menu(false));
+		for action in edit_items {
+			assert!(
+				ordinary_ids.contains(&action.menu_id()),
+				"an ordinary node menu offers {action:?}"
+			);
+		}
 	}
 }

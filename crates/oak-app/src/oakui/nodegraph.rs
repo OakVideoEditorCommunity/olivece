@@ -140,7 +140,8 @@ pub struct RealNode {
 	pub position: Point<Pixels>,
 	/// Input ports (top to bottom).
 	pub inputs: Vec<RealPort>,
-	/// The single implicit output port.
+	/// The implicit output port (`out`); empty on the output endpoint,
+	/// which is a pure sink.
 	pub outputs: Vec<RealPort>,
 	/// Category accent.
 	pub header_color: Option<Hsla>,
@@ -148,6 +149,9 @@ pub struct RealNode {
 	pub collapsed: bool,
 	/// Enabled state.
 	pub enabled: bool,
+	/// The virtual endpoint role, when this card is one of the fixed
+	/// endpoint pair (`None` for ordinary effect / media cards).
+	pub endpoint: Option<GraphEndpoint>,
 }
 
 impl NodeData for RealNode {
@@ -278,6 +282,41 @@ fn is_displayed(type_id: &str) -> bool {
 		type_id,
 		TYPE_ID_TRACK | TYPE_ID_TRACK_LIST | TYPE_ID_GAP_BLOCK | TYPE_ID_TRANSITION_BLOCK
 	)
+}
+
+/// The virtual endpoint pair every project graph carries: `GraphInput`
+/// (the evaluation walk's root) and `GraphOutput` (where the frame is
+/// read). Endpoints are shown as fixed cards — the panel hides their edit
+/// entries and filters delete requests naming them, and the graph model
+/// itself refuses to remove or copy the pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphEndpoint {
+	/// `GraphInput`: data enters through `feed_in`, leaves through `tex_out`.
+	Input,
+	/// `GraphOutput`: every branch converges on `tex_in`; a pure sink.
+	Output,
+}
+
+/// Whether `type_id` names one of the virtual endpoints, and which.
+pub fn endpoint_of_type_id(type_id: &str) -> Option<GraphEndpoint> {
+	use oak_node::nodes::graphendpoints::{GRAPH_INPUT_TYPE_ID, GRAPH_OUTPUT_TYPE_ID};
+	if type_id == GRAPH_INPUT_TYPE_ID {
+		Some(GraphEndpoint::Input)
+	} else if type_id == GRAPH_OUTPUT_TYPE_ID {
+		Some(GraphEndpoint::Output)
+	} else {
+		None
+	}
+}
+
+/// The fixed header accent of an endpoint card: the pair reads as
+/// structural furniture, not as one more effect (deliberately outside the
+/// [`node_color`] palette — and the demo graph's hand-picked hues).
+fn endpoint_color(endpoint: GraphEndpoint) -> Hsla {
+	match endpoint {
+		GraphEndpoint::Input => hsla(0.40, 0.55, 0.35, 1.0),
+		GraphEndpoint::Output => hsla(0.85, 0.65, 0.45, 1.0),
+	}
 }
 
 /// A displayed node: its domain id plus its type id.
@@ -429,6 +468,7 @@ fn build_graph_impl(
 				label
 			}
 		};
+		let endpoint = endpoint_of_type_id(&typed.type_id);
 
 		// Inputs: only stream inputs (texture / samples) become ports — an
 		// OFX plugin declares every PARAMETER as an input too, and those
@@ -476,16 +516,22 @@ fn build_graph_impl(
 			});
 		}
 
-		// The single implicit output.
-		let out_count = g.output_connections(typed.id).len();
-		let outputs = vec![RealPort {
-			id: port_id(ident, PortKind::Output, 0),
-			kind: PortKind::Output,
-			input_id: SharedString::new_static(""),
-			label: SharedString::new_static("out"),
-			data_type: out_type(),
-			connected: out_count > 0,
-		}];
+		// The implicit output port. The output endpoint is a sink — nothing
+		// is wired out of it, so it gets no port; the input endpoint keeps
+		// its `tex_out` (the walk's root output).
+		let outputs = if endpoint == Some(GraphEndpoint::Output) {
+			Vec::new()
+		} else {
+			let out_count = g.output_connections(typed.id).len();
+			vec![RealPort {
+				id: port_id(ident, PortKind::Output, 0),
+				kind: PortKind::Output,
+				input_id: SharedString::new_static(""),
+				label: SharedString::new_static("out"),
+				data_type: out_type(),
+				connected: out_count > 0,
+			}]
+		};
 
 		let position = context_position(g, seq, typed.id);
 		built.push((
@@ -496,9 +542,13 @@ fn build_graph_impl(
 				position,
 				inputs,
 				outputs,
-				header_color: Some(node_color(ident)),
+				header_color: Some(match endpoint {
+					Some(endpoint) => endpoint_color(endpoint),
+					None => node_color(ident),
+				}),
 				collapsed: false,
 				enabled: true,
+				endpoint,
 			},
 		));
 	}
@@ -919,6 +969,52 @@ mod tests {
 		assert!(
 			full_edges.iter().any(|e| is_output_wire(e.id)),
 			"the full graph synthesizes the clip→output wire"
+		);
+
+		oak_undo::global::clear().unwrap();
+	}
+
+	/// Every project graph carries the virtual endpoint pair: the full view
+	/// shows both as marked cards (the output endpoint as a pure sink), and
+	/// a clip's context chain shows neither.
+	#[test]
+	fn endpoints_build_as_marked_cards() {
+		let _g = stack_lock();
+		oak_undo::global::clear().unwrap();
+		let (project, seq, clip, _, _) = project_with_chained_clip();
+
+		let (nodes, _edges) = build_graph(&project, seq);
+		assert_eq!(
+			nodes.iter().filter(|n| n.endpoint.is_some()).count(),
+			2,
+			"exactly one endpoint pair is displayed"
+		);
+		let input = nodes
+			.iter()
+			.find(|n| n.endpoint == Some(GraphEndpoint::Input))
+			.expect("the input endpoint card");
+		let output = nodes
+			.iter()
+			.find(|n| n.endpoint == Some(GraphEndpoint::Output))
+			.expect("the output endpoint card");
+		assert!(
+			!input.outputs.is_empty(),
+			"the input endpoint keeps its `tex_out`"
+		);
+		assert!(
+			output.outputs.is_empty(),
+			"the output endpoint is a sink and has no output port"
+		);
+		assert!(
+			!input.title.is_empty() && !output.title.is_empty(),
+			"endpoint cards carry their behavior name as the title"
+		);
+
+		// The per-clip chain view contains no endpoint cards.
+		let (chain, _) = build_graph_for_clip(&project, seq, clip.identity());
+		assert!(
+			chain.iter().all(|n| n.endpoint.is_none()),
+			"a clip's context chain contains no endpoints"
 		);
 
 		oak_undo::global::clear().unwrap();

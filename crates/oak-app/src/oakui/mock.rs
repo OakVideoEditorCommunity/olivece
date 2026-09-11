@@ -71,6 +71,7 @@ use super::engine::{
     Project, ScopeData, Sequence, VideoFormat, WizardFootage, WizardSyncOffset,
 };
 use super::graphops;
+use super::nodegraph::GraphEndpoint;
 use super::transport::TransportState;
 
 /// The demo sequence length: 00:04:18:18 at 25 fps.
@@ -393,6 +394,16 @@ pub struct MockNode {
 	header_color: Option<Hsla>,
 	enabled: bool,
 	collapsed: bool,
+	/// The virtual endpoint role, when this card is one of the demo graph's
+	/// fixed endpoint pair (`None` for ordinary nodes).
+	endpoint: Option<GraphEndpoint>,
+}
+
+impl MockNode {
+	/// The virtual endpoint role of this card, if it is an endpoint.
+	pub fn endpoint(&self) -> Option<GraphEndpoint> {
+		self.endpoint
+	}
 }
 
 impl NodeData for MockNode {
@@ -627,7 +638,8 @@ impl MockEngine {
 		            position: (f32, f32),
 		            color: f32,
 		            inputs: Vec<MockPort>,
-		            outputs: Vec<MockPort>| MockNode {
+		            outputs: Vec<MockPort>,
+		            endpoint: Option<GraphEndpoint>| MockNode {
 			id: NodeId(id),
 			title: title.into(),
 			position: point(px(position.0), px(position.1)),
@@ -636,6 +648,7 @@ impl MockEngine {
 			header_color: Some(node_color(color)),
 			enabled: true,
 			collapsed: false,
+			endpoint,
 		};
 		let nodes = vec![
 			node(
@@ -645,6 +658,7 @@ impl MockEngine {
 				0.55,
 				vec![],
 				vec![port(1, PortKind::Output, "video", &video_type)],
+				None,
 			),
 			node(
 				1,
@@ -656,6 +670,7 @@ impl MockEngine {
 					port(3, PortKind::Output, "video", &video_type),
 					port(4, PortKind::Output, "audio", &audio_type),
 				],
+				None,
 			),
 			node(
 				2,
@@ -667,6 +682,7 @@ impl MockEngine {
 					port(22, PortKind::Input, "mask", &video_type),
 				],
 				vec![port(21, PortKind::Output, "out", &video_type)],
+				None,
 			),
 			node(
 				3,
@@ -675,6 +691,7 @@ impl MockEngine {
 				0.78,
 				vec![port(30, PortKind::Input, "in", &video_type)],
 				vec![port(31, PortKind::Output, "out", &video_type)],
+				None,
 			),
 			node(
 				4,
@@ -686,6 +703,7 @@ impl MockEngine {
 					port(41, PortKind::Input, "B", &video_type),
 				],
 				vec![port(42, PortKind::Output, "out", &video_type)],
+				None,
 			),
 			node(
 				5,
@@ -694,6 +712,40 @@ impl MockEngine {
 				0.0,
 				vec![port(50, PortKind::Input, "in", &video_type)],
 				vec![],
+				None,
+			),
+			// The fixed virtual endpoint pair every project graph carries:
+			// the input endpoint feeds the walk, the output endpoint is the
+			// frame's read-out (a sink — no output port). Their hues match
+			// `nodegraph::endpoint_color` (0.40 / 0.85) so demo endpoints carry
+			// the same fixed accent as real engine ones.
+			node(
+				6,
+				crate::i18n::tr("node.graphinput.name"),
+				(1160.0, 40.0),
+				0.40,
+				vec![port(
+					60,
+					PortKind::Input,
+					crate::i18n::tr("node.graphinput.input.feed_in"),
+					&video_type,
+				)],
+				vec![port(61, PortKind::Output, "out", &video_type)],
+				Some(GraphEndpoint::Input),
+			),
+			node(
+				7,
+				crate::i18n::tr("node.graphoutput.name"),
+				(1160.0, 230.0),
+				0.85,
+				vec![port(
+					62,
+					PortKind::Input,
+					crate::i18n::tr("node.graphoutput.input.tex_in"),
+					&video_type,
+				)],
+				vec![],
+				Some(GraphEndpoint::Output),
 			),
 		];
 		let edge = |id: u64, from_node: u64, from_port: u64, to_node: u64, to_port: u64| MockEdge {
@@ -709,6 +761,9 @@ impl MockEngine {
 			edge(3, 2, 21, 4, 40),
 			edge(4, 3, 31, 4, 41),
 			edge(5, 4, 42, 5, 50),
+			// The endpoint pair's default wire: input endpoint → output
+			// endpoint (the graph's initial `feed_in → tex_in` link).
+			edge(6, 6, 61, 7, 62),
 		];
 
 		let mut this = Self {
@@ -812,7 +867,7 @@ impl MockEngine {
 			meter_phase: 0,
 			nodes,
 			edges,
-			next_edge_id: 6,
+			next_edge_id: 7,
 			next_node_id: 100,
 			next_port_id: 1000,
 			node_selection: BTreeSet::new(),
@@ -1420,6 +1475,14 @@ impl AppEngine for MockEngine {
 		Some(node.0)
 	}
 
+	fn protected_graph_nodes(&self) -> Vec<NodeId> {
+		self.nodes
+			.iter()
+			.filter(|node| node.endpoint.is_some())
+			.map(|node| node.id)
+			.collect()
+	}
+
 	fn addable_effects(&self) -> Vec<crate::oakui::engine::EffectEntry> {
 		// The demo list is the real factory's effect table (built-ins plus
 		// any registered OpenFX plugins), so the effect library shows the
@@ -1655,6 +1718,7 @@ impl AppEngine for MockEngine {
 			header_color: None,
 			enabled: true,
 			collapsed: false,
+			endpoint: None,
 		};
 		self.next_node_id += 1;
 		self.nodes.push(node);
@@ -3602,15 +3666,19 @@ mod tests {
 	}
 
 	#[gpui::test]
-	async fn demo_graph_has_six_nodes_and_five_edges(cx: &mut TestAppContext) {
+	async fn demo_graph_has_eight_nodes_and_six_edges(cx: &mut TestAppContext) {
 		cx.update(|app| {
 			let engine = demo_engine(app);
 			let engine = engine.read(app);
 			let nodes = engine.nodes();
 			let edges = engine.edges();
 
-			assert_eq!(nodes.len(), 6, "media, transform, blur, mixer, viewer");
-			assert_eq!(edges.len(), 5);
+			assert_eq!(
+				nodes.len(),
+				8,
+				"media, transform, blur, mixer, viewer, and the endpoint pair"
+			);
+			assert_eq!(edges.len(), 6);
 
 			// The chain ends at the viewer node, fed by the mixer.
 			let viewer = nodes
@@ -3718,7 +3786,7 @@ mod tests {
 				);
 			});
 			let engine_read = engine.read(app);
-			assert_eq!(engine_read.edges().len(), 6);
+			assert_eq!(engine_read.edges().len(), 7);
 			assert!(engine_read
 				.port(PortId(22))
 				.is_some_and(|p| p.is_connected()));
@@ -3734,7 +3802,7 @@ mod tests {
 					cx,
 				);
 			});
-			assert_eq!(engine.read(app).edges().len(), 5);
+			assert_eq!(engine.read(app).edges().len(), 6);
 			assert!(
 				!engine
 					.read(app)
@@ -3754,7 +3822,7 @@ mod tests {
 				);
 			});
 			let engine_read = engine.read(app);
-			assert_eq!(engine_read.nodes().len(), 5);
+			assert_eq!(engine_read.nodes().len(), 7);
 			assert!(
 				!engine_read
 					.edges()

@@ -4335,6 +4335,22 @@ impl AppEngine for RealEngine {
 		self.selected_graph_node
 	}
 
+	/// The open project graph's virtual endpoint pair, if any: the node
+	/// editor must not let the user delete, copy or rename them.
+	fn protected_graph_nodes(&self) -> Vec<gpui::node_graph::NodeId> {
+		let Some(project) = self.project.clone() else {
+			return Vec::new();
+		};
+		let guard = graphops::lock(&project);
+		match guard.graph.endpoints() {
+			Some((input, output)) => vec![
+				gpui::node_graph::NodeId(input.identity()),
+				gpui::node_graph::NodeId(output.identity()),
+			],
+			None => Vec::new(),
+		}
+	}
+
 	fn addable_effects(&self) -> Vec<crate::oakui::engine::EffectEntry> {
 		super::effectchain::addable_effects()
 	}
