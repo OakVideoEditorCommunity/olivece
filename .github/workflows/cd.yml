@@ -1,4 +1,4 @@
-kiname: CD
+name: CD
 
 on:
   push:
@@ -111,17 +111,17 @@ jobs:
           # main, whose vendored sources build on GCC >= 16).
           bash tooling/ocio-env.sh >> "$GITHUB_ENV"
 
-      # TEMP: cache disabled until the Gitea instance cache is provisioned (Cache cargo artifacts)
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #   shared-key: oak-${{ matrix.distro }}
-      #   cache-on-failure: true
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: oak-${{ matrix.distro }}
+          cache-on-failure: true
 
-      # TEMP: cache disabled until the Gitea instance cache is provisioned (Cache project FFmpeg)
-      #   uses: actions/cache@v4
-      #   with:
-      #   path: .cache/ffmpeg
-      #   key: ffmpeg-${{ matrix.distro }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
+      - name: Cache project FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: .cache/ffmpeg
+          key: ffmpeg-${{ matrix.distro }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
 
       - name: Build project FFmpeg (static, GPL + free codecs + hwaccel)
         run: tooling/ffmpeg/build-ffmpeg.sh
@@ -188,17 +188,17 @@ jobs:
       - name: Configure build environment
         run: bash tooling/ocio-env.sh >> "$GITHUB_ENV"
 
-      # TEMP: cache disabled until the Gitea instance cache is provisioned (Cache cargo artifacts)
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #   shared-key: oak-appimage
-      #   cache-on-failure: true
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: oak-appimage
+          cache-on-failure: true
 
-      # TEMP: cache disabled until the Gitea instance cache is provisioned (Cache project FFmpeg)
-      #   uses: actions/cache@v4
-      #   with:
-      #   path: .cache/ffmpeg
-      #   key: ffmpeg-appimage-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
+      - name: Cache project FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: .cache/ffmpeg
+          key: ffmpeg-appimage-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
 
       - name: Build project FFmpeg (static, GPL + free codecs + hwaccel)
         run: tooling/ffmpeg/build-ffmpeg.sh
@@ -227,7 +227,7 @@ jobs:
 
   macos:
     name: macOS DMG (Apple Silicon)
-    runs-on: warp-macos-15-arm64-6x
+    runs-on: warp-macos-26-arm64-6x
 
     steps:
       - name: Checkout
@@ -254,17 +254,17 @@ jobs:
             echo "PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig/openjpeg"
           } >> "$GITHUB_ENV"
 
-      # TEMP: cache disabled until the Gitea instance cache is provisioned (Cache cargo artifacts)
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #   shared-key: oak-workspace
-      #   cache-on-failure: true
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: oak-workspace
+          cache-on-failure: true
 
-      # TEMP: cache disabled until the Gitea instance cache is provisioned (Cache project FFmpeg)
-      #   uses: actions/cache@v4
-      #   with:
-      #   path: .cache/ffmpeg
-      #   key: ffmpeg-${{ runner.os }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
+      - name: Cache project FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: .cache/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
 
       - name: Build project FFmpeg (static, GPL + free codecs + hwaccel)
         run: |
@@ -376,17 +376,17 @@ jobs:
           # failure.
           echo "OCIO_RS_NO_MSVC_INCLUDES=1" >> "$GITHUB_ENV"
 
-      # TEMP: cache disabled until the Gitea instance cache is provisioned (Cache cargo artifacts)
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #   shared-key: oak-workspace
-      #   cache-on-failure: true
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: oak-workspace
+          cache-on-failure: true
 
-      # TEMP: cache disabled until the Gitea instance cache is provisioned (Cache project FFmpeg)
-      #   uses: actions/cache@v4
-      #   with:
-      #   path: .cache/ffmpeg
-      #   key: ffmpeg-${{ runner.os }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
+      - name: Cache project FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: .cache/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
 
       - name: Build project FFmpeg (static, GPL + free codecs + hwaccel)
         run: |

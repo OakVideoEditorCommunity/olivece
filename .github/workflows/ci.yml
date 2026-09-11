@@ -18,7 +18,7 @@ permissions:
 jobs:
   linux:
     name: Build & test (Linux)
-    runs-on: oak-ubuntu-2404
+    runs-on: warp-ubuntu-latest-x64-8x
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,6 +26,9 @@ jobs:
           # gpui/ is a git submodule; its crates are workspace members of
           # their own repo and build as path dependencies of oakapp.
           submodules: true
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
 
       # ------------------------------------------------------------------
       # System dependencies
@@ -49,18 +52,14 @@ jobs:
       # ------------------------------------------------------------------
       # Build environment
       # ------------------------------------------------------------------
-      # ocio-sys builds a stub bridge unless these are set; the oak-common
-      # ocioutils tests need the real library (see crates/oak-common/.cargo/
-      # config.toml, which only applies to builds run from that directory).
+      # ocio-sys builds a stub bridge unless these are set; the oak-core
+      # ocioutils tests need the real library.
       # tooling/ocio-env.sh: vendored static OCIO (the [patch.crates-io]
       # ocio-sys tracks shaloong/ocio-rs main, whose vendored sources build
       # on GCC >= 16).
       - name: Configure build environment
         run: |
           bash tooling/ocio-env.sh >> "$GITHUB_ENV"
-          echo "RUSTUP_HOME=/opt/rust/rustup" >> "$GITHUB_ENV"
-          echo "CARGO_HOME=/opt/rust/cargo" >> "$GITHUB_ENV"
-          echo "PATH=$PATH:/opt/rust/cargo/bin" >> "$GITHUB_ENV"
           echo "FFMPEG_DIR=.cache/ffmpeg" >> "$GITHUB_ENV"
 
       # ------------------------------------------------------------------
@@ -68,21 +67,21 @@ jobs:
       # ------------------------------------------------------------------
       # Covers the whole target/ dir plus ~/.cargo; shared across branches
       # of the same OS.
-      # TEMP: cache disabled ntil the Gitea instance cache is provisioned (Cache cargo artifacts)
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #   shared-key: oak-workspace
-      #   cache-on-failure: true
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: oak-ci-linux
+          cache-on-failure: true
 
       # The project FFmpeg (release/8.0, static, all free codecs + hwaccel)
       # is built by tooling/ffmpeg/build-ffmpeg.sh — 10-20 min on a cold
       # cache. It does not depend on the Rust toolchain, so key it on the
       # script itself and keep it out of rust-cache.
-      # TEMP: cache disabled until the Gitea instance cache is provisioned (Cache project FFmpeg)
-      #   uses: actions/cache@v4
-      #   with:
-      #   path: .cache/ffmpeg
-      #   key: ffmpeg-${{ runner.os }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
+      - name: Cache project FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: .cache/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
 
       # ------------------------------------------------------------------
       # Project FFmpeg (script + FFMPEG_DIR; see docs/build.md)
@@ -104,8 +103,8 @@ jobs:
       # xvfb + 24-bit screen: the gpui #[gpui::test] tests open real windows
       # and render through wgpu on Mesa's software Vulkan (lavapipe).
       # The watchdog bounds the step: a deadlocked test produces no output
-      # and no failure, so after 1500 s (a green run needs ~4 min) it dumps
-      # every hung process's thread stacks and kills the suite.
+      # and no failure, so after 1800 s it dumps every hung process's
+      # thread stacks and kills the suite.
       - name: Test
         run: |
           sudo apt-get install -y gdb
@@ -116,8 +115,8 @@ jobs:
             # it cannot keep the runner's I/O pipes open after the step
             # ends ("WaitDelay expired before I/O complete" otherwise).
             (
-              sleep 1500
-              echo "::warning::test suite exceeded 1500s; dumping hung-process stacks"
+              sleep 1800
+              echo "::warning::test suite exceeded 1800s; dumping hung-process stacks"
               for p in $(pgrep -f 'target/debug/deps/|target/debug/oak-worker'); do
                 echo "===== thread stacks of pid $p ($(readlink /proc/$p/exe 2>/dev/null)) ====="
                 sudo gdb -batch -ex 'thread apply all bt' -p "$p" || true
@@ -200,10 +199,10 @@ jobs:
 
   windows:
     name: Build & test (Windows)
-    runs-on: oak-windows-2025
+    runs-on: warp-windows-latest-x64-16x
     env:
-      # The runner's msys2 shell starts as the base MSYS environment; the
-      # build needs the UCRT64 one (mingw-w64-ucrt-x86_64-* toolchain).
+      # The build needs the UCRT64 environment (mingw-w64-ucrt-x86_64-*
+      # toolchain), not the base MSYS one.
       MSYSTEM: UCRT64
     defaults:
       run:
@@ -215,13 +214,25 @@ jobs:
           # gpui/ is a git submodule; its crates are workspace members of
           # their own repo and build as path dependencies of oakapp.
           submodules: true
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          # MSYS2's own Rust targets x86_64-pc-windows-gnu by default —
+          # the Windows build is GNU-target (the MSVC linker rejects the
+          # Unix-style link args the build scripts emit).
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-rust
+
       # ------------------------------------------------------------------
       # System dependencies
       # ------------------------------------------------------------------
       - name: Install system dependencies
         run: |
-          cd "$GITHUB_WORKSPACE"
-          export PATH="/ucrt64/bin:$PATH"
           bash ./tooling/install-deps.sh
           pacman -S --needed --noconfirm \
             mingw-w64-ucrt-x86_64-cmake \
@@ -238,8 +249,6 @@ jobs:
       # Dynamic here — the CD packages the DLLs next to the binaries.
       - name: Configure build environment
         run: |
-          cd "$GITHUB_WORKSPACE"
-          export PATH="/ucrt64/bin:$PATH"
           # System OCIO (MSYS2, the exact 2.5.2 the bridge targets);
           # tooling/ocio-env.sh links it STATICALLY when the package ships
           # libOpenColorIO.a, dynamically otherwise.
@@ -261,29 +270,27 @@ jobs:
       # ------------------------------------------------------------------
       # Covers the whole target/ dir plus ~/.cargo; shared across branches
       # of the same OS.
-      # TEMP: cache disabled until the Gitea instance cache is provisioned (Cache cargo artifacts)
-      #   uses: Swatinem/rust-cache@v2
-      #   with:
-      #   shared-key: oak-workspace
-      #   cache-on-failure: true
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: oak-ci-windows
+          cache-on-failure: true
 
       # The project FFmpeg (release/8.0, static, all free codecs + hwaccel)
       # is built by tooling/ffmpeg/build-ffmpeg.sh — 10-20 min on a cold
       # cache. It does not depend on the Rust toolchain, so key it on the
       # script itself and keep it out of rust-cache.
-      # TEMP: cache disabled until the Gitea instance cache is provisioned (Cache project FFmpeg)
-      #   uses: actions/cache@v4
-      #   with:
-      #   path: .cache/ffmpeg
-      #   key: ffmpeg-${{ runner.os }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
+      - name: Cache project FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: .cache/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
 
       # ------------------------------------------------------------------
       # Project FFmpeg (script + FFMPEG_DIR; see docs/build.md)
       # ------------------------------------------------------------------
       - name: Build project FFmpeg
         run: |
-          cd "$GITHUB_WORKSPACE"
-          export PATH="/ucrt64/bin:$PATH"
           bash tooling/ffmpeg/build-ffmpeg.sh
           echo "FFMPEG_DIR=$(cygpath -m "$PWD/.cache/ffmpeg")" >> "$GITHUB_ENV"
 
@@ -292,30 +299,24 @@ jobs:
       # ------------------------------------------------------------------
       # `cargo check` (not build): the Test step links the test binaries
       # anyway, and a full build would codegen every workspace crate twice
-      # (once without and once with cfg(test)).
+      # (once without and once with cfg(test)). cargo check performs no
+      # final link, so the mingw-w64 link-order workaround is only needed
+      # in the Test step.
       - name: Build
         run: |
-          cd "$GITHUB_WORKSPACE"
-          export PATH="/ucrt64/bin:$PATH"
-          # The runner's job hook injects the MSVC INCLUDE/LIB into every
-          # step; clear them in-step (they poison the MinGW compiles with
-          # MSVC SDK headers).
-          # unset INCLUDE LIB
+          cargo check --workspace --locked
+
+      - name: Test
+        run: |
+          # The GitHub image injects the MSVC INCLUDE/LIB into the
+          # environment; clear them in-step (they poison the MinGW
+          # compiles with MSVC SDK headers).
+          unset INCLUDE LIB
           # mingw-w64 >= Nov 2025 forwards _assert to __msvcrt_assert inside
           # libmingwex.a; rustc's link order puts -lmingwex last, so any
           # binary that pulls _assert.o leaves _fileno/_setmode/
           # __imp___msvcrt_assert unresolved. A trailing -lmsvcrt re-scans
           # the CRT import lib after libmingwex.
-          # export RUSTFLAGS="-C link-args=-lmsvcrt"
-          cargo check --workspace --locked
-
-      - name: Test
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          export PATH="/ucrt64/bin:$PATH"
-          unset INCLUDE LIB
-          # See Build (Windows): trailing -lmsvcrt for the mingw-w64
-          # _assert/__msvcrt_assert link-order breakage.
           export RUSTFLAGS="-C link-args=-lmsvcrt"
           if ! cargo test --workspace --locked; then
             # Retry once: a few gpui keystroke tests flake on Windows CI —
@@ -324,5 +325,94 @@ jobs:
             # each identically to its pass state). A real regression
             # fails both passes.
             echo "first pass failed; retrying once for gpui keystroke flakes"
+            cargo test --workspace --locked
+          fi
+
+  macos:
+    name: Build & test (macOS)
+    runs-on: warp-macos-26-arm64-6x
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # gpui/ is a git submodule; its crates are workspace members of
+          # their own repo and build as path dependencies of oakapp.
+          submodules: true
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # ------------------------------------------------------------------
+      # System dependencies
+      # ------------------------------------------------------------------
+      - name: Install system dependencies
+        run: |
+          tooling/install-deps.sh
+          brew install cmake
+
+      # ------------------------------------------------------------------
+      # Build environment
+      # ------------------------------------------------------------------
+      - name: Configure build environment
+        run: |
+          # Vendored static OCIO (same as every non-Windows platform via
+          # tooling/ocio-env.sh); no OCIO_INSTALL_DIR override.
+          bash tooling/ocio-env.sh >> "$GITHUB_ENV"
+          # Homebrew quirks: lame.pc / snappy / libopenjp2.pc live off the
+          # default pkg-config search paths (see docs/build.md).
+          {
+            echo "CFLAGS=-I/opt/homebrew/include"
+            echo "LDFLAGS=-L/opt/homebrew/lib"
+            echo "PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig/openjpeg"
+          } >> "$GITHUB_ENV"
+          echo "FFMPEG_DIR=.cache/ffmpeg" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------------
+      # Caches
+      # ------------------------------------------------------------------
+      # Covers the whole target/ dir plus ~/.cargo; shared across branches
+      # of the same OS.
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: oak-ci-macos
+          cache-on-failure: true
+
+      # The project FFmpeg (release/8.0, static, all free codecs + hwaccel)
+      # is built by tooling/ffmpeg/build-ffmpeg.sh — 10-20 min on a cold
+      # cache. It does not depend on the Rust toolchain, so key it on the
+      # script itself and keep it out of rust-cache.
+      - name: Cache project FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: .cache/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
+
+      # ------------------------------------------------------------------
+      # Project FFmpeg (script + FFMPEG_DIR; see docs/build.md)
+      # ------------------------------------------------------------------
+      - name: Build project FFmpeg
+        run: |
+          tooling/ffmpeg/build-ffmpeg.sh
+          echo "FFMPEG_DIR=$PWD/.cache/ffmpeg" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------------
+      # Build & test
+      # ------------------------------------------------------------------
+      # `cargo check` (not build): the Test step links the test binaries
+      # anyway, and a full build would codegen every workspace crate twice
+      # (once without and once with cfg(test)).
+      - name: Build
+        run: cargo check --workspace --locked
+
+      # The runner's GUI session doubles as the display for the gpui
+      # #[gpui::test] windows; wgpu renders through Metal.
+      - name: Test
+        run: |
+          # Retry once (same policy as the other platforms): worker-pool
+          # startup under full-suite parallelism has flaked on Linux. A
+          # real regression fails both passes.
+          if ! cargo test --workspace --locked; then
+            echo "first pass failed; retrying once for worker-pool flakes"
             cargo test --workspace --locked
           fi
