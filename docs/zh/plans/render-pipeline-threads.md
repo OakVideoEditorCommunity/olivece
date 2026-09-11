@@ -15,6 +15,17 @@
 > 9. 参考原版 Olive 重写 resolve：match + Job 枚举（crates/oak-node/src/jobs.rs）
 >    单次循环完成，而不是四次扫描
 >
+> 补充硬性要求（2026-09-11，用户追加）：
+> **解码必须尽可能 GPU，并与渲染共用同一片 GPU 内存——解码这一步也是零拷贝；
+> CPU 解码后上传只作为 fallback。解码实现优先 FFmpeg（硬解），次选手写 GPU
+> 解码代码。** 本文 §2.7/§3.1/§3.4/§3.6/§4/§6 均按此修订。
+>
+> 补充硬性要求二（2026-09-11，用户追加）：
+> **Job 图做成货真价实的图存储结构**（不是线性表，也不是二维数组），允许非
+> 全连通；每个项目图固定一对**虚拟输入节点 / 虚拟输出节点**（默认相连、不可
+> 删除、要在节点编辑器里显示出来）；resolve 从输入节点开始**广度优先搜索**，
+> 逐个 match 处理 Job，直到全部分支汇聚于输出节点。见 §3.8。
+>
 > 配套调研：上游 Olive 已浅克隆到 `.cache/olive-upstream`（gitignore 内），本文
 > 引用其文件时写作 `upstream/app/...`。
 
@@ -62,13 +73,15 @@
   **零拷贝改造的数据类型基础已经存在**，缺的是"全链路不把 GPU 纹理下载回来"
   的管线。
 
-### 2.3 解码在 worker 内随叫随做，无流水线
+### 2.3 解码在 worker 内随叫随做，硬解帧全部回读 CPU，无流水线
 
 - `crates/oak-render/src/eval.rs:988-990`：解码器会话本就进程级共享
   （按 (filename, stream) 键控、内部互斥），但解码动作发生在每个 worker 的
   ticket 处理里：一帧的"解码→渲染→回读"是串行的，帧与帧之间没有重叠。
 - `render_footage_frame`（eval.rs，FootageJob 的落点）同步解码一帧并缩放到
   目标尺寸。
+- **硬件解码已经存在，但硬件帧全部下载回 CPU**（详见 §2.7）——GPU 解码
+  这块砖已经有了，缺的是"不把砖搬回 CPU"的下半截。
 
 ### 2.4 resolve 四次扫描表
 
@@ -110,6 +123,24 @@
 - `render/job/*.h`：AcceleratedJob 基类 + 各 Job 的字段集（与我们 jobs.rs
   的载荷一一对应，可对照补全）。
 
+### 2.7 硬解已接通但逐帧下载（解码零拷贝的现状缺口）
+
+- `crates/oak-codec/src/hwdecode.rs:17-42`：FFmpeg 8 的 hwaccel 模型已落地
+  ——建平台硬件设备上下文（`av_hwdevice_ctx_create`）挂到软解码器上，
+  VideoToolbox（macOS）/ CUDA(NVDEC)→VAAPI（Linux）/ D3D11VA→CUDA
+  （Windows）按候选顺序尝试，软解兜底；`OAK_HWACCEL=0` 与配置项
+  `HardwareDecoding` 双开关；`HW_TRANSFERS` 计数器证明 hwaccel 真生效。
+- **但每帧硬件表面都用 `av_hwframe_transfer_data` 下载到系统内存**再走
+  swscale（hwdecode.rs:41-42 自述）——这就是"解码零拷贝"要消灭的那次
+  下载。项目 FFmpeg 构建已带齐平台硬解
+  （`--enable-nvdec/vaapi/vdpau/d3d11va/dxva2/videotoolbox`，
+  tooling/ffmpeg/build-ffmpeg.sh）。
+- 上游 Olive **没有硬解**（`.cache/olive-upstream/app/codec/decoder.cpp`
+  全文无 hw_device/hwaccel 引用，纯软解+上传）——本计划的 GPU 解码超出
+  Olive 的范围，参考对象改为 FFmpeg hwaccel API 与本仓库 hwdecode.rs 已有
+  的设备模型；FFmpeg 覆盖不到的路径才手写 GPU 解码（Vulkan Video /
+  直接 NVDEC 绑定，见 §3.6）。
+
 ## 3. 目标架构
 
 ```text
@@ -124,8 +155,9 @@
 │                           │ 图求值 + 全部 GPU pass           │      │
 │                           ▼                                 │      │
 │                        decode 队列 ◄── 解码线程（唯一）─────────┘      │
-│                                       │ 持有全部解码器会话            │
-│                                       │ 解码→上传 GPU→投 render 队列  │
+│                                       │ 持有全部解码器会话+硬解设备     │
+│                                       │ 硬解→GPU 导入(零拷贝,§3.6)      │
+│                                       │ 软解→staging 上传(仅 fallback)  │
 │                                                                │
 │        ┌─── 仅当链上出现 CPU OpenFX 特效时 ───┐                 │
 │        ▼                                      │                 │
@@ -139,8 +171,14 @@
 
 1. **解码线程（唯一）**：独占全部解码器会话（eval.rs:988 的进程级会话表
    顺理成章地归它所有——会话本就互斥，集中后连互斥都可以去掉）。从
-   decode 队列取 FootageJob，解码、按需要缩放/色彩预变换、**上传为 GPU
-   纹理**，把结果投到 render 队列。连续播放时由调度层预取（下一条 §3.4）。
+   decode 队列取 FootageJob 解码，**产出直接落在 GPU 上、与渲染共用同一
+   片 GPU 内存**：硬解帧（NV12/P010 等 YUV 表面）经平台互操作原样导入为
+   GPU 纹理（§3.6，零拷贝），**不执行** `av_hwframe_transfer_data`；
+   CPU 解码 + staging 上传只作为硬解不可用时的 fallback（沿用
+   `OAK_HWACCEL` / `HardwareDecoding` 开关，hwdecode.rs:56/102）。
+   硬解表面到工作色彩空间 RGBA 的转换不再走 CPU swscale，而是渲染线程
+   上的一个内置 "YUV→RGB" GPU pass（色度上采样 + 色彩矩阵着色器，
+   与 §3.5 的全 GPU 中间纹理一致）。连续播放时由调度层预取（§3.4）。
 2. **渲染线程（唯一）**：独占进程唯一 `GpuContext`（`GpuContext::shared()`
    之外的第二条获取路径收编到这里；texture.rs:178-181 的 Arc 自持模型
    不变）。从 render 队列取"图快照 + 时刻"作业，跑图求值与全部 GPU
@@ -180,6 +218,11 @@
   FootageJob"时不是同步解码，而是把该渲染作业挂起到依赖完成（依赖计数
   到位后自动入 render 队列）——Olive 是同步解码（renderprocessor.cpp:325
   ProcessVideoFootage 在渲染线程内解码），我们按用户要求做真流水线。
+- **硬解帧的流水走向**：解码线程产出的硬件表面（YUV）以平台句柄形态
+  （DMA-BUF fd / D3D11 纹理 / CVPixelBuffer / CUDA 数组）经 §3.6 的互操作
+  导入为 GPU 纹理后投 render 队列；帧的生命周期由"持有 AVHWFramesContext
+  引用的 GPU 纹理包装"管理，渲染线程消费完（YUV→RGB pass 采样结束）即
+  释放回硬解帧池。全路径无 `av_hwframe_transfer_data`。
 - 背压：三条队列都有界；上屏消费慢（暂停、窗口最小化）时 render 队列满 →
   解码暂停预取；导出时上屏队列直通导出消费者，不存在"没人收"的积压。
 
@@ -196,22 +239,34 @@
 - CPU 边界的显式回读点只有三处：CPU OFX 插件（§3.2）、导出编码器输入、
   磁盘帧缓存写入（FrameHashCache::SaveCacheFrame 对应物）。
 
-### 3.6 平台互操作分支（为 7 预留）
+### 3.6 平台互操作分支（解码零拷贝与上屏，用户硬性要求）
 
-解码上传与上屏共用一层 `gpuinteop` 抽象，按后端分支实现：
+**解码必须尽可能 GPU，并与渲染共用同一片 GPU 内存；CPU 解码后上传只作为
+fallback。** 解码上传与上屏共用一层 `gpuinteop` 抽象，按后端分支实现。
+**解码实现优先 FFmpeg 硬解**（hwdecode.rs 的设备模型 + 下表的导入路径），
+**FFmpeg 覆盖不到的才手写 GPU 解码**（Vulkan Video 扩展 / 直接 NVDEC
+绑定——仅当某种编码或平台组合 FFmpeg 没有 hwaccel 时立项，不提前写）：
 
-| 平台/后端 | 解码→GPU | 上屏/外部共享 |
-|---|---|---|
-| Linux Vulkan | 软解→staging 上传；后续 VAAPI→DMA-BUF→Vulkan 外部内存 | wgpu 同源纹理直通；跨进程必要时 DMA-BUF fd |
-| Windows | 软解→staging；后续 D3D11VA/NVDEC→D3D11 纹理 | D3D11 shared HANDLE / DXGI |
-| CUDA（可选加速） | NVDEC→cuArray→CUDA-Vulkan 互操作（cuImportExternalMemory 系） | 仅导出/插件边界使用 |
-| macOS | 软解→staging；后续 VideoToolbox→IOSurface→Metal | IOSurface 共享 |
-| OpenGL（遗留/调试用） | 软解→glTexSubImage2D | 仅调试后端 |
+| 平台/后端 | 硬解（FFmpeg hwaccel）→ GPU 导入（零拷贝） | fallback | 上屏/外部共享 |
+|---|---|---|---|
+| Linux + NVIDIA | NVDEC（CUDA 设备）→ cuArray → CUDA-Vulkan 外部内存互操作（`cuImportExternalMemory` 系）导入 wgpu 纹理 | 软解→staging 上传 | wgpu 同源纹理直通 |
+| Linux + AMD/Intel | VAAPI → VASurface → DMA-BUF fd → Vulkan 外部内存（`VK_EXT_external_memory_dma_buf` + `VK_EXT_image_drm_format_modifier`） | 软解→staging 上传 | 同源直通；跨进程必要时 DMA-BUF fd |
+| Windows | D3D11VA → D3D11 纹理 → DXGI shared HANDLE（NT 句柄）导入 wgpu（DX12/Vulkan 后端均可）；NVDEC 候选经 CUDA 互操作 | 软解→staging 上传 | D3D11 shared HANDLE / DXGI |
+| macOS | VideoToolbox → CVPixelBuffer → IOSurface → Metal 纹理（wgpu Metal 后端直接包裹） | 软解→staging 上传 | IOSurface 共享 |
+| OpenGL（遗留/调试用） | 不做硬解导入 | 软解→glTexSubImage2D | 仅调试后端 |
 
-实施顺序：staging 上传先行（正确性），DMA-BUF/D3D11/IOSurface 零拷贝上传
-作为后续优化项逐个落地（每一项独立可测、可回退）。
+要点：
 
-### 3.7 resolve 重写（M0，独立先行）
+- 硬解表面通常是 YUV（NV12/P010），**导入后不是 RGB**——YUV→RGB（色度
+  上采样 + BT.601/709/2020 矩阵 + 全/窄范围）是渲染线程上的内置 GPU
+  pass（着色器），替代今天的 CPU swscale；HDR 元数据随纹理流转。
+- 导入失败（驱动缺 modifier、句柄类型不支持等）按帧回退到
+  `av_hwframe_transfer_data` + staging 上传，单帧失败不污染后续帧。
+- 实施顺序：staging fallback 先行（正确性基线，任何平台都可跑），然后按
+  Linux(NVDEC/VAAPI) → Windows(D3D11VA) → macOS(VideoToolbox) 的顺序
+  落地零拷贝导入，每行一个独立 PR、独立开关、可单独回退。
+
+### 3.7 resolve 重写（M0a，独立先行）
 
 对照 upstream `node/traverser.cpp:351 ResolveJobs`：
 
@@ -231,30 +286,83 @@
    行为不变（本步是纯结构改造，现有测试全部应无修改通过；新增
    CacheJob 的磁盘加载测试）。
 
+### 3.8 Job 图：虚拟输入/输出节点与广度优先求值（用户硬性要求）
+
+节点图的求值不再把"每个节点往一张线性表里 push 值、resolve 扫表找活干"
+当作模型（jobs.rs:31-33 自述的临时形态、§2.4 的四次扫描即其症状），而是
+**Job 图即图**：
+
+1. **图存储是货真价实的邻接结构**：求值以 `oak_node::graph::Graph` 的
+   节点/连接为骨架，节点把 `Job` 枚举（§3.7-1 补全后的）挂在自己的输出
+   上；没有"全图拍平成表"的中间形态，也没有二维数组。允许**非全连通**：
+   与输出无关的分支不参与成帧（下述活集规则）。
+2. **每个项目图固定一对虚拟节点**：
+   - `GraphInput`（虚拟输入节点）：BFS 的唯一**起点**。它自身不产生
+     像素——它是"图的数据入口"语义（单帧单 clip 时其后挂素材/生成器；
+     序列合成时由轨道合成结构向其馈入）。只有输出端口。
+   - `GraphOutput`（虚拟输出节点）：所有终末分支的**汇聚点**，它的值
+     就是这一帧。只有输入端口。
+   - 两节点**默认相连、不可删除、不可复制**（图模型层强约束：新建图
+     自带这对节点；`remove_node`/`duplicate` 对它们拒绝；序列化把它们
+     作为图的固定端点写入/读出）。
+   - **要在节点编辑器里显示出来**（`crates/oak-app/src/panels/node_editor.rs`）：
+     与普通节点同等的渲染与连线交互，但禁删、禁复制、禁改名；样式上
+     与真节点区分（固定标题/图标），连线规则校验（输入节点不接受入线、
+     输出节点不接受出线）。
+3. **resolve = 从输入节点出发的广度优先搜索**：每个项目/序列的求值以
+   `GraphInput` 为根做 BFS，出队一个节点就用一次 `match`（§3.7-2 的
+   五个 process_*）处理它挂出的 Job，**直到全部分支汇聚于 `GraphOutput`
+   为止**。遍历规则：
+   - **多输入汇合**：入度到零才出队（Kahn 形态的 BFS）——一个节点的
+     全部输入都 resolve 完毕它才进入处理队列；这保证汇合节点拿到的
+     每一路输入都是成品纹理。
+   - **多输出分叉**：一个节点的输出可以喂多个后继，沿邻接边自然扇出；
+     后继各自按自己的入度等待。
+   - **顺序语义**：出队序即 Job 处理序，且对同一图是确定性的（邻接按
+     连接建立序迭代）——用户明确要求"节点被应用的先后顺序可能影响
+     最终画面"，该顺序由图结构显式表达，而非由表扫描次序隐含。
+   - **环**：visited 集防死循环；发现回边时报错并断开该分支（图模型
+     现有约束本就不鼓励环，此处把行为写成明文）。
+   - **活集**：正向（从 GraphInput）可达 ∩ 反向（从 GraphOutput）可达
+     的节点才是活集；不可达节点从不入队（非全连通图的天然剪枝），
+     正向可达但到不了输出的分支是可选的二次剪枝（先求正确，再求省）。
+4. **与 resolve 重写的合流**：§3.7 的单循环 match 是本 BFS 的"出队即
+   处理"循环体；M0 分两步走——先在现有线性表上完成枚举化与单循环
+   （M0a，纯结构改造、独立可验收），再把表升级为图、引入虚拟端点与
+   BFS（M0b，见 §4）。上游 Olive 没有虚拟端点概念（其遍历从 viewer
+   输出节点倒推），这一对端点是 Oak 自己的设计，语义对齐用户的
+   "从输入开始、汇聚于输出"。
+
 ## 4. 里程碑
 
 | 里程碑 | 内容 | 验收 |
 |---|---|---|
-| **M0 resolve 重写** | §3.7 全量：Job 枚举进表、单循环 match、CacheJob 落地 | 全 workspace 测试绿；新增 CacheJob 磁盘缓存往返测试；`resolve_*_jobs` 四函数删除 |
+| **M0a Job 枚举化 + 单循环 resolve** | §3.7 全量：Job 枚举补全（含 CacheJob）并挂进输出表、resolve 单循环 match、子 job 递归 resolve | 全 workspace 测试绿；新增 CacheJob 磁盘缓存往返测试；`resolve_*_jobs` 四函数删除 |
+| **M0b Job 图 + 虚拟端点 + BFS** | §3.8 全量：图固定 GraphInput/GraphOutput 虚拟节点（默认相连、禁删禁复制、序列化往返）、节点编辑器显示两节点、resolve 改为从输入节点的 Kahn 形态 BFS | 新增测试：多输入汇合等齐全部输入、多输出分叉各自成帧、非全连通图不可达节点不执行、环报错断支、虚拟节点删除/复制被拒、序列化往返后端点仍在；节点编辑器 UI 测试（端点可见、入线/出线规则）；既有测试全绿 |
 | **M1 线程管线骨架** | 解码/渲染/上屏三线程+三队列进 oak-render（`pipeline` 模块）；RenderManager 增加线程后端，进程池后端保留，`OAK_PIPELINE=processes` 可回退 | 同一套渲染测试在两个后端下都绿（测试矩阵化）；播放/seek/导出 smoke 等价 |
-| **M2 GPU 零拷贝** | 图内全程 `Texture::Gpu`；上屏互操作攻关（§3.5）落地；导出/缓存/OFX 三处边界显式回读 | 播放路径 GPU↔CPU 搬运次数为 0（计数断言，参照 M15 S2 的 `main_heap_frame_copies` 范式）；`to_display` 不再接收 CPU 帧 |
+| **M2 GPU 零拷贝** | 图内全程 `Texture::Gpu`；上屏互操作攻关（§3.5）落地；导出/缓存/OFX 三处边界显式回读；内置 YUV→RGB GPU pass 替代 CPU swscale | 播放路径 GPU↔CPU 搬运次数为 0（计数断言，参照 M15 S2 的 `main_heap_frame_copies` 范式）；`to_display` 不再接收 CPU 帧 |
 | **M3 OFX 独立进程** | oak-ofx-host 单进程宿主；PluginJob 经 IPC；崩溃重生+紫帧回退；进度/取消协议搬运 | 杀掉 ofx-host 进程 → 在途 job 重投成功；连续三次崩溃 → 紫帧；进度条/取消行为与现状一致 |
 | **M4 流水线预取** | 调度层按 §3.4 投依赖窗口；背压策略 | 1080p 播放 CPU 占用不升、fps 不低于进程池后端；首帧延迟不劣化（基准对比留档） |
-| **M5 平台互操作** | §3.6 表逐行落地（每行一个独立 PR） | 每平台 CI 绿；零拷贝上传路径有开关可回退 staging |
+| **M5 GPU 解码零拷贝** | §3.6 表逐行落地：staging fallback 基线 → Linux NVDEC/VAAPI 导入 → Windows D3D11VA 导入 → macOS VideoToolbox 导入；FFmpeg 无 hwaccel 的组合才评估手写 GPU 解码 | 硬解路径 `HW_TRANSFERS` 计数归零（不再下载）；逐平台导入开/关对比测试；每行独立 PR 可回退 |
 
-依赖关系：M0 独立；M1 依赖 M0；M2 依赖 M1；M3 依赖 M1（与 M2 可并行）；
-M4 依赖 M2；M5 依赖 M2，可拆成并行子项。
+依赖关系：M0a 独立；M0b 依赖 M0a；M1 依赖 M0a+M0b；M2 依赖 M1；M3 依赖
+M1（与 M2 可并行）；M4 依赖 M2；M5 依赖 M2（YUV→RGB pass 与互操作抽象），
+可拆成并行子项。
 
 ## 5. 不变量与边界
 
-- **不动**：ticket API（oak-app/oak-cli 无感）、撤销/重做、图模型与序列化、
-  缓存磁盘格式、OFX 插件 ABI、CI 的 OFX fixture 探针（ci.yml 的
-  scan_probe 流程）。
+- **不动**：ticket API（oak-app/oak-cli 无感）、撤销/重做、缓存磁盘格式、
+  OFX 插件 ABI、CI 的 OFX fixture 探针（ci.yml 的
+  scan_probe 流程）。**例外（M0b 明确改变的两处）**：图模型新增
+  GraphInput/GraphOutput 固定端点，序列化格式随之携带这对端点（旧工程
+  载入时自动补挂，等价于一次无损迁移，配套序列化往返测试）。
 - **回退开关**：线程后端落地期间进程池后端完整保留，`OAK_PIPELINE` 环境
-  变量 + 配置项双开关；M4 验收通过前进程池仍是默认。
+  变量 + 配置项双开关；M4 验收通过前进程池仍是默认。硬解导入逐平台
+  独立开关（§3.6），`OAK_HWACCEL=0` 一键回到全软解。
 - **线程亲和**：wgpu device 可在专用线程独占使用（Device/Queue 均 Send）；
-  渲染线程是唯一触摸 `GpuContext` 的线程，解码线程只做"CPU 帧→staging"
-  的上传请求（经渲染线程代执行或经 device 的线程安全提交，M1 攻关确定）。
+  渲染线程是唯一触摸 `GpuContext` 的线程；硬解帧池与硬件设备上下文
+  （AVHWDeviceContext）归解码线程所有，硬件表面经互操作导入后才交给
+  渲染线程消费（§3.4）。
 - **音频**：本计划只覆盖视频管线；音频采样链（SampleJob 对应路径）维持
   现状，如需统一另立计划。
 
@@ -271,5 +379,17 @@ M4 依赖 M2；M5 依赖 M2，可拆成并行子项。
 4. **测试环境无 GPU**：CI 的 lavapipe/xvfb 路径已在跑 wgpu（ci.yml 的
    Test 步骤），线程后端必须在该环境下同样可用；`GpuContext::create`
    的 CPU 回退（backend.rs:1422 测试所示）保持可用。
-5. **范围蔓延**：Job 图的 BFS 化（v0.6 议题，用户已叫停过一次）**不在**
-   本计划内；M0 只做单循环 match 分发，不改图求值顺序语义。
+5. **BFS 求值的兼容性**（M0b）：虚拟端点改变了图模型与求值顺序的显性
+   语义，是全部里程碑里对既有行为扰动最大的一步。对策：M0a 先把
+   枚举化与单循环做掉（行为不变、纯结构），M0b 单独成 PR、配全套
+   §4 列举的行为测试；旧工程载入自动补挂端点。
+6. **GPU 解码零拷贝的平台碎片化**（M5）：各平台导入路径（DMA-BUF
+   modifier 协商、DXGI NT 句柄、IOSurface、CUDA-Vulkan 互操作）都有
+   驱动/版本坑，且 wgpu 对外部内存导入的公开 API 覆盖有限，可能要
+   落到 wgpu-hal 原生句柄层写 unsafe 胶水。对策：staging fallback 是
+   永久基线（任何导入失败按帧回退）；按 §3.6 顺序逐平台落地，每平台
+   独立开关；CUDA-Vulkan 互操作作为 NVDEC 路径的最后手段（先试
+   更通用的 DMA-BUF——Linux 上 NVIDIA 也经 VAAPI 可达时优先 VAAPI）。
+7. **范围蔓延**：手写 GPU 解码严格限于"FFmpeg 没有对应 hwaccel"的
+   组合（用户原话"次选"），不提前立项；Job 图的序列化格式版本化
+   不在本期（沿用工程文件现有版本策略）。
