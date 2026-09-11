@@ -1519,8 +1519,14 @@ impl SharedMemoryRegion {
 			// ENOSPC/EDQUOT as a return value, so quota exhaustion degrades
 			// to a render-manager fallback instead of a crash. The fresh
 			// segment is already zero-filled (O_EXCL + stale unlink above),
-			// so no separate memset pass is needed on success.
+			// so no separate memset pass is needed on success. It is a
+			// Linux/tmpfs affair: macOS has no `posix_fallocate` at all,
+			// so off-Linux the call is skipped and every page is touched
+			// below instead.
+			#[cfg(target_os = "linux")]
 			let rc = unsafe { libc::posix_fallocate(fd, 0, size as libc::off_t) };
+			#[cfg(not(target_os = "linux"))]
+			let rc = libc::EOPNOTSUPP;
 			if rc != 0 && rc != libc::EOPNOTSUPP && rc != libc::ENOSYS {
 				self.error = format!(
 					"reserving {} bytes of shared memory failed: {}",
