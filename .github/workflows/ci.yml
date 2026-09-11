@@ -49,7 +49,7 @@ jobs:
             libpipewire-0.3-dev libspa-0.2-dev libjack-jackd2-dev \
             libasound2-dev libpulse-dev libsndfile1-dev \
             libgl1-mesa-dev libgl1-mesa-dri mesa-vulkan-drivers \
-            libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev xvfb
+            libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev xvfb libdrm-dev
 
       # ------------------------------------------------------------------
       # vcpkg (manifest mode) + caches
@@ -333,7 +333,7 @@ jobs:
           # the name crates/oak-ffmpeg-link/build.rs invokes; nasm is what
           # vcpkg's ffmpeg port requires to build (same split as the other
           # platforms: FFmpeg libraries come from the vcpkg manifest).
-          brew install cmake pkg-config nasm autoconf automake libtool
+          brew install cmake pkg-config nasm autoconf automake libtool autoconf-archive
 
       # ------------------------------------------------------------------
       # vcpkg (manifest mode) + caches
@@ -457,7 +457,7 @@ jobs:
             libpipewire-0.3-dev libspa-0.2-dev libjack-jackd2-dev \
             libasound2-dev libpulse-dev libsndfile1-dev \
             libgl1-mesa-dev libgl1-mesa-dri mesa-vulkan-drivers \
-            libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev xvfb \
+            libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev xvfb libdrm-dev \
             gdb file
 
       # ------------------------------------------------------------------

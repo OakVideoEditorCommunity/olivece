@@ -85,7 +85,7 @@ jobs:
                 mesa-libGL-devel mesa-vulkan-drivers \
                 vulkan-headers vulkan-loader-devel \
                 libxkbcommon-devel libxkbcommon-x11-devel \
-                rpm-build librsvg2-tools
+                rpm-build librsvg2-tools libdrm-devel
               ;;
             arch)
               pacman -S --needed --noconfirm \
@@ -93,7 +93,7 @@ jobs:
                 git curl zip unzip tar python \
                 pipewire jack2 alsa-lib libpulse libsndfile \
                 mesa vulkan-headers vulkan-icd-loader \
-                libxkbcommon libxkbcommon-x11 librsvg
+                libxkbcommon libxkbcommon-x11 librsvg libdrm
               ;;
           esac
 
@@ -200,7 +200,7 @@ jobs:
             libpipewire-0.3-dev libspa-0.2-dev libjack-jackd2-dev \
             libasound2-dev libpulse-dev libsndfile1-dev \
             libgl1-mesa-dev libgl1-mesa-dri mesa-vulkan-drivers \
-            libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev
+            libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev libdrm-dev
 
       # ------------------------------------------------------------------
       # vcpkg (manifest mode) + caches
@@ -279,7 +279,7 @@ jobs:
           # the name crates/oak-ffmpeg-link/build.rs invokes; nasm is what
           # vcpkg's ffmpeg port requires to build. librsvg stays for
           # rsvg-convert (app icon) and is bundled into the .app below.
-          brew install cmake pkg-config nasm librsvg
+          brew install cmake pkg-config nasm librsvg nasm autoconf automake libtool autoconf-archive
 
       # ------------------------------------------------------------------
       # vcpkg (manifest mode) + caches
