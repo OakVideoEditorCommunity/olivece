@@ -1132,6 +1132,10 @@ pub struct RealEngine {
 	/// selection event). Also drives the node graph's scope: while a single
 	/// clip is selected, the editor shows that clip's context chain only.
 	selected_clip: Option<ClipId>,
+	/// The whole timeline selection (the effect stack only ever sees
+	/// [`Self::selected_clip`]; the multi-clip set is what a group drag
+	/// moves together).
+	selected_clips: Vec<ClipId>,
 	/// The node-graph selection mirror (`None` = no single node selected):
 	/// set when the user clicks a node in the node editor (or an effect
 	/// card in the inspector) so the inspector and the node graph share one
@@ -1582,6 +1586,7 @@ impl RealEngine {
 			waveforms: Mutex::new(None),
 			selected_item: None,
 			selected_clip: None,
+			selected_clips: Vec::new(),
 			selected_graph_node: None,
 			clipboard: Vec::new(),
 			expanded_effects: BTreeSet::new(),
@@ -4321,6 +4326,7 @@ impl AppEngine for RealEngine {
 		// while one clip is selected it shows (and highlights) that clip's
 		// context chain, so its block node becomes the graph selection.
 		self.selected_clip = (clips.len() == 1).then(|| clips[0]);
+		self.selected_clips = clips;
 		self.selected_graph_node = self.selected_clip.map(|clip| clip.0);
 		cx.notify();
 	}
@@ -4682,11 +4688,15 @@ impl AppEngine for RealEngine {
 				new_track,
 				new_start,
 			} => {
-				// The dragged clip moves to `new_track`/`new_start`; every
-				// clip linked to it (the A/V pair dropped from one file)
-				// follows in lockstep, each staying on its own track and
-				// shifting by the same frame offset. All of it lands as ONE
-				// undoable entry.
+				// The dragged clip moves to `new_track`/`new_start`; the rest
+				// of the group follows in lockstep, each staying on its own
+				// track and shifting by the same frame offset. The group is
+				// the dragged clip's transitive link group (the A/V pair
+				// dropped from one file) UNION — when the dragged clip is
+				// part of the multi-selection — every other selected clip
+				// and THEIR link groups, so a marquee selection moves
+				// together with relative positions intact. All of it lands
+				// as ONE undoable entry.
 				let Some(block) = self.clip_block(*clip) else {
 					return;
 				};
@@ -4696,16 +4706,38 @@ impl AppEngine for RealEngine {
 				let Some(project) = self.project.clone() else {
 					return;
 				};
-				// Linked clips on locked tracks are left in place.
-				let linked: Vec<NodeId> = {
+				// Seed the group: the dragged clip, plus every selected clip
+				// when the drag started inside the multi-selection (a plain
+				// drag of an unselected clip moves just its link group).
+				let mut seeds: Vec<NodeId> = vec![block];
+				if self.selected_clips.contains(clip) {
+					for id in self.selected_clips.clone() {
+						if let Some(selected) = self.clip_block(id) {
+							seeds.push(selected);
+						}
+					}
+				}
+				// Transitive closure over the graph links (A-B-C chains move
+				// as one), restricted to clips; clips on locked tracks are
+				// left in place.
+				let mut seen: BTreeSet<NodeId> = seeds.iter().copied().collect();
+				let mut stack = seeds;
+				let mut linked: Vec<NodeId> = Vec::new();
+				{
 					let guard = graphops::lock(&project);
-					guard
-						.graph
-						.links_of(block)
-						.into_iter()
-						.filter(|&other| graphops::clip_behavior(&guard.graph, other).is_some())
-						.collect()
-				};
+					while let Some(node) = stack.pop() {
+						if node != block {
+							linked.push(node);
+						}
+						for other in guard.graph.links_of(node) {
+							if graphops::clip_behavior(&guard.graph, other).is_some()
+								&& seen.insert(other)
+							{
+								stack.push(other);
+							}
+						}
+					}
+				}
 				let linked: Vec<NodeId> = linked
 					.into_iter()
 					.filter(|&other| !self.clip_track_locked(other))
@@ -9736,6 +9768,124 @@ mod tests {
 			(Some(40), Some(40)),
 			"a second undo restores the pre-drag position"
 		);
+	}
+
+	/// Dragging one clip of a MULTI-SELECTION moves the whole selection in
+	/// lockstep — every selected clip keeps its own track and shifts by the
+	/// same frame delta (relative positions preserved) — and each selected
+	/// clip's linked partner follows even when the partner itself is not
+	/// selected. ONE undo restores the whole group.
+	#[gpui::test]
+	async fn moving_a_multi_selection_drags_the_whole_group(cx: &mut gpui::TestAppContext) {
+		let _media = media_lock();
+		let engine = cx.update(|cx| cx.new(|cx| RealEngine::create(cx)));
+		cx.update(|app| engine.update(app, |engine, cx| engine.new_project(cx)));
+
+		let media = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/demo.mp4");
+		cx.update(|app| {
+			engine.update(app, |engine, cx| {
+				engine.import_footage(media.clone(), cx).expect("import")
+			})
+		});
+		let name = media.file_name().unwrap().to_string_lossy().into_owned();
+		let entry = cx
+			.read(|app| {
+				engine
+					.read(app)
+					.roots()
+					.into_iter()
+					.find(|e| e.name.as_ref() == name)
+			})
+			.expect("imported footage is listed");
+		// Two A/V pairs on the timeline: [40, 465) and [600, 1025) — the
+		// clearance past the first clip's tail (135 frames) must exceed the
+		// drag delta below, or the move overlaps the pair (an invalid
+		// same-track state the move commands do not guard against).
+		for start in [40, 600] {
+			cx.update(|app| {
+				engine.update(app, |engine, cx| {
+					engine.drop_footage(entry.id, TrackKind::Video, 0, Frame(start), cx)
+				})
+			});
+		}
+
+		let (v1, v2, a1, a2, video_idx, audio_idx) = cx.read(|app| {
+			let engine = engine.read(app);
+			let video_idx = engine
+				.tracks
+				.iter()
+				.position(|t| t.kind == TrackKind::Video && t.clips.len() == 2)
+				.expect("a video track with both clips");
+			let audio_idx = engine
+				.tracks
+				.iter()
+				.position(|t| t.kind == TrackKind::Audio && t.clips.len() == 2)
+				.expect("an audio track with both clips");
+			let mut videos: Vec<(i64, ClipId)> = engine.tracks[video_idx]
+				.clips
+				.iter()
+				.map(|c| (c.range.start.0, c.id))
+				.collect();
+			videos.sort();
+			let mut audios: Vec<(i64, ClipId)> = engine.tracks[audio_idx]
+				.clips
+				.iter()
+				.map(|c| (c.range.start.0, c.id))
+				.collect();
+			audios.sort();
+			(videos[0].1, videos[1].1, audios[0].1, audios[1].1, video_idx, audio_idx)
+		});
+		let starts = |cx: &mut gpui::TestAppContext, id: ClipId, track: usize| {
+			cx.read(|app| {
+				engine.read(app).tracks[track]
+					.clips
+					.iter()
+					.find(|c| c.id == id)
+					.map(|c| c.range.start.0)
+			})
+		};
+
+		// Select BOTH video clips (the audio partners stay unselected) and
+		// drag the first one +40 frames.
+		cx.update(|app| {
+			engine.update(app, |engine, cx| engine.set_selected_clips(vec![v1, v2], cx))
+		});
+		cx.update(|app| {
+			engine.update(app, |engine, cx| {
+				engine.apply_timeline_event(
+					&TimelineEvent::ClipMoveRequested {
+						clip: v1,
+						new_track: video_idx,
+						new_start: Frame(80),
+					},
+					cx,
+				);
+			})
+		});
+
+		assert_eq!(starts(cx, v1, video_idx), Some(80), "the dragged clip moved");
+		assert_eq!(
+			starts(cx, v2, video_idx),
+			Some(640),
+			"the other selected clip follows by the same +40 delta"
+		);
+		assert_eq!(
+			starts(cx, a1, audio_idx),
+			Some(80),
+			"the dragged clip's linked audio follows (unselected)"
+		);
+		assert_eq!(
+			starts(cx, a2, audio_idx),
+			Some(640),
+			"the selected clip's linked audio follows (unselected)"
+		);
+
+		// ONE undo restores all four clips.
+		cx.update(|app| engine.update(app, |engine, cx| engine.undo(cx)));
+		assert_eq!(starts(cx, v1, video_idx), Some(40));
+		assert_eq!(starts(cx, v2, video_idx), Some(600));
+		assert_eq!(starts(cx, a1, audio_idx), Some(40));
+		assert_eq!(starts(cx, a2, audio_idx), Some(600));
 	}
 
 	/// A clip cannot be dragged across track kinds: dropping a video clip
