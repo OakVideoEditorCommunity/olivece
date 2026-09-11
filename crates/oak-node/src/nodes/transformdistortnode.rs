@@ -42,7 +42,13 @@ void main(void) {
     vec2 half_res = resolution_in * 0.5;
     vec2 px = ove_texcoord * resolution_in - half_res;
     vec2 src = (transform_in * vec4(px, 0.0, 1.0)).xy + half_res;
-    frag_color = texture(tex_in, src / resolution_in);
+    vec2 uv = src / resolution_in;
+    // A transform that pushes content off-frame leaves the vacated
+    // region TRANSPARENT (the alternative — the sampler's edge clamp —
+    // smears the border pixels across it).
+    vec4 col = texture(tex_in, uv);
+    float inside = step(0.0, uv.x) * step(0.0, uv.y) * step(uv.x, 1.0) * step(uv.y, 1.0);
+    frag_color = col * inside;
 }
 "#;
 

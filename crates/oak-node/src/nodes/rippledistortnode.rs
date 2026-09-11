@@ -93,7 +93,11 @@ void main(void) {
 
   float len = length(adj_texcoord);
   vec2 uv = ove_texcoord + (adj_texcoord/len)*cos((frequency_in)*(len*12.0-evolution_in))*(intensity_in*0.0005);
-  frag_color = texture(tex_in, uv);
+  // Displacement past the frame edge leaves transparent pixels, not the
+  // clamped edge pixels.
+  vec4 col = texture(tex_in, uv);
+  float inside = step(0.0, uv.x) * step(0.0, uv.y) * step(uv.x, 1.0) * step(uv.y, 1.0);
+  frag_color = col * inside;
 }
 "#;
 

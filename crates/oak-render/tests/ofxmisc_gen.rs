@@ -95,8 +95,18 @@ fn position_shifts_a_white_pixel_by_whole_pixels() {
     row.insert("offset_in".to_string(), NodeValue::Vec2([3.0, 2.0]));
     let frame = eval_node_row(POSITION, row, None);
     assert_pixel(pixel_at(&frame, 5, 5), WHITE, "position moved pixel");
-    assert_pixel(pixel_at(&frame, 2, 3), BLACK, "position vacated pixel");
-    assert_pixel(pixel_at(&frame, 0, 0), BLACK, "position untouched corner");
+    // Off-frame reads are transparent (never the clamped edge pixels):
+    // the composite below shows through instead.
+    assert_pixel(
+        pixel_at(&frame, 2, 3),
+        [0.0, 0.0, 0.0, 0.0],
+        "position vacated pixel",
+    );
+    assert_pixel(
+        pixel_at(&frame, 0, 0),
+        [0.0, 0.0, 0.0, 0.0],
+        "position untouched corner",
+    );
 }
 
 /// Mirror with `horizontal_in` on flips a one-sided white block about the
@@ -210,4 +220,27 @@ fn ramp_from_black_to_white_is_half_at_the_midpoint() {
         "ramp near point0",
     );
     assert_pixel(pixel_at(&frame, 7, 3), WHITE, "ramp at point1");
+}
+
+/// Whole-pixel translation past the frame edge leaves transparent
+/// pixels (never the clamped edge column): +100px empties the frame.
+#[test]
+fn position_off_frame_is_transparent() {
+    if !gpu() {
+        eprintln!("no adapter; skipping");
+        return;
+    }
+    let mut row = NodeValueRow::new();
+    row.insert("tex_in".to_string(), texture_value(filled_frame((8, 8), WHITE)));
+    row.insert("offset_in".to_string(), NodeValue::Vec2([100.0, 0.0]));
+    let frame = eval_node_row(POSITION, row, None);
+    for y in 0..8usize {
+        for x in 0..8usize {
+            assert_pixel(
+                pixel_at(&frame, x, y),
+                [0.0, 0.0, 0.0, 0.0],
+                "off-frame content must be transparent",
+            );
+        }
+    }
 }

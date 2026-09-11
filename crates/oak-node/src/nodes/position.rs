@@ -61,8 +61,12 @@ void main(void) {
     vec2 half_res = resolution_in * 0.5;
     vec2 px = ove_texcoord * resolution_in - half_res;
     vec2 offset = floor(offset_in + 0.5);
-
-    frag_color = texture(tex_in, (px - offset + half_res) / resolution_in);
+    vec2 uv = (px - offset + half_res) / resolution_in;
+    // Whole-pixel translation past the frame edge leaves transparent
+    // pixels, not the clamped edge column.
+    vec4 col = texture(tex_in, uv);
+    float inside = step(0.0, uv.x) * step(0.0, uv.y) * step(uv.x, 1.0) * step(uv.y, 1.0);
+    frag_color = col * inside;
 }
 "#;
 
@@ -290,7 +294,9 @@ mod tests {
         assert!(code.contains("uniform sampler2D tex_in;"));
         assert!(code.contains("uniform vec2 offset_in;"));
         assert!(code.contains("uniform vec2 resolution_in;"));
-        assert!(code.contains("frag_color = texture(tex_in, (px - offset + half_res) / resolution_in);"));
+        assert!(code.contains("vec2 uv = (px - offset + half_res) / resolution_in;"));
+        // Off-frame samples are masked to transparent, not clamped.
+        assert!(code.contains("frag_color = col * inside;"));
         assert!(!code.contains("switch"));
     }
 

@@ -3649,6 +3649,47 @@ mod tests {
         );
     }
 
+    /// A transform that pushes content past the frame edge leaves the
+    /// vacated region TRANSPARENT (no edge-pixel smearing): translating
+    /// everything +100px in x empties the frame entirely, and a +3px
+    /// translation vacates exactly the left three columns.
+    #[test]
+    fn gpu_transform_off_frame_is_transparent() {
+        if oak_core::backend::GpuContext::shared().is_none() {
+            eprintln!("no adapter; skipping");
+            return;
+        }
+        let white = filled_frame((8, 8), [1.0, 1.0, 1.0, 1.0]);
+        let mut inputs = NodeValueRow::new();
+        inputs.insert("tex_in".into(), texture_value(white));
+        inputs.insert("pos_in".into(), NodeValue::Vec2([100.0, 0.0]));
+        let out = eval_node_row("org.olivevideoeditor.Olive.transform", inputs, None);
+        for y in 0..8usize {
+            for x in 0..8usize {
+                assert_eq!(
+                    pixel_at(&out, x, y),
+                    [0.0, 0.0, 0.0, 0.0],
+                    "off-frame content must be transparent, got {:?} at ({x},{y})",
+                    pixel_at(&out, x, y)
+                );
+            }
+        }
+
+        let white = filled_frame((8, 8), [1.0, 1.0, 1.0, 1.0]);
+        let mut inputs = NodeValueRow::new();
+        inputs.insert("tex_in".into(), texture_value(white));
+        inputs.insert("pos_in".into(), NodeValue::Vec2([3.0, 0.0]));
+        let out = eval_node_row("org.olivevideoeditor.Olive.transform", inputs, None);
+        for x in 0..3usize {
+            assert_eq!(
+                pixel_at(&out, x, 4),
+                [0.0, 0.0, 0.0, 0.0],
+                "the vacated left columns are transparent"
+            );
+        }
+        assert_eq!(pixel_at(&out, 7, 4), [1.0, 1.0, 1.0, 1.0], "the rightmost column keeps content");
+    }
+
     /// Shape generator over the real GPU path: a centered 8x8 rectangle
     /// on a 16x16 frame fills exactly the middle block (pixel centers
     /// with texcoord in [0.25, 0.75)), everything outside stays

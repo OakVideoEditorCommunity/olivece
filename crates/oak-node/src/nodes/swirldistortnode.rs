@@ -76,7 +76,12 @@ void main(void) {
     tc = vec2(dot(tc, vec2(c, -s)), dot(tc, vec2(s, c)));
   }
   tc += center;
-  frag_color = texture(tex_in, tc / resolution_in);
+  vec2 uv = tc / resolution_in;
+  // A swirl displacing content past the frame edge leaves transparent
+  // pixels, not the clamped edge pixels.
+  vec4 col = texture(tex_in, uv);
+  float inside = step(0.0, uv.x) * step(0.0, uv.y) * step(uv.x, 1.0) * step(uv.y, 1.0);
+  frag_color = col * inside;
 }
 "#;
 

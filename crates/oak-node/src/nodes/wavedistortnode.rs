@@ -69,8 +69,11 @@ void main(void) {
     pos.y -= sin((ove_texcoord.x-(evolution_in*0.01))*frequency_in)*intensity_in*0.01;
   }
 
+  // Out-of-frame displacement leaves transparent pixels (never the
+  // clamped edge pixels, and never `discard`, which would leave the
+  // destination texel undefined).
   if (pos.x < 0.0 || pos.x >= 1.0 || pos.y < 0.0 || pos.y >= 1.0) {
-    discard;
+    frag_color = vec4(0.0);
   } else {
     frag_color = texture(tex_in, pos);
   }
