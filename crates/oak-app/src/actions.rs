@@ -332,6 +332,20 @@ pub fn entry_for_menu_id(id: usize) -> Option<&'static ActionEntry> {
 	REGISTRY.iter().find(|entry| entry.action.menu_id() == id)
 }
 
+/// The key-context every app hotkey stays out of: the editable-text
+/// element's `"EditableText"` context (shared by the app's single-line
+/// and multiline fields). NLEs run on single-key shuttles (j/k/l, i/o,
+/// c/v, …), and a context-less binding is treated as matching the
+/// DEEPEST context, so an ungated global would swallow every letter a
+/// user types into a value box / hex field / text input (the "cannot
+/// type into the text field" report).
+pub(crate) fn input_exclusion_predicate() -> Rc<KeyBindingContextPredicate> {
+	Rc::new(
+		KeyBindingContextPredicate::parse("!EditableText")
+			.expect("the input-exclusion predicate parses"),
+	)
+}
+
 /// The global key bindings for every action's *effective* key. The shell
 /// dispatches them wherever the focus is (the modal guard in the shell's
 /// action listeners suppresses them while a dialog is open). An unbound
@@ -344,14 +358,17 @@ pub fn entry_for_menu_id(id: usize) -> Option<&'static ActionEntry> {
 /// value box / hex field / text input can type `1..9`.
 pub fn key_bindings() -> Vec<KeyBinding> {
 	let mut bindings = Vec::new();
+	let not_input = input_exclusion_predicate();
 	for entry in REGISTRY {
 		// The stable C++ ids of the 18 source-switch actions all start
 		// with `multicamswitch` (1..9 and 1nosplit..9nosplit); nothing
 		// else shares the prefix.
-		let context = entry
-			.cpp_id
-			.starts_with("multicamswitch")
-			.then(|| Rc::new(KeyBindingContextPredicate::parse("MulticamPanel").unwrap()));
+		let context = if entry.cpp_id.starts_with("multicamswitch") {
+			Rc::new(KeyBindingContextPredicate::parse("MulticamPanel").unwrap())
+		} else {
+			not_input.clone()
+		};
+		let context = Some(context);
 		for key in effective_keys(entry) {
 			let binding = KeyBinding::load(
 				&key,
@@ -921,13 +938,35 @@ mod tests {
 					"the source-switch binding must be gated on the MulticamPanel key context"
 				);
 			} else {
-				assert!(
-					binding.predicate().is_none(),
-					"non-multicam bindings must stay global"
+				assert_eq!(
+					binding.predicate(),
+					Some(input_exclusion_predicate()),
+					"non-multicam bindings must stay out of text fields"
 				);
 			}
 		}
 		assert_eq!(scoped, 18, "all 18 source-switch bindings are panel-scoped");
+	}
+
+	/// The input-exclusion predicate matches everywhere EXCEPT inside an
+	/// editable-text field, so single-key shuttles (j/k/l, i/o, c/v, …)
+	/// fire on the timeline but never swallow a letter typed into a value
+	/// box / hex field / text input (the "cannot type into the text field"
+	/// report).
+	#[test]
+	fn input_exclusion_predicate_stays_out_of_text_fields() {
+		let predicate = input_exclusion_predicate();
+		let text_context = gpui::KeyContext::parse("EditableText").unwrap();
+		let panel_context = gpui::KeyContext::parse("Timeline").unwrap();
+		assert_eq!(
+			predicate.depth_of(&[text_context]),
+			None,
+			"no app hotkey matches while a text field is focused"
+		);
+		assert!(
+			predicate.depth_of(&[panel_context]).is_some(),
+			"hotkeys still match outside text fields"
+		);
 	}
 
 	/// Every registry action appears somewhere in the menu tree (an action

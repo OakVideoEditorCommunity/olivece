@@ -3302,6 +3302,11 @@ impl<E: AppEngine> Render for OakApp<E> {
 			// The shell paints the design's near-black base behind the dock;
 			// panels and chrome layer their own fills on top.
 			.bg(cx.default_colors().background)
+			// Keep the dispatch context stack non-empty everywhere in the
+			// shell: predicate-gated key bindings (`!EditableText`) never match
+			// on an empty stack, so without a root context every global
+			// shortcut goes dead outside the panels that set their own.
+			.key_context("OakApp")
 			.track_focus(&self.shell_focus);
 		// The shell's keyboard dispatch layer: the global key bindings
 		// (registered in `new` from the action registry) dispatch gpui
