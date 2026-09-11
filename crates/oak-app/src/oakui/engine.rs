@@ -1094,6 +1094,38 @@ pub trait AppEngine:
 		Err("no project open".to_string())
 	}
 
+	/// Drops a GENERATOR effect (checkerboard / color bars / shape / …)
+	/// from the effect library onto the timeline at `(track_index, time)`:
+	/// creates the generator node and places a 5-second generator clip fed
+	/// by it — a standalone clip, not an effect on another clip (the
+	/// inspector just shows the generator's params). Default: unsupported.
+	fn drop_generator_clip(
+		&mut self,
+		type_id: &str,
+		track_index: usize,
+		time: Frame,
+		cx: &mut Context<Self>,
+	) -> Result<(), String> {
+		let _ = (type_id, track_index, time, cx);
+		Err("no project open".to_string())
+	}
+
+	/// Drops a TRANSITION effect onto the timeline near `(track_index,
+	/// time)`: snaps to the nearest clip edge on that track and creates a
+	/// transition there — a junction transition when the edge is a
+	/// contiguous cut, otherwise a single-sided head/tail transition
+	/// (PR-style edge drops). Default: unsupported.
+	fn drop_transition_at(
+		&mut self,
+		type_id: &str,
+		track_index: usize,
+		time: Frame,
+		cx: &mut Context<Self>,
+	) -> Result<(), String> {
+		let _ = (type_id, track_index, time, cx);
+		Err("no project open".to_string())
+	}
+
 	/// Applies new name/format/interlaced parameters to the sequence `id`.
 	fn update_sequence_parameters(
 		&mut self,

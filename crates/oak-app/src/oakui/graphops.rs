@@ -1851,19 +1851,119 @@ pub fn add_transition_at_seam(
 	Ok(block)
 }
 
+/// The undo commands of [`add_transition_at_edge`], unpushed (the batch
+/// paths build their own combined rows).
+fn edge_transition_commands(
+	p: &ProjectRef,
+	clip: NodeId,
+	start_edge: bool,
+	length: Rational,
+) -> Result<(NodeId, Vec<oak_undo::undocommand::UndoCommand>), String> {
+	if length <= Rational::new(0, 1) {
+		return Err("transition: the length must be positive".to_string());
+	}
+	let (track, anchor, edge_time) = {
+		let g = lock(p);
+		if clip_behavior(&g.graph, clip).is_none() {
+			return Err("transition: the block is not a clip".to_string());
+		}
+		let Some(core) = block_core_of(&g.graph, clip) else {
+			return Err("transition: the clip has no block core".to_string());
+		};
+		let Some(track) = core.track else {
+			return Err("transition: the clip is not on a track".to_string());
+		};
+		let Some(blocks) = track_behavior(&g.graph, track).map(|t| t.blocks.clone()) else {
+			return Err("transition: the track is not in the project".to_string());
+		};
+		let Some(index) = blocks.iter().position(|&b| b == clip) else {
+			return Err("transition: the clip is not on the track".to_string());
+		};
+		if transition_of_clip(&g.graph, clip, start_edge).is_some() {
+			return Err("transition: the edge already carries a transition".to_string());
+		}
+		// The head transition inserts before the clip (after whatever block
+		// precedes it); the tail inserts after the clip.
+		let anchor = if start_edge {
+			index.checked_sub(1).and_then(|i| blocks.get(i)).copied()
+		} else {
+			Some(clip)
+		};
+		let edge_time = if start_edge { core.in_() } else { core.out() };
+		(track, anchor, edge_time)
+	};
+	let block = {
+		let mut g = lock(p);
+		let (core, behavior) = oak_node::block::transition_create();
+		let id = g.graph.add_node(core, behavior);
+		let Some(t) = g
+			.graph
+			.get_mut(id)
+			.and_then(|e| e.behavior.as_any_mut())
+			.and_then(|a| a.downcast_mut::<oak_node::block::TransitionBlockBehavior>())
+		else {
+			return Err("transition: could not create the block".to_string());
+		};
+		if start_edge {
+			// Head: no outgoing side — the whole span eats into the clip.
+			t.core.range = TimeRange::new(edge_time, edge_time + length);
+			t.in_offset = Rational::new(0, 1);
+			t.out_offset = length;
+		} else {
+			t.core.range = TimeRange::new(edge_time - length, edge_time);
+			t.in_offset = length;
+			t.out_offset = Rational::new(0, 1);
+		}
+		id
+	};
+	let input = if start_edge {
+		oak_node::block::transition_input::IN_BLOCK
+	} else {
+		oak_node::block::transition_input::OUT_BLOCK
+	};
+	let insert = oak_timeline::undotrack::TrackInsertBlockAfterCommand::new(
+		node_ref(p, track),
+		node_ref(p, block),
+		anchor.map(|b| node_ref(p, b)),
+	)
+	.to_command();
+	let edge = connect_command(p, clip, block, input)?;
+	Ok((block, vec![insert, edge]))
+}
+
+/// Create a SINGLE-SIDED transition on one edge of `clip` (PR-style: a
+/// head fade-in when nothing precedes the clip, a tail fade-out when
+/// nothing follows it) and push it as one "Add Transition" undo row.
+/// Only the clip itself is wired (`in_block_in` for the head,
+/// `out_block_in` for the tail); the renderer blends the open side
+/// against black. An edge that already carries a transition is an error.
+pub fn add_transition_at_edge(
+	p: &ProjectRef,
+	clip: NodeId,
+	start_edge: bool,
+	length: Rational,
+) -> Result<NodeId, String> {
+	let (block, commands) = edge_transition_commands(p, clip, start_edge, length)?;
+	push_multi(commands, "Add Transition")?;
+	Ok(block)
+}
+
 /// Add a default transition at every contiguous seam around the selected
-/// clips (the Ctrl+Shift+D action / the timeline clip-menu item).
+/// clips, plus BOTH ends of any clip with no junction at all (the
+/// Ctrl+Shift+D action / the timeline clip-menu item — PR's
+/// apply-to-edit-points semantics, extended to lone clips).
 ///
-/// `half` is half of the default transition length: the transition spans
-/// `half` on either side of its seam. Every selected clip contributes the
-/// seam before it and the seam after it; a neighbor only counts when it is
-/// a clip block (not a gap, a transition or an adjustment layer) that
-/// touches the clip exactly, and a seam shared by two selected clips is
-/// built once. Seams that cannot take a transition (an existing
-/// transition, a non-contiguous neighbor) are skipped. The whole batch is
-/// one "Add Transition" undo row; a batch that builds nothing is an error,
-/// so the action never leaves an empty row. Returns the number of
-/// transitions created.
+/// `half` is half of the default transition length: a junction transition
+/// spans `half` on either side of its seam, a head/tail (single-sided)
+/// transition spans `2*half` into its own clip. Every selected clip
+/// contributes the seam before it and the seam after it (a neighbor
+/// counts only when it is a clip block that touches the clip exactly,
+/// shared seams built once), plus a head transition when nothing
+/// precedes it and a tail transition when nothing follows it. Seams and
+/// edges that cannot take a transition (an existing one) are skipped.
+/// The whole batch is one "Add Transition" undo row; a batch that builds
+/// nothing is an error, so the action never leaves an empty row. Returns
+/// the number of transitions created.
 ///
 /// `seq` scopes the action: a selected block whose track list belongs to
 /// another sequence is ignored.
@@ -1882,12 +1982,12 @@ pub fn add_default_transition(
 	};
 
 	let mut seams: Vec<(NodeId, NodeId)> = Vec::new();
+	// Standalone ends, applied ONLY when the clip has no junction at all
+	// (PR's both-ends-on-a-lone-clip default): `(clip, start_edge)`.
+	let mut edges: Vec<(NodeId, bool)> = Vec::new();
 	for &clip in clip_blocks {
-		let candidates: Vec<(NodeId, NodeId)> = {
+		let (candidates, touches_prev, touches_next) = {
 			let g = lock(p);
-			if clip_behavior(&g.graph, clip).is_none() {
-				continue;
-			}
 			let Some(track) = clip_track(&g.graph, clip) else {
 				continue;
 			};
@@ -1903,34 +2003,60 @@ pub fn add_default_transition(
 			let Some(index) = blocks.iter().position(|&b| b == clip) else {
 				continue;
 			};
+			if clip_behavior(&g.graph, clip).is_none() {
+				continue;
+			}
 			let range = block_core_of(&g.graph, clip).map(|c| (c.in_(), c.out()));
 			let mut sides = Vec::new();
-			if let Some(&prev) = index.checked_sub(1).and_then(|i| blocks.get(i)) {
+			let prev = index.checked_sub(1).and_then(|i| blocks.get(i)).copied();
+			if let Some(prev) = prev {
 				if clip_behavior(&g.graph, prev).is_some()
 					&& block_core_of(&g.graph, prev).map(|c| c.out()) == range.map(|r| r.0)
 				{
 					sides.push((prev, clip));
 				}
 			}
-			if let Some(&next) = blocks.get(index + 1) {
+			let next = blocks.get(index + 1).copied();
+			if let Some(next) = next {
 				if clip_behavior(&g.graph, next).is_some()
 					&& block_core_of(&g.graph, next).map(|c| c.in_()) == range.map(|r| r.1)
 				{
 					sides.push((clip, next));
 				}
 			}
-			sides
+			let (touches_prev, touches_next) = (
+				sides.iter().any(|(_, next)| *next == clip),
+				sides.iter().any(|(prev, _)| *prev == clip),
+			);
+			(sides, touches_prev, touches_next)
 		};
+		let seam_count = candidates.len();
 		for seam in candidates {
 			if !seams.contains(&seam) {
 				seams.push(seam);
 			}
 		}
-	}
-	if seams.is_empty() {
-		return Err("transition: no selected clip borders another clip".to_string());
+		// A clip with no junction at all and no transition wired to it
+		// takes the free ends (a leading gap is "nothing" — a head
+		// fade-in still applies); a clip with any junction or an existing
+		// transition keeps just what it has (the action is idempotent: a
+		// second run builds nothing).
+		if seam_count == 0
+			&& transition_of_clip(&lock(p).graph, clip, true).is_none()
+			&& transition_of_clip(&lock(p).graph, clip, false).is_none()
+		{
+			if !touches_prev {
+				edges.push((clip, true));
+			}
+			if !touches_next {
+				edges.push((clip, false));
+			}
+		}
 	}
 
+	// One undo row covers the junctions AND the standalone ends; a batch
+	// that builds nothing is an error, so the action never leaves an empty
+	// row.
 	let mut commands = Vec::new();
 	let mut created = 0usize;
 	for (prev, next) in seams {
@@ -1939,8 +2065,15 @@ pub fn add_default_transition(
 			created += 1;
 		}
 	}
+	let edge_length = half + half;
+	for (clip, start_edge) in edges {
+		if let Ok((_, children)) = edge_transition_commands(p, clip, start_edge, edge_length) {
+			commands.extend(children);
+			created += 1;
+		}
+	}
 	if created == 0 {
-		return Err("transition: no contiguous seam accepts a transition".to_string());
+		return Err("transition: no seam or clip edge accepts a transition".to_string());
 	}
 	push_multi(commands, "Add Transition")?;
 	Ok(created)
@@ -2155,19 +2288,42 @@ pub fn place_text_clip(
 	in_ts: i64,
 	out_ts: i64,
 ) -> Result<NodeId, String> {
+	{
+		let g = lock(p);
+		if node_type_id(&g.graph, text) != TEXT_FOOTAGE_TYPE_ID {
+			return Err("the text entry is not in the project".to_string());
+		}
+	}
+	place_generator_clip(p, host_seq, text, track_index, in_ts, out_ts)
+}
+
+/// Place a clip fed by a GENERATOR node (checkerboard / color bars /
+/// text / shape / solid…) at `(track_index, [in_ts, out_ts))` — the
+/// effect-library drag-to-timeline counterpart of [`place_text_clip`]:
+/// one undo row covers the placement and the generator→`tex_in` edge.
+/// The generator must already be in the project; the clip is labelled
+/// after it. Returns the clip's node id.
+pub fn place_generator_clip(
+	p: &ProjectRef,
+	host_seq: NodeId,
+	generator: NodeId,
+	track_index: usize,
+	in_ts: i64,
+	out_ts: i64,
+) -> Result<NodeId, String> {
 	if in_ts < 0 || out_ts <= in_ts {
 		return Err("invalid clip range (need 0 <= in < out)".to_string());
 	}
 	let (tb, list, label) = {
 		let g = lock(p);
-		if node_type_id(&g.graph, text) != TEXT_FOOTAGE_TYPE_ID {
-			return Err("the text entry is not in the project".to_string());
+		if g.graph.get(generator).is_none() {
+			return Err("the generator node is not in the project".to_string());
 		}
 		let tb = sequence_time_base(&g.graph, host_seq)
 			.ok_or_else(|| "host sequence has no valid frame rate".to_string())?;
 		let list = track_list_of(&g.graph, host_seq, TrackType::Video)
 			.ok_or_else(|| "host sequence has no video track list".to_string())?;
-		let label = node_label(&g.graph, text);
+		let label = node_label(&g.graph, generator);
 		(tb, list, label)
 	};
 	let track_count = {
@@ -2214,7 +2370,7 @@ pub fn place_text_clip(
 		in_r,
 	)
 	.to_command();
-	let edge = connect_command(p, text, clip, oak_node::block::clip_input::TEXTURE_INPUT)?;
+	let edge = connect_command(p, generator, clip, oak_node::block::clip_input::TEXTURE_INPUT)?;
 	push_multi(vec![place, edge], "Add Clip")?;
 	Ok(clip)
 }
@@ -4418,6 +4574,117 @@ mod undo_cycle_ops_tests {
 		};
 		let half = ts_to_rational(3, tb);
 		(project, seq, track, a, b, tb, half)
+	}
+
+	/// A LONE clip (no junction on either side) takes the default
+	/// transition on BOTH ends (PR's apply-to-a-lone-clip semantics): a
+	/// head fade-in wired `in_block_in` only and a tail fade-out wired
+	/// `out_block_in` only, each spanning `2*half` into the clip, as ONE
+	/// undo row — and the action is idempotent (a second run has nothing
+	/// left to build and leaves no empty row).
+	#[test]
+	fn default_transition_covers_both_ends_of_a_lone_clip() {
+		let _g = test_lock();
+		oak_undo::global::clear().unwrap();
+		let media = std::env::temp_dir()
+			.join(format!("oak_lone_transition_{}.mp4", std::process::id()));
+		oak_codec::testmedia::write_test_clip(&media, 64, 64, 10, 10).expect("generate");
+		let project = create_project();
+		let seq = create_sequence(&project, "Lone Transition");
+		let footage = import_footage(&project, &media).expect("import");
+		let clip = place_footage_clip(&project, seq, footage, TrackType::Video, 0, 10, 30, 0)
+			.expect("place the clip");
+		let (tb, track) = {
+			let g = lock(&project);
+			(
+				sequence_time_base(&g.graph, seq).expect("time base"),
+				track_ids(&g.graph, seq, TrackType::Video)[0],
+			)
+		};
+		let half = ts_to_rational(3, tb);
+
+		let before = oak_undo::global::count().unwrap();
+		let created = add_default_transition(&project, seq, &[clip], half)
+			.expect("add default transition");
+		assert_eq!(created, 2, "a lone clip takes both ends");
+		assert_eq!(oak_undo::global::count().unwrap(), before + 1, "one undo row");
+
+		let edge = half + half;
+		{
+			let g = lock(&project);
+			let blocks = track_behavior(&g.graph, track)
+				.map(|t| t.blocks.clone())
+				.unwrap_or_default();
+			let index = blocks.iter().position(|&b| b == clip).expect("clip on track");
+			// (A leading gap when the clip starts past zero,) the head
+			// transition, the clip, the tail transition.
+			let (head, tail) = (blocks[index - 1], blocks[index + 1]);
+			let head_b = g
+				.graph
+				.get(head)
+				.and_then(|e| e.behavior.as_any())
+				.and_then(|a| a.downcast_ref::<oak_node::block::TransitionBlockBehavior>())
+				.expect("head transition");
+			assert_eq!(
+				(head_b.in_offset, head_b.out_offset),
+				(Rational::new(0, 1), edge),
+				"the head transition eats only into the clip"
+			);
+			assert_eq!(
+				(head_b.core.in_(), head_b.core.out()),
+				(ts_to_rational(10, tb), ts_to_rational(10, tb) + edge),
+				"the head transition spans the clip's head"
+			);
+			assert_eq!(
+				g.graph.connected_output(head, oak_node::block::transition_input::IN_BLOCK, -1),
+				Some(clip),
+				"the head transition wires only the clip in"
+			);
+			assert_eq!(
+				g.graph.connected_output(head, oak_node::block::transition_input::OUT_BLOCK, -1),
+				None,
+				"the head transition has no outgoing side"
+			);
+			let tail_b = g
+				.graph
+				.get(tail)
+				.and_then(|e| e.behavior.as_any())
+				.and_then(|a| a.downcast_ref::<oak_node::block::TransitionBlockBehavior>())
+				.expect("tail transition");
+			assert_eq!(
+				(tail_b.in_offset, tail_b.out_offset),
+				(edge, Rational::new(0, 1)),
+				"the tail transition eats only into the clip"
+			);
+			assert_eq!(
+				(tail_b.core.in_(), tail_b.core.out()),
+				(ts_to_rational(30, tb) - edge, ts_to_rational(30, tb)),
+				"the tail transition spans the clip's tail"
+			);
+			assert_eq!(
+				g.graph.connected_output(tail, oak_node::block::transition_input::OUT_BLOCK, -1),
+				Some(clip),
+				"the tail transition wires only the clip out"
+			);
+			assert_eq!(
+				g.graph.connected_output(tail, oak_node::block::transition_input::IN_BLOCK, -1),
+				None,
+				"the tail transition has no incoming side"
+			);
+			// The wedges: a head transition draws on the clip's start edge, a
+			// tail transition on its end edge.
+			assert_eq!(transition_of_clip(&g.graph, clip, true), Some(head));
+			assert_eq!(transition_of_clip(&g.graph, clip, false), Some(tail));
+		}
+
+		// Idempotent: every edge already carries a transition, so a second
+		// run builds nothing and leaves no empty row.
+		let rows = oak_undo::global::count().unwrap();
+		assert!(add_default_transition(&project, seq, &[clip], half).is_err());
+		assert_eq!(oak_undo::global::count().unwrap(), rows);
+
+		oak_undo::global::clear().unwrap();
+		let _ = std::fs::remove_file(&media);
 	}
 
 	/// 编辑 → 设为默认转场: one transition per contiguous seam around the

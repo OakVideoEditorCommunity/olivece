@@ -1437,8 +1437,12 @@ enum TrackRenderStep {
     /// selects.
     Transition {
         block: oak_node::id::NodeId,
-        out_block: oak_node::id::NodeId,
-        in_block: oak_node::id::NodeId,
+        /// The outgoing (previous) block — `None` for a head transition
+        /// (no previous clip; fades in from black).
+        out_block: Option<oak_node::id::NodeId>,
+        /// The incoming (next) block — `None` for a tail transition (no
+        /// next clip; fades out to black).
+        in_block: Option<oak_node::id::NodeId>,
         progress: f64,
         shader: &'static str,
     },
@@ -1510,8 +1514,8 @@ fn blend_transition(
     graph: &oak_node::graph::Graph,
     traverser: &mut oak_node::traverser::Traverser,
     hooks: &mut RenderEvalHooks,
-    out_block: oak_node::id::NodeId,
-    in_block: oak_node::id::NodeId,
+    out_block: Option<oak_node::id::NodeId>,
+    in_block: Option<oak_node::id::NodeId>,
     time: Rational,
     progress: f64,
     shader: &str,
@@ -1519,8 +1523,30 @@ fn blend_transition(
     use oak_node::nodes::transitions;
     use oak_node::value::NodeValueRow;
 
-    let from = evaluate_block_frame(graph, traverser, hooks, out_block, time)?;
-    let to = evaluate_block_frame(graph, traverser, hooks, in_block, time)?;
+    let from = match out_block {
+        Some(block) => evaluate_block_frame(graph, traverser, hooks, block, time)?,
+        None => None,
+    };
+    let to = match in_block {
+        Some(block) => evaluate_block_frame(graph, traverser, hooks, block, time)?,
+        None => None,
+    };
+    if from.is_none() && to.is_none() {
+        return Ok(None);
+    }
+
+    // A single-sided transition blends against transparent black (a head
+    // fade-in from nothing, a tail fade-out to nothing) — the same
+    // shaders, with one side generated empty.
+    let size = from
+        .as_ref()
+        .or(to.as_ref())
+        .map(|f| (f.width, f.height))
+        .or(hooks.frame_size)
+        .unwrap_or((1, 1));
+    let black = |size: (i32, i32)| generate_frame(time, size, PixelFormat::F32).ok();
+    let from = from.or_else(|| black(size));
+    let to = to.or_else(|| black(size));
 
     // Both sides present: blend them. The side frames are boxed as CPU
     // textures (the shader-job path uploads those into scratch textures
@@ -1803,7 +1829,11 @@ pub fn render_graph_frame(
                         {
                             continue;
                         }
-                        let (Some(out_block), Some(in_block)) = (
+                        // A transition needs at least one neighbor: a
+                        // junction block wires both, a head/tail
+                        // (single-sided) transition wires only its own
+                        // clip and fades from/to black.
+                        let (out_block, in_block) = (
                             graph.connected_output(
                                 *block_id,
                                 oak_node::block::transition_input::OUT_BLOCK,
@@ -1814,9 +1844,10 @@ pub fn render_graph_frame(
                                 oak_node::block::transition_input::IN_BLOCK,
                                 -1,
                             ),
-                        ) else {
+                        );
+                        if out_block.is_none() && in_block.is_none() {
                             continue;
-                        };
+                        }
                         let style = block
                             .core
                             .value_at_time(

@@ -2015,6 +2015,72 @@ impl AppEngine for MockEngine {
 		Ok(id)
 	}
 
+	fn drop_generator_clip(
+		&mut self,
+		type_id: &str,
+		track_index: usize,
+		time: Frame,
+		cx: &mut Context<Self>,
+	) -> Result<(), String> {
+		// A 5-second canned clip labelled after the generator, on the
+		// pointed (or first) video track — the mock's footage-drop shape.
+		let name = crate::oakui::effectchain::addable_effects()
+			.into_iter()
+			.find(|entry| entry.type_id == type_id)
+			.map(|entry| entry.name)
+			.unwrap_or_else(|| type_id.to_string());
+		let target = if self
+			.tracks
+			.get(track_index)
+			.is_some_and(|t| t.kind == TrackKind::Video)
+		{
+			track_index
+		} else if let Some(index) = self.tracks.iter().position(|t| t.kind == TrackKind::Video)
+		{
+			index
+		} else {
+			return Err("no video track".to_string());
+		};
+		let fps = self.frame_rate();
+		let length = Frame(
+			(5.0 * fps.num as f64 / fps.den.max(1) as f64)
+				.round()
+				.max(1.0) as i64,
+		);
+		let clip = MockClip {
+			id: ClipId(self.next_mock_clip_id()),
+			range: FrameRange::new(Frame(time.0.max(0)), Frame(time.0.max(0) + length.0)),
+			media_in: Frame::ZERO,
+			label: name.into(),
+			color: Hsla {
+				h: 0.402,
+				s: 0.385,
+				l: 0.459,
+				a: 1.0,
+			},
+		};
+		let track = &mut self.tracks[target];
+		let position = track
+			.clips
+			.iter()
+			.position(|c| c.range.start.0 > time.0)
+			.unwrap_or(track.clips.len());
+		track.clips.insert(position, clip);
+		cx.notify();
+		Ok(())
+	}
+
+	fn drop_transition_at(
+		&mut self,
+		_type_id: &str,
+		_track_index: usize,
+		_time: Frame,
+		_cx: &mut Context<Self>,
+	) -> Result<(), String> {
+		// The mock models no transition blocks; the route is accepted.
+		Ok(())
+	}
+
 	fn drop_footage(
 		&mut self,
 		id: u64,

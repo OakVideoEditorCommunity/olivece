@@ -5864,6 +5864,159 @@ impl AppEngine for RealEngine {
 		Ok(id.identity())
 	}
 
+	fn drop_generator_clip(
+		&mut self,
+		type_id: &str,
+		track_index: usize,
+		time: Frame,
+		cx: &mut Context<Self>,
+	) -> Result<(), String> {
+		let Some(project) = self.project.clone() else {
+			return Err("no project open".to_string());
+		};
+		let Some(host_seq) = self.sequence else {
+			return Err("no sequence open".to_string());
+		};
+		// The effect-library generator becomes a node in the project, then
+		// a generator clip feeds from it (the text-clip drop's shape).
+		let (core, behavior) = oak_node::factory::Factory::global()
+			.create_any(type_id)
+			.ok_or_else(|| format!("unknown effect \"{type_id}\""))?;
+		if !behavior.categories().contains(&oak_node::node::Category::Generator) {
+			return Err(format!("effect \"{type_id}\" is not a generator"));
+		}
+		let generator = {
+			let mut guard = graphops::lock(&project);
+			guard.graph.add_node(core, behavior)
+		};
+		let video_target = if self
+			.tracks
+			.get(track_index)
+			.is_some_and(|t| t.kind == TrackKind::Video)
+		{
+			track_index
+		} else if let Some(index) = self.tracks.iter().position(|t| t.kind == TrackKind::Video)
+		{
+			index
+		} else {
+			return Err("no video track".to_string());
+		};
+		let video_index = self.tracks[video_target].track_index;
+		// Five seconds of the host sequence's frames (the drop's default
+		// extent — a generator clip has no media length to take one from).
+		let (in_ts, length_ts) = {
+			let guard = graphops::lock(&project);
+			let tb = graphops::sequence_time_base(&guard.graph, host_seq)
+				.ok_or_else(|| "host sequence has no frame rate".to_string())?;
+			let fps_f = tb.1.max(1) as f64 / tb.0.max(1) as f64;
+			((time.0.max(0)), ((5.0 * fps_f).round() as i64).max(1))
+		};
+		let placed = graphops::place_generator_clip(
+			&project,
+			host_seq,
+			generator,
+			video_index,
+			in_ts,
+			in_ts + length_ts,
+		);
+		let result = placed.map(|_| ());
+		self.apply_edit(result.clone(), "drop generator clip", cx);
+		result
+	}
+
+	fn drop_transition_at(
+		&mut self,
+		_type_id: &str,
+		track_index: usize,
+		time: Frame,
+		cx: &mut Context<Self>,
+	) -> Result<(), String> {
+		let Some(project) = self.project.clone() else {
+			return Err("no project open".to_string());
+		};
+		let Some(host_seq) = self.sequence else {
+			return Err("no sequence open".to_string());
+		};
+		let video_target = if self
+			.tracks
+			.get(track_index)
+			.is_some_and(|t| t.kind == TrackKind::Video)
+		{
+			track_index
+		} else if let Some(index) = self.tracks.iter().position(|t| t.kind == TrackKind::Video)
+		{
+			index
+		} else {
+			return Err("no video track".to_string());
+		};
+		let video_index = self.tracks[video_target].track_index;
+		let placed = {
+			let guard = graphops::lock(&project);
+			let Some(track) = graphops::track_ids(&guard.graph, host_seq, TrackType::Video)
+				.get(video_index)
+				.copied()
+			else {
+				return Err("the target track is not in the sequence".to_string());
+			};
+			let Some(tb) = graphops::sequence_time_base(&guard.graph, track) else {
+				return Err("the track has no frame rate".to_string());
+			};
+			// Snap to the nearest clip edge on the target track (within one
+			// second): a junction when the edge is a contiguous cut,
+			// otherwise a single-sided head/tail transition.
+			let time_r = graphops::ts_to_rational(time.0.max(0), tb);
+			let mut best: Option<(oak_core::Rational, NodeId, bool)> = None;
+			for clip in graphops::clip_ids(&guard.graph, track) {
+				let Some((in_r, out_r, _)) = graphops::clip_range(&guard.graph, clip) else {
+					continue;
+				};
+				for (edge, start_edge) in [(in_r, true), (out_r, false)] {
+					let dist = if edge > time_r { edge - time_r } else { time_r - edge };
+					if best.as_ref().is_none_or(|(d, ..)| dist < *d) {
+						best = Some((dist, clip, start_edge));
+					}
+				}
+			}
+			let Some((dist, clip, start_edge)) = best else {
+				return Err("the target track has no clips".to_string());
+			};
+			if dist > oak_core::Rational::new(1, 1) {
+				return Err("no clip edge within one second of the drop point".to_string());
+			}
+			let Some((in_r, out_r, _)) = graphops::clip_range(&guard.graph, clip) else {
+				return Err("the edge clip has no range".to_string());
+			};
+			let blocks = graphops::track_behavior(&guard.graph, track)
+				.map(|t| t.blocks.clone())
+				.unwrap_or_default();
+			let index = blocks.iter().position(|&b| b == clip);
+			let prev = index.and_then(|i| i.checked_sub(1)).and_then(|i| blocks.get(i)).copied();
+			let next = index.and_then(|i| blocks.get(i + 1)).copied();
+			let prev_touch = prev.is_some_and(|b| {
+				graphops::clip_behavior(&guard.graph, b).is_some()
+					&& graphops::block_core_of(&guard.graph, b).map(|c| c.out()) == Some(in_r)
+			});
+			let next_touch = next.is_some_and(|b| {
+				graphops::clip_behavior(&guard.graph, b).is_some()
+					&& graphops::block_core_of(&guard.graph, b).map(|c| c.in_()) == Some(out_r)
+			});
+			// The default transition's half-length, one frame at least.
+			let fps = tb.1 as f64 / tb.0.max(1) as f64;
+			let half_frames = (0.5 * fps).round().max(1.0) as i64;
+			let half = graphops::ts_to_rational(half_frames, tb);
+			if start_edge && prev_touch {
+				graphops::add_transition_at_seam(&project, prev.unwrap(), clip, half)
+			} else if !start_edge && next_touch {
+				graphops::add_transition_at_seam(&project, clip, next.unwrap(), half)
+			} else {
+				graphops::add_transition_at_edge(&project, clip, start_edge, half + half)
+			}
+		};
+		let result = placed.map(|_| ());
+		self.apply_edit(result.clone(), "drop transition", cx);
+		result
+	}
+
 	fn update_sequence_parameters(
 		&mut self,
 		id: u64,
@@ -10622,7 +10775,98 @@ mod tests {
 		oak_undo::global::clear().unwrap();
 	}
 
-	/// 调整图层 through the engine facade: `add_adjustment_layer` places a
+	/// An effect-library generator (Color Bars) drops onto the timeline as
+	/// a STANDALONE generator clip: one undo row, the clip labelled after
+	/// the generator, fed through `tex_in`, spanning five seconds from the
+	/// drop frame — and undo removes it.
+	#[gpui::test]
+	async fn engine_drops_a_generator_effect_as_a_clip(cx: &mut gpui::TestAppContext) {
+		let _media = media_lock();
+		let engine = cx.update(|cx| cx.new(|cx| RealEngine::create(cx)));
+		cx.update(|app| engine.update(app, |engine, cx| engine.new_project(cx)));
+		let seq = cx.update(|app| {
+			engine.update(app, |engine, cx| {
+				engine
+					.create_sequence_with_params(
+						"Generator Drop".to_string(),
+						VideoFormat {
+							width: 1920,
+							height: 1080,
+							rate: FrameRate::new(30000, 1001),
+						},
+						false,
+						cx,
+					)
+					.expect("create sequence")
+			})
+		});
+		let project = cx.read(|app| engine.read(app).project.clone().expect("project"));
+
+		cx.update(|app| {
+			engine.update(app, |engine, cx| {
+				engine
+					.drop_generator_clip(
+						"org.olivevideoeditor.Olive.colorbars",
+						0,
+						Frame(25),
+						cx,
+					)
+					.expect("drop generator clip")
+			})
+		});
+
+		let seq_node = graphops::id_of(seq).expect("sequence node");
+		let target_row = cx.read(|app| engine.read(app).tracks[0].track_index);
+		let (tb, tracks) = {
+			let guard = graphops::lock(&project);
+			(
+				graphops::sequence_time_base(&guard.graph, seq_node).expect("time base"),
+				graphops::track_ids(&guard.graph, seq_node, TrackType::Video),
+			)
+		};
+		let track = tracks[target_row];
+		let (clip, generator) = {
+			let guard = graphops::lock(&project);
+			let clips = graphops::clip_ids(&guard.graph, track);
+			assert_eq!(clips.len(), 1, "the drop lands exactly one clip: {clips:?}");
+			let clip = clips[0];
+			let generator = guard
+				.graph
+				.connected_output(clip, oak_node::block::clip_input::TEXTURE_INPUT, -1)
+				.expect("the clip reads the generator through tex_in");
+			assert_eq!(
+				graphops::node_type_id(&guard.graph, generator),
+				"org.olivevideoeditor.Olive.colorbars"
+			);
+			let (in_r, out_r, _) = graphops::clip_range(&guard.graph, clip).expect("clip range");
+			let fps = tb.1 as f64 / tb.0 as f64;
+			let length = (5.0 * fps).round().max(1.0) as i64;
+			assert_eq!(in_r, graphops::ts_to_rational(25, tb));
+			assert_eq!(
+				out_r,
+				graphops::ts_to_rational(25 + length, tb),
+				"the clip spans five seconds from the drop point"
+			);
+			assert_eq!(
+				graphops::node_label(&guard.graph, clip),
+				graphops::node_label(&guard.graph, generator),
+				"the clip is labelled after its generator"
+			);
+			(clip, generator)
+		};
+		let _ = (clip, generator);
+
+		oak_undo::global::undo().unwrap();
+		{
+			let guard = graphops::lock(&project);
+			assert!(
+				graphops::clip_ids(&guard.graph, track).is_empty(),
+				"the undo removes the dropped clip"
+			);
+		}
+		oak_undo::global::clear().unwrap();
+	}
+
 	/// five-second empty block at the clicked frame on a video track (an
 	/// `AdjustmentBlockBehavior` with no footage and no texture wiring),
 	/// refuses audio tracks, resolves through the timeline selection, and is

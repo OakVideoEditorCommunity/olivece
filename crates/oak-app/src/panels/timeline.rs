@@ -97,6 +97,9 @@ pub struct TimelinePanel<E: AppEngine> {
 	/// the cursor plus the start frame. `None` outside the clip area or while
 	/// no footage drag is active.
 	footage_drop: Option<FootageDropTarget>,
+	/// The drop point of an in-flight effect-library drag (generator
+	/// effects becoming standalone clips). Same shape as `footage_drop`.
+	effect_drop: Option<FootageDropTarget>,
 	/// The right-click context menu (opened from
 	/// [`TimelineEvent::ContextMenuRequested`]).
 	context_menu: ContextMenuHandle,
@@ -201,6 +204,7 @@ impl<E: AppEngine> TimelinePanel<E> {
 			height,
 			snap,
 			footage_drop: None,
+		effect_drop: None,
 			context_menu,
 			context_track: None,
 			context_empty: None,
@@ -367,21 +371,21 @@ impl<E: AppEngine> TimelinePanel<E> {
 		}
 	}
 
-	/// Resolves the footage-drop target under the cursor: converts the
-	/// pointer (relative to the timeline body) into a display track + start
-	/// frame using the timeline view's zoom/scroll state and the engine's
-	/// track heights — the same affine mapping the timeline itself uses (see
-	/// [`TimelineState::frame_at_point`] and the view's track-row walk).
-	/// Hovering outside the clip area (above the ruler) clears the target.
-	fn update_footage_drop(&mut self, event: &DragMoveEvent<FootageDrag>, cx: &mut Context<Self>) {
-		let now = event.event.position - event.bounds.origin;
+	/// Resolves a drag pointer (relative to the timeline body) into a
+	/// display track + start frame using the timeline view's zoom/scroll
+	/// state and the engine's track heights — the same affine mapping the
+	/// timeline itself uses (see [`TimelineState::frame_at_point`] and the
+	/// view's track-row walk). `None` above the ruler (outside the clip
+	/// area).
+	fn resolve_drop_point(
+		&self,
+		now: Point<Pixels>,
+		cx: &App,
+	) -> Option<(TrackKind, usize, Frame)> {
 		// The clip area starts below the ruler and right of the track
 		// headers column.
 		if f32::from(now.y) < RULER_HEIGHT {
-			if self.footage_drop.take().is_some() {
-				cx.notify();
-			}
-			return;
+			return None;
 		}
 		let clip_x = f32::from(now.x - px(HEADER_WIDTH)).max(0.0);
 		let clip_y = now.y - px(RULER_HEIGHT);
@@ -413,6 +417,20 @@ impl<E: AppEngine> TimelinePanel<E> {
 					.unwrap_or((TrackKind::Video, 0))
 			})
 		};
+		Some((track_kind, track_index, time))
+	}
+
+	/// Resolves the footage-drop target under the cursor (see
+	/// [`Self::resolve_drop_point`]). Hovering outside the clip area
+	/// clears the target.
+	fn update_footage_drop(&mut self, event: &DragMoveEvent<FootageDrag>, cx: &mut Context<Self>) {
+		let now = event.event.position - event.bounds.origin;
+		let Some((track_kind, track_index, time)) = self.resolve_drop_point(now, cx) else {
+			if self.footage_drop.take().is_some() {
+				cx.notify();
+			}
+			return;
+		};
 		self.footage_drop = Some(FootageDropTarget {
 			track_kind,
 			track_index,
@@ -422,6 +440,86 @@ impl<E: AppEngine> TimelinePanel<E> {
 				.downcast_ref::<FootageDrag>()
 				.and_then(|drag| self.engine.read(cx).footage_length_frames(drag.0))
 				.unwrap_or(1),
+		});
+		cx.notify();
+	}
+
+	/// Resolves the effect-library drop target under the cursor (same
+	/// mapping as the footage drop; a generator clip's 5-second default
+	/// length in sequence frames).
+	fn update_effect_drop(
+		&mut self,
+		event: &DragMoveEvent<gpui::effect_stack::LibraryEffectDrag>,
+		cx: &mut Context<Self>,
+	) {
+		let now = event.event.position - event.bounds.origin;
+		let Some((track_kind, track_index, time)) = self.resolve_drop_point(now, cx) else {
+			if self.effect_drop.take().is_some() {
+				cx.notify();
+			}
+			return;
+		};
+		let length = {
+			let engine = self.engine.read(cx);
+			let fps = engine.frame_rate();
+			((5.0 * fps.num as f64 / fps.den.max(1) as f64).round() as i64).max(1)
+		};
+		self.effect_drop = Some(FootageDropTarget {
+			track_kind,
+			track_index,
+			time,
+			length,
+		});
+		cx.notify();
+	}
+
+	/// Applies a finished effect-library drop: generator-category effects
+	/// become a standalone generator clip at the hovered track + frame
+	/// (undoable, one row); transition effects snap to the nearest clip
+	/// edge as a junction or single-sided transition. Everything else is
+	/// ignored.
+	fn finish_effect_drop(
+		&mut self,
+		drag: &gpui::effect_stack::LibraryEffectDrag,
+		cx: &mut Context<Self>,
+	) {
+		let Some(target) = self.effect_drop.take() else {
+			return;
+		};
+		let type_id = drag.type_id.as_str();
+		let engine = self.engine.clone();
+		if matches!(
+			type_id,
+			"org.olivevideoeditor.Olive.transition" | "org.olivevideoeditor.Olive.transitionfx"
+		) {
+			engine.update(cx, |engine, cx| {
+				if let Err(err) =
+					engine.drop_transition_at(type_id, target.track_index, target.time, cx)
+				{
+					println!("[timeline] transition drop: {err}");
+				}
+			});
+			cx.notify();
+			return;
+		}
+		let is_generator = oak_node::factory::Factory::global()
+			.create_any(type_id)
+			.map(|(_, behavior)| {
+				behavior
+					.categories()
+					.contains(&oak_node::node::Category::Generator)
+			})
+			.unwrap_or(false);
+		if !is_generator {
+			println!("[timeline] effect drop: \"{type_id}\" is not a generator");
+			return;
+		}
+		engine.update(cx, |engine, cx| {
+			if let Err(err) =
+				engine.drop_generator_clip(type_id, target.track_index, target.time, cx)
+			{
+				println!("[timeline] generator clip drop failed: {err}");
+			}
 		});
 		cx.notify();
 	}
@@ -1020,13 +1118,31 @@ impl<E: AppEngine> Render for TimelinePanel<E> {
 								}
 								this.finish_footage_drop(drag, cx);
 							}))
+							// Effect-library drop target (generator effects →
+							// standalone generator clips).
+							.on_drag_move(cx.listener(
+								|this,
+								 event: &DragMoveEvent<gpui::effect_stack::LibraryEffectDrag>,
+								 _window,
+								 cx| {
+									this.update_effect_drop(event, cx);
+								},
+							))
+							.on_drop(cx.listener(
+								|this,
+								 drag: &gpui::effect_stack::LibraryEffectDrag,
+								 _window,
+								 cx| {
+									this.finish_effect_drop(drag, cx);
+								},
+							))
 							.child({
 								let mut inner =
 									div().relative().size_full().child(self.timeline.clone());
 								// The drop ghost: a translucent block at the
 								// resolved track + frame, spanning the footage's
 								// length, so the user sees where the clip lands.
-								if let Some(target) = &self.footage_drop {
+								if let Some(target) = self.footage_drop.as_ref().or(self.effect_drop.as_ref()) {
 									let state = self.timeline.read(cx).state.clone();
 									let x = px(HEADER_WIDTH) + state.point_at_frame(target.time);
 									let width = px(target.length as f32 * state.zoom).max(px(4.0));
