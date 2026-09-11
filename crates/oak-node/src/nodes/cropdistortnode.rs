@@ -19,7 +19,7 @@
 //! `olive::CropDistortNode`).
 
 use crate::factory::NodeMeta;
-use crate::jobs::ShaderJobPayload;
+use crate::jobs::{Job, ShaderJobPayload};
 use crate::node::{Category, Gizmo, NodeBehavior, NodeCore};
 
 /// Texture input id (C++ `k_texture_input`). Type: texture; flags:
@@ -216,7 +216,7 @@ impl NodeBehavior for CropDistortNode {
 			// locates the main texture inside the params row.
 			table.push(
 				crate::value::ValueType::Texture,
-				crate::value::NodeValue::Texture(crate::handle::make_owned(ShaderJobPayload {
+				crate::value::NodeValue::Texture(crate::handle::make_owned(Job::ShaderJob(ShaderJobPayload {
 					node_id: crate::id::NodeId::INVALID,
 					time,
 					iterations: 1,
@@ -225,7 +225,7 @@ impl NodeBehavior for CropDistortNode {
 					effect_input: core.effect_input.clone(),
 					params: inputs.clone(),
 					iterative_input: TEXTURE_INPUT.to_string(),
-				})),
+				}))),
 				None,
 			);
 		} else {
@@ -503,7 +503,7 @@ mod tests {
 			NodeValue::Texture(h) => *h,
 			_ => panic!("texture expected"),
 		};
-		let payload = unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(&handle) }
+		let payload = unsafe { crate::jobs::shader_job(&handle) }
 			.expect("shader job payload expected");
 		assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.crop");
 		assert_eq!(payload.shader_id, "");

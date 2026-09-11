@@ -18,7 +18,7 @@
 //! `olive::OpacityEffect`).
 
 use crate::factory::NodeMeta;
-use crate::jobs::ShaderJobPayload;
+use crate::jobs::{Job, ShaderJobPayload};
 use crate::node::{Category, NodeBehavior, NodeCore};
 
 /// Texture input id (C++ `k_texture_input`). Type: texture; flags:
@@ -157,7 +157,7 @@ impl NodeBehavior for OpacityEffect {
 		// input key locates the main texture inside the params row. `time`
 		// is diagnostics-only (C++ jobs keep the request timestamp).
 		let job = |shader_id: &str| -> crate::value::NodeValue {
-			crate::value::NodeValue::Texture(crate::handle::make_owned(ShaderJobPayload {
+			crate::value::NodeValue::Texture(crate::handle::make_owned(Job::ShaderJob(ShaderJobPayload {
 				node_id: crate::id::NodeId::INVALID,
 				time,
 				iterations: 1,
@@ -166,7 +166,7 @@ impl NodeBehavior for OpacityEffect {
 				effect_input: core.effect_input.clone(),
 				params: inputs.clone(),
 				iterative_input: String::new(),
-			}))
+			})))
 		};
 
 		match inputs.get(VALUE_INPUT) {
@@ -322,7 +322,7 @@ mod tests {
 		let Some(NodeValue::Texture(h)) = table.get(ValueType::Texture) else {
 			panic!("texture expected");
 		};
-		let payload = unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(h) }
+		let payload = unsafe { crate::jobs::shader_job(h) }
 			.expect("shader job pushed");
 		assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.opacity");
 		assert_eq!(payload.shader_id, "");
@@ -344,7 +344,7 @@ mod tests {
 		let Some(NodeValue::Texture(h)) = table.get(ValueType::Texture) else {
 			panic!("texture expected");
 		};
-		let payload = unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(h) }
+		let payload = unsafe { crate::jobs::shader_job(h) }
 			.expect("shader job pushed");
 		assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.opacity");
 		assert_eq!(
@@ -386,7 +386,7 @@ mod tests {
 		let Some(NodeValue::Texture(h)) = table.get(ValueType::Texture) else {
 			panic!("texture expected");
 		};
-		let payload = unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(h) }
+		let payload = unsafe { crate::jobs::shader_job(h) }
 			.expect("shader job pushed");
 		assert_eq!(payload.shader_id, "rgbmult");
 	}

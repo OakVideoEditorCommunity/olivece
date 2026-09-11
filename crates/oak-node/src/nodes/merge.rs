@@ -18,7 +18,7 @@
 //! `olive::MergeNode`): alpha-over composites two textures.
 
 use crate::factory::NodeMeta;
-use crate::jobs::ShaderJobPayload;
+use crate::jobs::{Job, ShaderJobPayload};
 use crate::node::{Category, NodeBehavior, NodeCore};
 
 /// Base (background) texture input id (C++ `k_base_in`). Type:
@@ -154,7 +154,7 @@ impl NodeBehavior for MergeNode {
 				let _ = (b, bl);
 				table.push(
 					crate::value::ValueType::Texture,
-					crate::value::NodeValue::Texture(crate::handle::make_owned(ShaderJobPayload {
+					crate::value::NodeValue::Texture(crate::handle::make_owned(Job::ShaderJob(ShaderJobPayload {
 						node_id: crate::id::NodeId::INVALID,
 						time,
 						iterations: 1,
@@ -163,7 +163,7 @@ impl NodeBehavior for MergeNode {
 						effect_input: core.effect_input.clone(),
 						params: inputs.clone(),
 						iterative_input: String::new(),
-					})),
+					}))),
 					None,
 				);
 			}
@@ -287,7 +287,7 @@ mod tests {
 		behavior.value(&core, &inputs, Rational::new(0, 1), &mut table);
 		match table.get(ValueType::Texture) {
 			Some(NodeValue::Texture(h)) => {
-				let payload = unsafe { crate::handle::get_checked::<ShaderJobPayload>(h) }
+				let payload = unsafe { crate::jobs::shader_job(h) }
 					.expect("shader job payload boxed");
 				assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.merge");
 				assert_eq!(payload.shader_id, "");

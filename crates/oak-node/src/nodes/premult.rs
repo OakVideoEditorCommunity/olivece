@@ -31,7 +31,7 @@
 //! one sampler by name.
 
 use crate::factory::NodeMeta;
-use crate::jobs::ShaderJobPayload;
+use crate::jobs::{Job, ShaderJobPayload};
 use crate::node::{Category, NodeBehavior, NodeCore};
 
 /// Texture input id. Type: texture; flags: not-keyframable; this is the
@@ -177,7 +177,7 @@ impl NodeBehavior for PremultiplyNode {
 
 		table.push(
 			ValueType::Texture,
-			NodeValue::Texture(crate::handle::make_owned(ShaderJobPayload {
+			NodeValue::Texture(crate::handle::make_owned(Job::ShaderJob(ShaderJobPayload {
 				node_id: crate::id::NodeId::INVALID,
 				time,
 				iterations: 1,
@@ -186,7 +186,7 @@ impl NodeBehavior for PremultiplyNode {
 				effect_input: core.effect_input.clone(),
 				params,
 				iterative_input: String::new(),
-			})),
+			}))),
 			None,
 		);
 	}
@@ -247,7 +247,7 @@ mod tests {
 		let Some(NodeValue::Texture(h)) = table.get(ValueType::Texture) else {
 			panic!("shader job expected");
 		};
-		unsafe { crate::handle::get_checked::<ShaderJobPayload>(h) }
+		unsafe { crate::jobs::shader_job(h) }
 			.expect("shader job payload boxed")
 			.clone()
 	}

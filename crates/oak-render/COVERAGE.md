@@ -87,7 +87,7 @@
 |---|---|
 | `ColorProcessor`（create 两族/convert_frame 两族/convert_color/id/get_processor） | `color::ColorProcessor`（OCIO 薄封装） |
 | `ColorProcessor::Direction` | `color::Direction` |
-| `ManagedColor` / `ColorTransformJob` / `ShaderCode` / `ShaderJob` / `GenerateJob` / `CacheJob` / `FootageJob` / `SampleJob` / `AcceleratedJob`（job 族） | `eval::JobSpec`（enum 闭合：Shader/ColorTransform/Generate/Cache/Footage/Sample）；job 对象不再跨模块流通，只是求值期的内部记录 |
+| `ManagedColor` / `ColorTransformJob` / `ShaderCode` / `ShaderJob` / `GenerateJob` / `CacheJob` / `FootageJob` / `SampleJob` / `AcceleratedJob`（job 族） | `oak_node::jobs::Job`（enum 闭合：Footage/Shader/Plugin/ColorTransform/Cache；节点在求值期把 payload 装箱推进 value table）；`eval::RenderEvalHooks::resolve` 单趟遍历输出表、先递归解析嵌套 job 再分发执行；`eval::JobSpec` 只保留执行器面（Shader/ColorTransform/Generate/Footage/Sample/Plugin） |
 | `LUTLibrary`（supported_extensions/is_supported_extension） | `color::lut` |
 | `ColorManager` 静态面（default config/display/view/reference） | **归 oaknode crate 的 colormanager.rs**（所有者）；render 只保留 `color::default_config` 客户端查询（bridge::node） |
 
@@ -109,7 +109,7 @@
 | C++ | Rust 落点 |
 |---|---|
 | `generate_database` / `run` / `process` (static) | `eval.rs`：oaknode traverser 引擎 + `RenderEvalHooks` |
-| `process_video_footage` / `process_audio_footage` / `process_shader` / `process_samples` / `process_color_transform` / `process_frame_generation` / `process_plugin_job` / `process_video_cache_job` | `eval::RenderEvalHooks` 的各 hook 方法（plugin job 转发给 oakplugin crate C ABI——render 不再认识 OFX） |
+| `process_video_footage` / `process_audio_footage` / `process_shader` / `process_samples` / `process_color_transform` / `process_frame_generation` / `process_plugin_job` / `process_video_cache_job` | `eval::RenderEvalHooks` 的各 hook 方法（plugin job 转发给 oakplugin crate C ABI——render 不再认识 OFX；cache job 真读盘：`frameio` 自描述容器，缺失/损坏回退到节点输入） |
 | `create_texture` / `create_sample_buffer` / `generate_texture` / `generate_frame` / `convert_to_reference_space` / `resolve_decoder_from_input` / `use_cache` | `eval.rs` + `texture.rs` + `bridge::codec` |
 
 ## 10. ProjectCopier（projectcopier.h，33 方法）

@@ -28,6 +28,7 @@
 //! - `manager` — RenderManager singleton + disk cache
 //! - `autocacher` — PreviewAutoCacher
 //! - `eval` — the evaluation seam (RenderHooks)
+//! - `frameio` — the disk frame-cache container (liboakoiio pending)
 //! - `shaderfx` — effect GLSL→WGSL translation + uniform packing
 //! - `copier` — render-side project-copy client (oaknode C ABI)
 //! - `cancelatom` — the cancellation primitive
@@ -46,6 +47,7 @@ pub mod cancelatom;
 pub mod copier;
 pub mod error;
 pub mod eval;
+pub mod frameio;
 pub mod handle;
 pub mod ipc;
 pub mod manager;

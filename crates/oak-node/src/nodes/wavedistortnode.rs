@@ -19,7 +19,7 @@
 //! `olive::WaveDistortNode`).
 
 use crate::factory::NodeMeta;
-use crate::jobs::ShaderJobPayload;
+use crate::jobs::{Job, ShaderJobPayload};
 use crate::node::{Category, NodeBehavior, NodeCore};
 
 /// Texture input id (C++ `k_texture_input`). Type: texture; flags:
@@ -170,7 +170,7 @@ impl NodeBehavior for WaveDistortNode {
 			// main texture inside the params row.
 			table.push(
 				crate::value::ValueType::Texture,
-				crate::value::NodeValue::Texture(crate::handle::make_owned(ShaderJobPayload {
+				crate::value::NodeValue::Texture(crate::handle::make_owned(Job::ShaderJob(ShaderJobPayload {
 					node_id: crate::id::NodeId::INVALID,
 					time,
 					iterations: 1,
@@ -179,7 +179,7 @@ impl NodeBehavior for WaveDistortNode {
 					effect_input: core.effect_input.clone(),
 					params: inputs.clone(),
 					iterative_input: String::new(),
-				})),
+				}))),
 				None,
 			);
 		} else {
@@ -318,7 +318,7 @@ mod tests {
 		let NodeValue::Texture(handle) = table.get(ValueType::Texture).unwrap() else {
 			unreachable!()
 		};
-		let payload = unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(handle) }
+		let payload = unsafe { crate::jobs::shader_job(handle) }
 			.expect("wave output boxes a ShaderJobPayload");
 		assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.wave");
 		assert_eq!(payload.shader_id, "");

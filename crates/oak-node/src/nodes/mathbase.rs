@@ -21,7 +21,7 @@
 //! the pairing heuristic, and the static eval/shader helpers shared
 //! by `MathNode` (and conceptually other binary math nodes).
 
-use crate::jobs::ShaderJobPayload;
+use crate::jobs::{Job, ShaderJobPayload};
 use crate::node::NodeCore;
 use crate::value::{NodeValue, NodeValueRow, NodeValueTable, ValueType};
 
@@ -632,7 +632,7 @@ impl MathNodeBase {
 					);
 					output.push(
 						ValueType::Texture,
-						NodeValue::Texture(crate::handle::make_owned(ShaderJobPayload {
+						NodeValue::Texture(crate::handle::make_owned(Job::ShaderJob(ShaderJobPayload {
 							node_id: crate::id::NodeId::INVALID,
 							time,
 							iterations: 1,
@@ -644,7 +644,7 @@ impl MathNodeBase {
 								(param_b_in.to_string(), val_b.clone()),
 							]),
 							iterative_input: String::new(),
-						})),
+						}))),
 						None,
 					);
 				}
@@ -1487,7 +1487,7 @@ mod tests {
 			_ => panic!("texture expected"),
 		};
 		let payload = unsafe {
-			crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(&handle)
+			crate::jobs::shader_job(&handle)
 		}
 		.expect("shader job payload boxed in the pushed texture");
 		assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.math");

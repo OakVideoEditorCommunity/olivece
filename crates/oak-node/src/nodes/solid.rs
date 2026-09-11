@@ -18,7 +18,7 @@
 //! `olive::SolidGenerator`).
 
 use crate::factory::NodeMeta;
-use crate::jobs::ShaderJobPayload;
+use crate::jobs::{Job, ShaderJobPayload};
 use crate::node::{Category, NodeBehavior, NodeCore};
 
 /// Color input id (C++ `k_color_input`). Type: color; default
@@ -95,7 +95,7 @@ impl NodeBehavior for SolidGenerator {
 	) {
 		table.push(
 			crate::value::ValueType::Texture,
-			crate::value::NodeValue::Texture(crate::handle::make_owned(ShaderJobPayload {
+			crate::value::NodeValue::Texture(crate::handle::make_owned(Job::ShaderJob(ShaderJobPayload {
 				node_id: crate::id::NodeId::INVALID,
 				time,
 				iterations: 1,
@@ -104,7 +104,7 @@ impl NodeBehavior for SolidGenerator {
 				effect_input: core.effect_input.clone(),
 				params: inputs.clone(),
 				iterative_input: String::new(),
-			})),
+			}))),
 			None,
 		);
 	}
@@ -179,7 +179,7 @@ mod tests {
 			unreachable!()
 		};
 		let job = unsafe {
-			crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(handle)
+			crate::jobs::shader_job(handle)
 		}
 		.expect("solid output boxes a ShaderJobPayload");
 		assert_eq!(

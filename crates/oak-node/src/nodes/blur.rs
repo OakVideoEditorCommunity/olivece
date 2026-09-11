@@ -18,7 +18,7 @@
 //! `olive::BlurFilterNode`).
 
 use crate::factory::NodeMeta;
-use crate::jobs::ShaderJobPayload;
+use crate::jobs::{Job, ShaderJobPayload};
 use crate::node::{Category, Gizmo, NodeBehavior, NodeCore};
 
 /// Texture input id (C++ `k_texture_input`). Type: texture; flags:
@@ -390,7 +390,7 @@ impl NodeBehavior for BlurFilterNode {
 			// the main texture inside the params row.
 			table.push(
 				crate::value::ValueType::Texture,
-				crate::value::NodeValue::Texture(crate::handle::make_owned(ShaderJobPayload {
+				crate::value::NodeValue::Texture(crate::handle::make_owned(Job::ShaderJob(ShaderJobPayload {
 					node_id: crate::id::NodeId::INVALID,
 					time,
 					iterations,
@@ -399,7 +399,7 @@ impl NodeBehavior for BlurFilterNode {
 					effect_input: core.effect_input.clone(),
 					params: inputs.clone(),
 					iterative_input: String::new(),
-				})),
+				}))),
 				None,
 			);
 		} else {
@@ -684,7 +684,7 @@ mod tests {
 		let Some(NodeValue::Texture(h)) = table.get(ValueType::Texture) else {
 			panic!("texture expected");
 		};
-		let payload = unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(h) }
+		let payload = unsafe { crate::jobs::shader_job(h) }
 			.expect("shader job pushed");
 		assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.blur");
 		assert_eq!(

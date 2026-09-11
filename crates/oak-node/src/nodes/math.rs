@@ -417,7 +417,7 @@ mod tests {
 			_ => panic!("texture expected"),
 		};
 		let payload = unsafe {
-			crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(&handle)
+			crate::jobs::shader_job(&handle)
 		}
 		.expect("shader job payload boxed in the pushed texture");
 		assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.math");
@@ -453,7 +453,7 @@ mod tests {
 			_ => panic!("texture expected"),
 		};
 		let payload = unsafe {
-			crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(&handle)
+			crate::jobs::shader_job(&handle)
 		};
 		assert!(payload.is_none(), "no shader job for a null texture");
 	}

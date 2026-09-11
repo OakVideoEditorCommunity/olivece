@@ -26,7 +26,7 @@
 //! upstream `color1`/`color2`).
 
 use crate::factory::NodeMeta;
-use crate::jobs::ShaderJobPayload;
+use crate::jobs::{Job, ShaderJobPayload};
 use crate::node::{Category, NodeBehavior, NodeCore};
 
 /// Base texture input id (the shared generator-with-merge base). Type:
@@ -153,7 +153,7 @@ impl NodeBehavior for CheckerBoardNode {
 			}
 		}
 
-		let job = crate::handle::make_owned(ShaderJobPayload {
+		let job = crate::handle::make_owned(Job::ShaderJob(ShaderJobPayload {
 			node_id: crate::id::NodeId::INVALID,
 			time,
 			iterations: 1,
@@ -162,7 +162,7 @@ impl NodeBehavior for CheckerBoardNode {
 			effect_input: core.effect_input.clone(),
 			params,
 			iterative_input: String::new(),
-		});
+		}));
 		super::generatorwithmerge::GeneratorWithMerge::push_mergable_job(inputs, job, table);
 	}
 
@@ -290,7 +290,7 @@ mod tests {
             Some(NodeValue::Texture(h)) => *h,
             _ => panic!("texture expected"),
         };
-        let payload = unsafe { crate::handle::get_checked::<ShaderJobPayload>(&handle) }
+        let payload = unsafe { crate::jobs::shader_job(&handle) }
             .expect("shader job payload expected");
         assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.checkerboard");
         assert_eq!(payload.shader_id, "checkerboard");
@@ -325,7 +325,7 @@ mod tests {
             Some(NodeValue::Texture(h)) => *h,
             _ => panic!("texture expected"),
         };
-        let payload = unsafe { crate::handle::get_checked::<ShaderJobPayload>(&handle) }
+        let payload = unsafe { crate::jobs::shader_job(&handle) }
             .expect("shader job payload expected");
         assert_eq!(
             payload.params.get(SIZE_INPUT),
@@ -350,7 +350,7 @@ mod tests {
             Some(NodeValue::Texture(h)) => *h,
             _ => panic!("texture expected"),
         };
-        let merge = unsafe { crate::handle::get_checked::<ShaderJobPayload>(&handle) }
+        let merge = unsafe { crate::jobs::shader_job(&handle) }
             .expect("merge job payload expected");
         assert_eq!(merge.shader_id, "mrg");
         assert_eq!(merge.iterations, 1);
@@ -362,7 +362,7 @@ mod tests {
         // The checkerboard job is nested as the merge's blend texture.
         match merge.params.get(crate::nodes::merge::BLEND_INPUT) {
             Some(NodeValue::Texture(blend)) => {
-                let nested = unsafe { crate::handle::get_checked::<ShaderJobPayload>(blend) }
+                let nested = unsafe { crate::jobs::shader_job(blend) }
                     .expect("nested job payload boxed");
                 assert_eq!(nested.shader_id, "checkerboard");
                 assert_eq!(

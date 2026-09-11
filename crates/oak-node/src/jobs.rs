@@ -24,19 +24,28 @@ use oak_core::color::ColorProcessor;
 use oak_core::Rational;
 use crate::id::NodeId;
 use crate::nodes::plugin::PluginJobPayload;
-use crate::value::NodeValueRow;
+use crate::value::{NodeValue, NodeValueRow};
 
-/// Job types
+/// The render-job enum (C++ the `RenderJob` class hierarchy of
+/// `app/render/job/*.h`).
 ///
-/// The payloads travel boxed inside `Texture` values during graph
-/// evaluation (the renderer probes the box's payload type at resolve
-/// time); the graph-shaped job model lands in v0.6.
-
-pub enum Job{
+/// One `Job` travels boxed inside a texture-typed [`NodeValue`] during
+/// graph evaluation; the render seam probes the box for this type,
+/// recurses into the payload's input values, then dispatches on the
+/// variant. Wrapping every payload in one enum lets the seam recognize
+/// and recurse into job boxes without knowing which node produced them.
+#[derive(Clone, Debug)]
+pub enum Job {
+	/// A footage decode request ([`FootageJobPayload`]).
 	FootageJob(FootageJobPayload),
+	/// A GPU shader pass ([`ShaderJobPayload`]).
 	ShaderJob(ShaderJobPayload),
+	/// An OFX plugin render ([`PluginJobPayload`]).
 	PluginJob(PluginJobPayload),
-	ColorTransformJob(ColorTransformJobPayload)
+	/// An OCIO color transform ([`ColorTransformJobPayload`]).
+	ColorTransformJob(ColorTransformJobPayload),
+	/// A disk frame-cache read ([`CacheJobPayload`]).
+	CacheJob(CacheJobPayload),
 }
 
 /// C++ `FootageJob` payload: the decode request a footage node emits at
@@ -87,13 +96,40 @@ pub struct ShaderJobPayload {
 /// the same immutable instance. The input texture value rides along
 /// (C++ `t->to_job(job)` wraps the texture the job applies to).
 #[derive(Clone)]
-pub struct ColorTransformJobPayload{
+pub struct ColorTransformJobPayload {
 	/// The OCIO processor to apply (C++ `ColorTransformJob::processor`).
 	pub color_processor: std::sync::Arc<ColorProcessor>,
 	/// The input texture value (C++ the texture `to_job` was called on).
 	pub input: crate::value::NodeValue,
 	/// Request time in media seconds.
 	pub time: Rational,
+}
+
+impl std::fmt::Debug for ColorTransformJobPayload {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("ColorTransformJobPayload")
+			.field("input", &self.input)
+			.field("time", &self.time)
+			.finish_non_exhaustive()
+	}
+}
+
+/// C++ `CacheJob` payload (`app/render/job/cachejob.h`): read one frame
+/// of the disk frame cache. The seam loads the frame stored at `path`
+/// (as named by `oakrender::cache::PlaybackCache::frame_cache_path`);
+/// when the file is missing or unreadable it substitutes `fallback`,
+/// the value the cache node was fed, which the seam has already
+/// resolved by the time the load is attempted.
+#[derive(Clone, Debug)]
+pub struct CacheJobPayload {
+	/// Frame-cache file path (C++ `CacheJob::filename()`).
+	pub path: String,
+	/// Request time in media seconds.
+	pub time: Rational,
+	/// Value to substitute when the cache file cannot be read (C++
+	/// `CacheJob::fallback()`); boxed so the job can carry a
+	/// texture-typed value without bloating the enum.
+	pub fallback: Box<NodeValue>,
 }
 
 impl Default for FootageJobPayload {
@@ -119,4 +155,107 @@ impl Default for ShaderJobPayload {
 			iterative_input: String::new(),
 		}
 	}
+}
+
+impl Job {
+	/// Borrow the payload when this is a [`Job::FootageJob`].
+	pub fn as_footage(&self) -> Option<&FootageJobPayload> {
+		match self {
+			Job::FootageJob(payload) => Some(payload),
+			_ => None,
+		}
+	}
+
+	/// Borrow the payload when this is a [`Job::ShaderJob`].
+	pub fn as_shader(&self) -> Option<&ShaderJobPayload> {
+		match self {
+			Job::ShaderJob(payload) => Some(payload),
+			_ => None,
+		}
+	}
+
+	/// Borrow the payload when this is a [`Job::PluginJob`].
+	pub fn as_plugin(&self) -> Option<&PluginJobPayload> {
+		match self {
+			Job::PluginJob(payload) => Some(payload),
+			_ => None,
+		}
+	}
+
+	/// Borrow the payload when this is a [`Job::ColorTransformJob`].
+	pub fn as_color_transform(&self) -> Option<&ColorTransformJobPayload> {
+		match self {
+			Job::ColorTransformJob(payload) => Some(payload),
+			_ => None,
+		}
+	}
+
+	/// Borrow the payload when this is a [`Job::CacheJob`].
+	pub fn as_cache(&self) -> Option<&CacheJobPayload> {
+		match self {
+			Job::CacheJob(payload) => Some(payload),
+			_ => None,
+		}
+	}
+}
+
+/// Borrow the [`Job`] boxed in `h`; `None` when the handle is empty or
+/// boxes anything else (a real texture, say) — the probe the render
+/// seam makes on texture-channel values.
+///
+/// # Safety
+/// `h` must be empty or a live handle created by
+/// [`crate::handle::make_owned`]/[`crate::handle::make_owned_with`] for
+/// the duration of the call.
+pub unsafe fn job_ref(h: &crate::handle::CHandle) -> Option<&Job> {
+	// SAFETY: the caller guarantees liveness; `get_checked` adds the
+	// boxed-type check and returns `None` for empty handles.
+	unsafe { crate::handle::get_checked::<Job>(h) }
+}
+
+/// Borrow the [`FootageJobPayload`] boxed in `h` (a
+/// [`Job::FootageJob`] probe); `None` for empty handles or any other
+/// payload.
+///
+/// # Safety
+/// Same contract as [`job_ref`].
+pub unsafe fn footage_job(h: &crate::handle::CHandle) -> Option<&FootageJobPayload> {
+	unsafe { job_ref(h) }.and_then(Job::as_footage)
+}
+
+/// Borrow the [`ShaderJobPayload`] boxed in `h` (a [`Job::ShaderJob`]
+/// probe); `None` for empty handles or any other payload.
+///
+/// # Safety
+/// Same contract as [`job_ref`].
+pub unsafe fn shader_job(h: &crate::handle::CHandle) -> Option<&ShaderJobPayload> {
+	unsafe { job_ref(h) }.and_then(Job::as_shader)
+}
+
+/// Borrow the [`PluginJobPayload`] boxed in `h` (a [`Job::PluginJob`]
+/// probe); `None` for empty handles or any other payload.
+///
+/// # Safety
+/// Same contract as [`job_ref`].
+pub unsafe fn plugin_job(h: &crate::handle::CHandle) -> Option<&PluginJobPayload> {
+	unsafe { job_ref(h) }.and_then(Job::as_plugin)
+}
+
+/// Borrow the [`ColorTransformJobPayload`] boxed in `h` (a
+/// [`Job::ColorTransformJob`] probe); `None` for empty handles or any
+/// other payload.
+///
+/// # Safety
+/// Same contract as [`job_ref`].
+pub unsafe fn color_transform_job(h: &crate::handle::CHandle) -> Option<&ColorTransformJobPayload> {
+	unsafe { job_ref(h) }.and_then(Job::as_color_transform)
+}
+
+/// Borrow the [`CacheJobPayload`] boxed in `h` (a [`Job::CacheJob`]
+/// probe); `None` for empty handles or any other payload.
+///
+/// # Safety
+/// Same contract as [`job_ref`].
+pub unsafe fn cache_job(h: &crate::handle::CHandle) -> Option<&CacheJobPayload> {
+	unsafe { job_ref(h) }.and_then(Job::as_cache)
 }

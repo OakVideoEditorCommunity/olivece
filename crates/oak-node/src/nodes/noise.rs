@@ -18,7 +18,7 @@
 //! `olive::NoiseGeneratorNode`).
 
 use crate::factory::NodeMeta;
-use crate::jobs::ShaderJobPayload;
+use crate::jobs::{Job, ShaderJobPayload};
 use crate::node::{Category, NodeBehavior, NodeCore};
 
 /// Base texture input id (C++ `k_base_in`). Type: texture; flags:
@@ -152,7 +152,7 @@ impl NodeBehavior for NoiseGeneratorNode {
 		);
 		table.push(
 			crate::value::ValueType::Texture,
-			crate::value::NodeValue::Texture(crate::handle::make_owned(ShaderJobPayload {
+			crate::value::NodeValue::Texture(crate::handle::make_owned(Job::ShaderJob(ShaderJobPayload {
 				node_id: crate::id::NodeId::INVALID,
 				time,
 				iterations: 1,
@@ -161,7 +161,7 @@ impl NodeBehavior for NoiseGeneratorNode {
 				effect_input: core.effect_input.clone(),
 				params,
 				iterative_input: String::new(),
-			})),
+			}))),
 			None,
 		);
 	}
@@ -264,7 +264,7 @@ mod tests {
 			unreachable!()
 		};
 		let job =
-			unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(handle) }
+			unsafe { crate::jobs::shader_job(handle) }
 				.expect("noise output boxes a ShaderJobPayload");
 		assert_eq!(job.type_id, "org.olivevideoeditor.Olive.noise");
 		assert_eq!(job.shader_id, "");
@@ -288,7 +288,7 @@ mod tests {
 			unreachable!()
 		};
 		let job =
-			unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(handle) }
+			unsafe { crate::jobs::shader_job(handle) }
 				.expect("noise output boxes a ShaderJobPayload");
 		assert_eq!(job.type_id, "org.olivevideoeditor.Olive.noise");
 		assert!(job.params.contains_key(BASE_INPUT));

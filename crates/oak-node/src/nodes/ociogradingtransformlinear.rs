@@ -439,7 +439,7 @@ impl NodeBehavior for OCIOGradingTransformLinearNode {
 			crate::value::NodeValue::Boolean(false),
 		);
 
-		let job = crate::handle::make_owned(crate::jobs::ShaderJobPayload {
+		let job = crate::handle::make_owned(crate::jobs::Job::ShaderJob(crate::jobs::ShaderJobPayload {
 			node_id: crate::id::NodeId::INVALID,
 			time,
 			iterations: 1,
@@ -448,7 +448,7 @@ impl NodeBehavior for OCIOGradingTransformLinearNode {
 			effect_input: crate::nodes::ociobase::TEXTURE_INPUT.to_string(),
 			params,
 			iterative_input: String::new(),
-		});
+		}));
 		table.push(
 			crate::value::ValueType::Texture,
 			crate::value::NodeValue::Texture(job),
@@ -916,7 +916,7 @@ mod tests {
 			panic!("pushed value is not a texture handle");
 		};
 		let job = unsafe {
-			crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(handle)
+			crate::jobs::shader_job(handle)
 		}
 		.expect("real shader job");
 		assert_eq!(job.shader_id, "rgb");
@@ -986,7 +986,7 @@ mod tests {
 			panic!("pushed value is not a texture handle");
 		};
 		let job = unsafe {
-			crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(handle)
+			crate::jobs::shader_job(handle)
 		}
 		.expect("real shader job");
 		// White <= black is raised to black + 0.000001.

@@ -44,7 +44,7 @@
 //! behavior.
 
 use crate::factory::NodeMeta;
-use crate::jobs::ShaderJobPayload;
+use crate::jobs::{Job, ShaderJobPayload};
 use crate::node::{Category, NodeBehavior, NodeCore};
 use crate::value::{NodeValue, NodeValueRow, NodeValueTable};
 use oak_core::frame::VideoParamsPod;
@@ -928,7 +928,7 @@ impl TextGeneratorV3 {
 		iterations: i32,
 		params: NodeValueRow,
 	) -> crate::handle::CHandle {
-		crate::handle::make_owned(ShaderJobPayload {
+		crate::handle::make_owned(Job::ShaderJob(ShaderJobPayload {
 			node_id: crate::id::NodeId::INVALID,
 			time,
 			iterations,
@@ -937,7 +937,7 @@ impl TextGeneratorV3 {
 			effect_input: effect_input.to_string(),
 			params,
 			iterative_input: String::new(),
-		})
+		}))
 	}
 
 	/// Box a `"mrg"` job drawing `blend` (the top layer) over `base` (the
@@ -2184,7 +2184,7 @@ mod tests {
 
 	/// The job payload boxed by a deferred texture handle.
 	fn job_of(handle: &CHandle) -> &ShaderJobPayload {
-		unsafe { crate::handle::get_checked::<ShaderJobPayload>(handle) }
+		unsafe { crate::jobs::shader_job(handle) }
 			.expect("handle carries a ShaderJobPayload")
 	}
 

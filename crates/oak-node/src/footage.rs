@@ -390,11 +390,11 @@ impl NodeBehavior for FootageBehavior {
 		} else {
 			(self.filename.clone(), stream.index)
 		};
-		let payload = crate::jobs::FootageJobPayload {
+		let payload = crate::jobs::Job::FootageJob(crate::jobs::FootageJobPayload {
 			filename,
 			stream_index,
 			time,
-		};
+		});
 		table.push(
 			ValueType::Texture,
 			NodeValue::Texture(crate::handle::make_owned(payload)),
@@ -880,7 +880,7 @@ mod tests {
 		let NodeValue::Texture(handle) = table.get(ValueType::Texture).unwrap() else {
 			unreachable!()
 		};
-		let payload = unsafe { crate::handle::get_checked::<crate::jobs::FootageJobPayload>(handle) }
+		let payload = unsafe { crate::jobs::footage_job(handle) }
 			.expect("footage output boxes a FootageJobPayload");
 		assert_eq!(payload.filename, "clip.mov");
 		assert_eq!(payload.stream_index, 1);

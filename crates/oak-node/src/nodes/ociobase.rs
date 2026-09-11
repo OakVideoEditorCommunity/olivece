@@ -118,13 +118,13 @@ impl OcioBase {
 		match self.processor() {
 			Some(processor) => table.push(
 				crate::value::ValueType::Texture,
-				NodeValue::Texture(crate::handle::make_owned(
+				NodeValue::Texture(crate::handle::make_owned(crate::jobs::Job::ColorTransformJob(
 					crate::jobs::ColorTransformJobPayload {
 						color_processor: processor,
 						input: tex.clone(),
 						time,
 					},
-				)),
+				))),
 				None,
 			),
 			None => table.push(crate::value::ValueType::Texture, tex.clone(), None),
@@ -219,7 +219,7 @@ mod tests {
 			panic!("job row expected");
 		};
 		let payload = unsafe {
-			crate::handle::get_checked::<crate::jobs::ColorTransformJobPayload>(handle)
+			crate::jobs::color_transform_job(handle)
 		}
 		.expect("a boxed ColorTransformJobPayload");
 		assert!(std::sync::Arc::ptr_eq(

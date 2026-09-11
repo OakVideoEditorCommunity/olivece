@@ -27,8 +27,14 @@
 //! through when no adapter is available); color transform jobs apply
 //! their OCIO processor (CPU frames convert for real; the GPU
 //! color-managed blit is deferred at the backend and passes through);
-//! the disk frame-cache payload I/O remains deferred.
+//! cache jobs read their frame from the self-describing container in
+//! [`crate::frameio`] (liboakoiio EXR/JPEG pending) and otherwise
+//! substitute the value the cache node was fed. Resolution is one pass
+//! over the output table ([`RenderHooks::resolve`]) that runs each
+//! boxed [`oak_node::jobs::Job`] — and, first, the jobs nested in its
+//! inputs — then replaces the box with the resulting texture.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::error::{Error, Result};
@@ -42,7 +48,10 @@ use oak_core::color::ColorProcessor;
 use oak_core::frame::VideoParamsPod;
 use oak_core::texture::{Frame, Texture};
 use oak_core::{PixelFormat, Rational, TimeRange};
-use oak_node::jobs::{ColorTransformJobPayload, FootageJobPayload, ShaderJobPayload};
+use oak_node::jobs::{
+    CacheJobPayload, ColorTransformJobPayload, FootageJobPayload, Job, ShaderJobPayload,
+};
+use oak_node::nodes::plugin::PluginJobPayload;
 use oak_node::value::{NodeValue, NodeValueRow, NodeValueTable};
 
 /// Static mapping of OCIO-based node shaders to the OCIO function they
@@ -118,11 +127,6 @@ pub enum JobSpec {
     },
     /// Direct frame generation (CPU nodes).
     Generate,
-    /// Disk cache read (C++ CacheJob).
-    Cache {
-        /// Cache file path.
-        path: String,
-    },
     /// Footage decode (C++ FootageJob; decode via bridge::codec).
     Footage {
         /// Decoder/stream id.
@@ -387,207 +391,243 @@ impl RenderEvalHooks {
         }
     }
 
-    /// C++ process_video_cache_job.
-    fn process_video_cache_job(&mut self, spec: &JobSpec) -> Result<Texture> {
-        let JobSpec::Cache { path } = spec else {
-            return Err(Error::Invalid);
-        };
-        let _ = path;
-        Err(Error::Failed(
-            "disk frame-cache load deferred: oakcodec EXR/JPEG decode pending".into(),
-        ))
+    /// C++ process_video_cache_job: read the frame the cache wrote at
+    /// `payload.path` through the disk frame-cache container
+    /// ([`crate::frameio`]). A missing or unreadable file is an `Err` —
+    /// the caller then substitutes the job's fallback value. The
+    /// payload's request time is already spelled into `path` (the cache
+    /// writes one file per frame), so the read itself ignores it.
+    fn process_cache_job(&mut self, payload: &CacheJobPayload) -> Result<Texture> {
+        let frame = crate::frameio::load_cache_frame(&payload.path)?;
+        Ok(Texture::wrap_frame(frame))
     }
 
-    /// Executes the deferred plugin payloads a [`oak_node::nodes::plugin::PluginNode`]
-    /// pushed into its output table (C++ JobEnginePlugin processing in
-    /// jobmanager.cpp): unwraps each [`oak_node::nodes::plugin::PluginJobPayload`]
-    /// box, splits it into input textures and tagged param values, and
-    /// replaces the box with the rendered texture.
-    fn resolve_plugin_jobs(&mut self, table: &mut NodeValueTable) {
-        for (_, value, _) in table.rows_mut() {
-            let NodeValue::Texture(handle) = value else {
-                continue;
-            };
-            if handle.ctx.is_null() {
-                continue;
+    /// Resolve one texture-channel value in place (the C++ JobEngine's
+    /// per-value walk): a boxed [`Job`] recurses into its own inputs and
+    /// runs, then the box is replaced by the resulting texture; a genuine
+    /// texture — or any non-texture value — passes through untouched.
+    /// `depth` bounds the nesting; `in_flight` holds the job boxes on the
+    /// current walk so a job reachable from itself stops instead of
+    /// recursing forever (the C++ `resolved_texture_cache_`
+    /// de-duplication, kept as a path set so the same handle reached from
+    /// two rows still resolves per row).
+    fn resolve_value(
+        &mut self,
+        value: &mut NodeValue,
+        depth: usize,
+        in_flight: &mut HashSet<usize>,
+    ) {
+        /// Job-nesting recursion ceiling (defensive; real graphs nest a
+        /// generator job inside a merge job and stop there).
+        const MAX_JOB_DEPTH: usize = 64;
+        if depth >= MAX_JOB_DEPTH {
+            return;
+        }
+        let NodeValue::Texture(handle) = value else {
+            return;
+        };
+        if handle.ctx.is_null() {
+            return;
+        }
+        let key = handle.ctx as usize;
+        if !in_flight.insert(key) {
+            return;
+        }
+        let job = (unsafe { oak_node::jobs::job_ref(handle) }).cloned();
+        if let Some(job) = job {
+            if let Some(resolved) = self.process_job(&job, depth + 1, in_flight) {
+                *value = resolved;
             }
-            let payload = unsafe {
-                oak_node::handle::get_checked::<oak_node::nodes::plugin::PluginJobPayload>(handle)
-            }
-                .cloned();
-            let Some(payload) = payload else {
-                // A genuine texture box (e.g. a source node's frame):
-                // not a plugin job, leave it alone.
-                continue;
-            };
+        }
+        in_flight.remove(&key);
+    }
 
-            let mut inputs: Vec<(String, Texture)> = Vec::new();
-            let mut values: Vec<(String, NodeValue)> = Vec::new();
-            for (key, v) in payload.values.iter() {
-                match v {
-                    NodeValue::Texture(h) if !h.ctx.is_null() => {
-                        match unsafe { oak_node::handle::get_checked::<Texture>(h) }.cloned() {
-                            Some(texture) => inputs.push((key.clone(), texture)),
-                            None => eprintln!("plugin job input '{key}' is not a texture box"),
-                        }
+    /// Run one resolved [`Job`] (the C++ `process_*` virtual, dispatched on
+    /// the payload type). `None` when the job produced no replacement
+    /// value — the row then keeps its box.
+    fn process_job(
+        &mut self,
+        job: &Job,
+        depth: usize,
+        in_flight: &mut HashSet<usize>,
+    ) -> Option<NodeValue> {
+        match job {
+            Job::FootageJob(payload) => self.process_footage_job_value(payload),
+            Job::ShaderJob(payload) => {
+                Some(self.process_shader_job_value(payload, depth, in_flight))
+            }
+            Job::PluginJob(payload) => self.process_plugin_job_value(payload, depth, in_flight),
+            Job::ColorTransformJob(payload) => {
+                Some(self.process_color_transform_job_value(payload, depth, in_flight))
+            }
+            Job::CacheJob(payload) => {
+                Some(self.process_cache_job_value(payload, depth, in_flight))
+            }
+        }
+    }
+
+    /// Resolve one footage job (C++ FootageJob processing in
+    /// jobmanager.cpp): decode the frame at the job's request time and
+    /// replace the box with the resulting texture. `None` on a decode
+    /// failure — the row keeps its box, so the failure stays visible and
+    /// is retried rather than cached as a hole.
+    fn process_footage_job_value(&mut self, payload: &FootageJobPayload) -> Option<NodeValue> {
+        let size = self.frame_size.unwrap_or((0, 0));
+        match render_footage_frame(
+            &payload.filename,
+            payload.stream_index,
+            payload.time,
+            size,
+            PixelFormat::F32,
+        ) {
+            Ok(texture) => Some(texture_value(texture)),
+            Err(err) => {
+                eprintln!("footage job decode failed: {err:#}");
+                None
+            }
+        }
+    }
+
+    /// Resolve one shader job (C++ ShaderJob processing in jobmanager.cpp):
+    /// recurse into the param row's job boxes (the generator layer of an
+    /// `mrg` chain), execute the pass, and replace the box with the result
+    /// texture. A failed or un-runnable job falls back to the effect input
+    /// texture from the now-resolved param row (a pass-through — C++ leaves
+    /// the failed shader's output as its input); a row without the effect
+    /// input resolves to `NodeValue::None`.
+    fn process_shader_job_value(
+        &mut self,
+        payload: &ShaderJobPayload,
+        depth: usize,
+        in_flight: &mut HashSet<usize>,
+    ) -> NodeValue {
+        let mut payload = payload.clone();
+        for (_, value) in payload.params.iter_mut() {
+            self.resolve_value(value, depth, in_flight);
+        }
+        match self.process_shader_job(&payload) {
+            Some(texture) => texture_value(texture),
+            None => payload
+                .params
+                .get(&payload.effect_input)
+                .cloned()
+                .unwrap_or(NodeValue::None),
+        }
+    }
+
+    /// Resolve one plugin job (C++ JobEnginePlugin processing in
+    /// jobmanager.cpp): recurse into the payload's tagged values, split
+    /// them into clip input textures and scalar param overrides, then
+    /// dispatch the render through the installed executor. A failed render
+    /// leaves the box in the row (the executor has already reported it).
+    fn process_plugin_job_value(
+        &mut self,
+        payload: &PluginJobPayload,
+        depth: usize,
+        in_flight: &mut HashSet<usize>,
+    ) -> Option<NodeValue> {
+        let mut payload = payload.clone();
+        for (_, value) in payload.values.iter_mut() {
+            self.resolve_value(value, depth, in_flight);
+        }
+
+        let mut inputs: Vec<(String, Texture)> = Vec::new();
+        let mut values: Vec<(String, NodeValue)> = Vec::new();
+        for (key, v) in payload.values.iter() {
+            match v {
+                NodeValue::Texture(h) if !h.ctx.is_null() => {
+                    match unsafe { oak_node::handle::get_checked::<Texture>(h) }.cloned() {
+                        Some(texture) => inputs.push((key.clone(), texture)),
+                        None => eprintln!("plugin job input '{key}' is not a texture box"),
                     }
-                    NodeValue::Texture(_) | NodeValue::None => {}
-                    other => values.push((key.clone(), other.clone())),
                 }
+                NodeValue::Texture(_) | NodeValue::None => {}
+                other => values.push((key.clone(), other.clone())),
             }
+        }
 
-            // Fallback order mirrors pluginrenderer.cpp's effect input
-            // resolution: the declared effect input, else the first
-            // available clip texture.
-            let effect_src = if payload.effect_input_id.is_empty() {
+        // Fallback order mirrors pluginrenderer.cpp's effect input
+        // resolution: the declared effect input, else the first
+        // available clip texture.
+        let effect_src = if payload.effect_input_id.is_empty() {
+            None
+        } else {
+            inputs
+                .iter()
+                .find(|(key, _)| key == &payload.effect_input_id)
+                .map(|(_, t)| t.clone())
+        };
+        let src = effect_src
+            .or_else(|| inputs.first().map(|(_, t)| t.clone()))
+            .unwrap_or_else(Texture::dummy);
+
+        let spec = JobSpec::Plugin {
+            instance: payload.instance.0,
+            time: payload.time.to_f64(),
+            effect_input_id: if payload.effect_input_id.is_empty() {
                 None
             } else {
-                inputs
-                    .iter()
-                    .find(|(key, _)| key == &payload.effect_input_id)
-                    .map(|(_, t)| t.clone())
-            };
-            let src = effect_src
-                .or_else(|| inputs.first().map(|(_, t)| t.clone()))
-                .unwrap_or_else(Texture::dummy);
-
-            let spec = JobSpec::Plugin {
-                instance: payload.instance.0,
-                time: payload.time.to_f64(),
-                effect_input_id: if payload.effect_input_id.is_empty() {
-                    None
-                } else {
-                    Some(payload.effect_input_id.clone())
-                },
-                inputs,
-                values,
-            };
-            match self.process_plugin_job(src, &spec) {
-                Ok(texture) => {
-                    *value = NodeValue::Texture(oak_node::handle::make_owned(texture));
-                }
-                Err(err) => {
-                    eprintln!("plugin job resolve failed: {err:#}");
-                }
+                Some(payload.effect_input_id.clone())
+            },
+            inputs,
+            values,
+        };
+        match self.process_plugin_job(src, &spec) {
+            Ok(texture) => Some(texture_value(texture)),
+            Err(err) => {
+                eprintln!("plugin job resolve failed: {err:#}");
+                None
             }
         }
     }
 
-    /// Resolve the footage payloads a footage node pushed into its output
-    /// table (C++ FootageJob processing in jobmanager.cpp): decodes each
-    /// boxed [`FootageJobPayload`] at its request time and replaces the
-    /// box with the resulting texture. Genuine textures pass through.
-    fn resolve_footage_jobs(&mut self, table: &mut NodeValueTable) {
-        let size = self.frame_size.unwrap_or((0, 0));
-        for (_, value, _) in table.rows_mut() {
-            let NodeValue::Texture(handle) = value else {
-                continue;
-            };
-            if handle.ctx.is_null() {
-                continue;
-            }
-            let payload = unsafe {
-                oak_node::handle::get_checked::<FootageJobPayload>(handle)
-            }
-                .cloned();
-            let Some(payload) = payload else {
-                continue;
-            };
-            match render_footage_frame(
-                &payload.filename,
-                payload.stream_index,
-                payload.time,
-                size,
-                PixelFormat::F32,
-            ) {
-                Ok(texture) => {
-                    *value = NodeValue::Texture(oak_node::handle::make_owned(texture));
-                }
-                Err(err) => {
-                    eprintln!("footage job decode failed: {err:#}");
-                }
+    /// Resolve one color transform job (C++ ColorTransformJob processing in
+    /// jobmanager.cpp): recurse into the input value, apply the processor,
+    /// and replace the box with the result. A failure falls back to the
+    /// job's resolved input texture (a pass-through — the C++ renderer
+    /// leaves the failed transform's output as its input).
+    fn process_color_transform_job_value(
+        &mut self,
+        payload: &ColorTransformJobPayload,
+        depth: usize,
+        in_flight: &mut HashSet<usize>,
+    ) -> NodeValue {
+        let mut payload = payload.clone();
+        self.resolve_value(&mut payload.input, depth, in_flight);
+        match self.process_color_transform_job(&payload) {
+            Ok(texture) => texture_value(texture),
+            Err(err) => {
+                eprintln!("color transform job failed: {err:#}");
+                payload.input.clone()
             }
         }
     }
 
-    /// Resolve the shader payloads an effect node pushed into its output
-    /// table (C++ ShaderJob processing in jobmanager.cpp): execute each
-    /// boxed [`ShaderJobPayload`] on the shared GPU context and replace
-    /// the box with the result texture. Failed or un-runnable jobs fall
-    /// back to the effect input texture from the params row (a pass-
-    /// through — C++ leaves the failed shader's output as its input);
-    /// a missing input resolves to `NodeValue::None`.
-    fn resolve_shader_jobs(&mut self, table: &mut NodeValueTable) {
-        // Collect the boxes up front: replacing a row while iterating
-        // `rows_mut` would alias the table.
-        let jobs: Vec<(usize, ShaderJobPayload)> = table
-            .rows_mut()
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(i, (_, value, _))| {
-                let NodeValue::Texture(handle) = value else {
-                    return None;
-                };
-                if handle.ctx.is_null() {
-                    return None;
+    /// Resolve one cache job (C++ CacheJob processing in jobmanager.cpp):
+    /// recurse into the fallback value first, then read the frame the cache
+    /// wrote at the job's path. A missing or unreadable file substitutes
+    /// the fallback — a real texture by then, not another job box — and is
+    /// logged once per path (a cache miss repeats every frame).
+    fn process_cache_job_value(
+        &mut self,
+        payload: &CacheJobPayload,
+        depth: usize,
+        in_flight: &mut HashSet<usize>,
+    ) -> NodeValue {
+        let mut payload = payload.clone();
+        self.resolve_value(&mut payload.fallback, depth, in_flight);
+        match self.process_cache_job(&payload) {
+            Ok(texture) => texture_value(texture),
+            Err(err) => {
+                let key = format!("cache:{}", payload.path);
+                if unsupported_warned().insert(key) {
+                    eprintln!(
+                        "cache job \"{}\" failed, using the cache node's input: {err:#}",
+                        payload.path
+                    );
                 }
-                let payload = unsafe {
-                    oak_node::handle::get_checked::<ShaderJobPayload>(handle)
-                }
-                    .cloned();
-                payload.map(|p| (i, p))
-            })
-            .collect();
-        for (i, payload) in jobs {
-            let resolved = match self.process_shader_job(&payload) {
-                Some(texture) => NodeValue::Texture(oak_node::handle::make_owned(texture)),
-                None => payload
-                    .params
-                    .get(&payload.effect_input)
-                    .cloned()
-                    .unwrap_or(NodeValue::None),
-            };
-            table.rows_mut()[i].1 = resolved;
-        }
-    }
-
-    /// Resolve the color-transform payloads an OCIO node pushed into its
-    /// output table (C++ ColorTransformJob processing in jobmanager.cpp):
-    /// apply each boxed [`ColorTransformJobPayload`]'s processor to its
-    /// input texture and replace the box with the result. Failures fall
-    /// back to the job's input texture (a pass-through — the C++ renderer
-    /// leaves the failed transform's output as its input); genuine
-    /// textures pass through.
-    fn resolve_color_transform_jobs(&mut self, table: &mut NodeValueTable) {
-        // Collect the boxes up front: replacing a row while iterating
-        // `rows_mut` would alias the table.
-        let jobs: Vec<(usize, ColorTransformJobPayload)> = table
-            .rows_mut()
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(i, (_, value, _))| {
-                let NodeValue::Texture(handle) = value else {
-                    return None;
-                };
-                if handle.ctx.is_null() {
-                    return None;
-                }
-                let payload = unsafe {
-                    oak_node::handle::get_checked::<ColorTransformJobPayload>(handle)
-                }
-                .cloned();
-                payload.map(|p| (i, p))
-            })
-            .collect();
-        for (i, payload) in jobs {
-            let resolved = match self.process_color_transform_job(&payload) {
-                Ok(texture) => NodeValue::Texture(oak_node::handle::make_owned(texture)),
-                Err(err) => {
-                    eprintln!("color transform job failed: {err:#}");
-                    payload.input.clone()
-                }
-            };
-            table.rows_mut()[i].1 = resolved;
+                (*payload.fallback).clone()
+            }
         }
     }
 
@@ -744,10 +784,7 @@ impl RenderEvalHooks {
                     if depth >= MAX_JOB_DEPTH {
                         return None;
                     }
-                    let nested = (unsafe {
-                        oak_node::handle::get_checked::<ShaderJobPayload>(handle)
-                    })
-                    .cloned()?;
+                    let nested = (unsafe { oak_node::jobs::shader_job(handle) }).cloned()?;
                     Some(self.process_shader_job_depth(&nested, depth + 1)?)
                 });
             let tex = tex?;
@@ -923,10 +960,14 @@ impl oak_node::traverser::RenderHooks for RenderEvalHooks {
         table: &mut NodeValueTable,
     ) {
         let _ = node;
-        self.resolve_plugin_jobs(table);
-        self.resolve_footage_jobs(table);
-        self.resolve_shader_jobs(table);
-        self.resolve_color_transform_jobs(table);
+        // One pass over the table: every texture-channel value that boxes
+        // a job resolves in place (jobs nested in its inputs first). A
+        // job that produces no value leaves its box, so a later row
+        // probing the same box still sees the unresolved request.
+        let mut in_flight = HashSet::new();
+        for (_, value, _) in table.rows_mut() {
+            self.resolve_value(value, 0, &mut in_flight);
+        }
     }
 }
 
@@ -2704,13 +2745,140 @@ mod tests {
         assert_eq!(tex.format(), PixelFormat::F32);
     }
 
-    #[test]
-    fn hooks_fail_explainably_for_deferred_jobs() {
-        let mut hooks = RenderEvalHooks::new();
+    /// A temporary disk frame-cache path for the cache-job tests.
+    fn cache_job_temp_path(tag: &str) -> String {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir()
+            .join(format!(
+                "oakrender_cache_{}_{n}_{tag}.bin",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned()
+    }
 
-        assert!(hooks
-            .process_video_cache_job(&JobSpec::Cache { path: "p".into() })
-            .is_err());
+    /// The resolved texture in the table's texture channel; panics when the
+    /// value is still a job box (resolution did not run).
+    fn resolved_texture(table: &NodeValueTable) -> Texture {
+        let Some(NodeValue::Texture(handle)) = table.get(oak_node::value::ValueType::Texture)
+        else {
+            panic!("no texture in the table");
+        };
+        assert!(!handle.ctx.is_null(), "null texture box");
+        (unsafe { oak_node::handle::get_checked::<Texture>(handle) })
+            .cloned()
+            .expect("value is still a job box (unresolved)")
+    }
+
+    /// A frame-cache job box around `payload`.
+    fn cache_job_box(payload: CacheJobPayload) -> NodeValue {
+        NodeValue::Texture(oak_node::handle::make_owned(Job::CacheJob(payload)))
+    }
+
+    /// A 4x3 F32 frame filled with `rgba`.
+    fn cache_test_frame(rgba: [f32; 4]) -> Frame {
+        let mut frame = generate_frame(Rational::new(3, 1), (4, 3), PixelFormat::F32).unwrap();
+        for px in frame.data.chunks_exact_mut(16) {
+            for (c, v) in px.chunks_exact_mut(4).zip(rgba) {
+                c.copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        frame
+    }
+
+    #[test]
+    fn cache_job_reads_the_saved_frame() {
+        use oak_node::traverser::RenderHooks;
+
+        let path = cache_job_temp_path("hit");
+        let frame = cache_test_frame([0.25, 0.5, 0.75, 1.0]);
+        crate::frameio::save_cache_frame(&path, &frame).unwrap();
+
+        let mut table = NodeValueTable::default();
+        table.push(
+            oak_node::value::ValueType::Texture,
+            cache_job_box(CacheJobPayload {
+                path: path.clone(),
+                time: Rational::new(3, 1),
+                fallback: Box::new(NodeValue::None),
+            }),
+            None,
+        );
+        let mut hooks = RenderEvalHooks::new();
+        hooks.resolve(oak_node::id::NodeId::INVALID, &NodeValueRow::new(), &mut table);
+
+        let out = resolved_texture(&table);
+        assert_eq!(out.size(), (4, 3));
+        assert_eq!(first_pixel(&out), [0.25, 0.5, 0.75, 1.0]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cache_job_missing_file_substitutes_its_input() {
+        use oak_node::traverser::RenderHooks;
+
+        // The file is never written: the load fails and the fallback — a
+        // real texture box — must end up in the table.
+        let path = cache_job_temp_path("miss");
+        let fallback = filled_frame((2, 2), [0.1, 0.2, 0.3, 0.4]);
+        let mut table = NodeValueTable::default();
+        table.push(
+            oak_node::value::ValueType::Texture,
+            cache_job_box(CacheJobPayload {
+                path,
+                time: Rational::new(0, 1),
+                fallback: Box::new(NodeValue::Texture(oak_node::handle::make_owned(fallback))),
+            }),
+            None,
+        );
+        let mut hooks = RenderEvalHooks::new();
+        hooks.resolve(oak_node::id::NodeId::INVALID, &NodeValueRow::new(), &mut table);
+
+        let out = resolved_texture(&table);
+        assert_eq!(out.size(), (2, 2));
+        assert_eq!(first_pixel(&out), [0.1, 0.2, 0.3, 0.4]);
+    }
+
+    #[test]
+    fn nested_cache_job_resolves_through_the_outer_shader_job() {
+        use oak_node::traverser::RenderHooks;
+
+        let path = cache_job_temp_path("nested");
+        let frame = cache_test_frame([0.5, 0.25, 0.125, 1.0]);
+        crate::frameio::save_cache_frame(&path, &frame).unwrap();
+
+        // The outer shader names a type nobody registered, so the pass
+        // cannot run and falls back to its effect input — the nested cache
+        // job, which must already have resolved to the frame from disk.
+        let mut params = NodeValueRow::new();
+        params.insert(
+            "tex_in".into(),
+            cache_job_box(CacheJobPayload {
+                path: path.clone(),
+                time: Rational::new(3, 1),
+                fallback: Box::new(NodeValue::None),
+            }),
+        );
+        let outer = Job::ShaderJob(ShaderJobPayload {
+            type_id: "org.olivevideoeditor.Olive.thisdoesnotexist".into(),
+            effect_input: "tex_in".into(),
+            params,
+            ..ShaderJobPayload::default()
+        });
+        let mut table = NodeValueTable::default();
+        table.push(
+            oak_node::value::ValueType::Texture,
+            NodeValue::Texture(oak_node::handle::make_owned(outer)),
+            None,
+        );
+        let mut hooks = RenderEvalHooks::new();
+        hooks.resolve(oak_node::id::NodeId::INVALID, &NodeValueRow::new(), &mut table);
+
+        let out = resolved_texture(&table);
+        assert_eq!(out.size(), (4, 3));
+        assert_eq!(first_pixel(&out), [0.5, 0.25, 0.125, 1.0]);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -2870,12 +3038,13 @@ mod tests {
         let mut table = NodeValueTable::default();
         table.push(
             oak_node::value::ValueType::Texture,
-            NodeValue::Texture(oak_node::handle::make_owned(payload)),
+            NodeValue::Texture(oak_node::handle::make_owned(Job::PluginJob(payload))),
             None,
         );
 
+        use oak_node::traverser::RenderHooks;
         let mut hooks = RenderEvalHooks::new();
-        hooks.resolve_plugin_jobs(&mut table);
+        hooks.resolve(oak_node::id::NodeId::INVALID, &NodeValueRow::new(), &mut table);
 
         let NodeValue::Texture(handle) = table.get(oak_node::value::ValueType::Texture).unwrap()
         else {
@@ -3119,7 +3288,7 @@ mod tests {
         };
         table.push(
             oak_node::value::ValueType::Texture,
-            NodeValue::Texture(oak_node::handle::make_owned(payload)),
+            NodeValue::Texture(oak_node::handle::make_owned(Job::FootageJob(payload))),
             None,
         );
         let genuine = Texture::wrap_frame(generate_frame(Rational::new(0, 1), (4, 4), PixelFormat::F32).unwrap());
@@ -3129,9 +3298,10 @@ mod tests {
             None,
         );
 
+        use oak_node::traverser::RenderHooks;
         let mut hooks = RenderEvalHooks::new();
         hooks.frame_size = Some((32, 32));
-        hooks.resolve_footage_jobs(&mut table);
+        hooks.resolve(oak_node::id::NodeId::INVALID, &NodeValueRow::new(), &mut table);
         assert_eq!(table.count(), 2, "both rows stay, only the payload is replaced");
 
         let rows = table.rows();
@@ -3198,7 +3368,7 @@ mod tests {
         let mut table = NodeValueTable::default();
         table.push(
             oak_node::value::ValueType::Texture,
-            NodeValue::Texture(oak_node::handle::make_owned(payload)),
+            NodeValue::Texture(oak_node::handle::make_owned(Job::ColorTransformJob(payload))),
             None,
         );
 
@@ -3244,7 +3414,7 @@ mod tests {
         let mut table = NodeValueTable::default();
         table.push(
             oak_node::value::ValueType::Texture,
-            NodeValue::Texture(oak_node::handle::make_owned(payload)),
+            NodeValue::Texture(oak_node::handle::make_owned(Job::ColorTransformJob(payload))),
             None,
         );
 

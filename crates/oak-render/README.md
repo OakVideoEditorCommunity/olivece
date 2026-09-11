@@ -25,7 +25,8 @@ frozen, implemented verbatim by `src/ffi.rs`.
    oaknode crate) through the C ABI. `copier.rs` here is a thin client.
 2. **RenderProcessor's inheritance disappears.** C++
    `RenderProcessor : NodeTraverser` becomes `eval.rs` (the closed
-   `JobSpec` set + the CPU-side hook implementations; graph traversal
+   `JobSpec` executor set + the CPU-side hook implementations; the job
+   payload enum itself lives in oaknode's `jobs.rs`, graph traversal
    stays in oaknode).
 3. **Ticket/watchers.** C++ RenderTicket/RenderTicketWatcher (Qt
    signals) become a ticket arena with completion callbacks —

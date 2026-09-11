@@ -33,7 +33,7 @@
 //! renderer binds `tex_in`/`blend_in` by name.
 
 use crate::factory::NodeMeta;
-use crate::jobs::ShaderJobPayload;
+use crate::jobs::{Job, ShaderJobPayload};
 use crate::node::{Category, NodeBehavior, NodeCore};
 
 /// Outgoing ("from") texture input id. Type: texture; flags:
@@ -314,7 +314,7 @@ impl NodeBehavior for TransitionNode {
 
 				table.push(
 					ValueType::Texture,
-					NodeValue::Texture(crate::handle::make_owned(ShaderJobPayload {
+					NodeValue::Texture(crate::handle::make_owned(Job::ShaderJob(ShaderJobPayload {
 						node_id: crate::id::NodeId::INVALID,
 						time,
 						iterations: 1,
@@ -323,7 +323,7 @@ impl NodeBehavior for TransitionNode {
 						effect_input: core.effect_input.clone(),
 						params,
 						iterative_input: String::new(),
-					})),
+					}))),
 					None,
 				);
 			}
@@ -420,7 +420,7 @@ mod tests {
 		let Some(NodeValue::Texture(h)) = table.get(ValueType::Texture) else {
 			panic!("shader job expected");
 		};
-		unsafe { crate::handle::get_checked::<ShaderJobPayload>(h) }
+		unsafe { crate::jobs::shader_job(h) }
 			.expect("shader job payload boxed")
 			.clone()
 	}

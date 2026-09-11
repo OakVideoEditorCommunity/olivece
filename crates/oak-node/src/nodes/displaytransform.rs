@@ -384,7 +384,7 @@ mod tests {
 			panic!("job row expected");
 		};
 		assert!(unsafe {
-			crate::handle::get_checked::<crate::jobs::ColorTransformJobPayload>(handle)
+			crate::jobs::color_transform_job(handle)
 		}
 		.is_some());
 	}

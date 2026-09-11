@@ -35,6 +35,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::factory::NodeMeta;
+use crate::jobs::Job;
 use crate::node::{Category, NodeBehavior, NodeCore};
 use crate::value::{NodeValue, NodeValueRow, NodeValueTable};
 use oak_core::{Rational, TimeRange};
@@ -235,12 +236,12 @@ impl NodeBehavior for PluginNode {
 			.or_else(|| inputs.values().find(|v| matches!(v, NodeValue::Texture(_))));
 
 		if tex.is_some() && !self.instance.is_null() {
-			let payload = PluginJobPayload {
+			let payload = Job::PluginJob(PluginJobPayload {
 				instance: self.instance,
 				time,
 				effect_input_id: core.effect_input.clone(),
 				values: inputs.clone(),
-			};
+			});
 			table.push(
 				crate::value::ValueType::Texture,
 				NodeValue::Texture(crate::handle::make_owned(payload)),
@@ -474,7 +475,7 @@ mod tests {
 		};
 		// SAFETY: the handle was created by value() boxing a
 		// PluginJobPayload.
-		let payload = unsafe { crate::handle::get::<PluginJobPayload>(h) }
+		let payload = unsafe { crate::jobs::plugin_job(h) }
 			.expect("texture handle must box a PluginJobPayload");
 		assert_eq!(payload.instance, PluginInstanceHandle(1));
 		assert_eq!(payload.time, time);

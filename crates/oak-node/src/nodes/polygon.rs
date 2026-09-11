@@ -232,7 +232,7 @@ impl NodeBehavior for PolygonGenerator {
 				core.value_at_time(COLOR_INPUT, -1, time),
 			);
 		}
-		let job = crate::handle::make_owned(crate::jobs::ShaderJobPayload {
+		let job = crate::handle::make_owned(crate::jobs::Job::ShaderJob(crate::jobs::ShaderJobPayload {
 			node_id: crate::id::NodeId::INVALID,
 			time,
 			iterations: 1,
@@ -241,7 +241,7 @@ impl NodeBehavior for PolygonGenerator {
 			effect_input: core.effect_input.clone(),
 			params,
 			iterative_input: String::new(),
-		});
+		}));
 		super::generatorwithmerge::GeneratorWithMerge::push_mergable_job(inputs, job, table);
 	}
 
@@ -440,7 +440,7 @@ mod tests {
 			panic!("pushed value is not a texture handle");
 		};
 		let job = unsafe {
-			crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(handle)
+			crate::jobs::shader_job(handle)
 		}
 		.expect("real shader job");
 		assert_eq!(job.shader_id, "rgb");
@@ -473,7 +473,7 @@ mod tests {
 		let Some(NodeValue::Texture(h)) = table.get(ValueType::Texture) else {
 			panic!("texture expected");
 		};
-		let mrg = unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(h) }
+		let mrg = unsafe { crate::jobs::shader_job(h) }
 			.expect("merge job pushed");
 		assert_eq!(mrg.shader_id, "mrg");
 		assert_eq!(mrg.effect_input, super::super::generatorwithmerge::BASE_INPUT);
@@ -482,7 +482,7 @@ mod tests {
 			Some(NodeValue::Texture(b)) => *b,
 			other => panic!("blend_in must carry the nested job: {other:?}"),
 		};
-		let blend_job = unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(&blend) }
+		let blend_job = unsafe { crate::jobs::shader_job(&blend) }
 			.expect("nested generator job");
 		assert_eq!(blend_job.shader_id, "rgb");
 		assert_eq!(blend_job.type_id, "org.olivevideoeditor.Olive.polygon");

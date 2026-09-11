@@ -41,7 +41,7 @@
 //! resolve).
 
 use crate::factory::NodeMeta;
-use crate::jobs::ShaderJobPayload;
+use crate::jobs::{Job, ShaderJobPayload};
 use crate::node::{Category, NodeBehavior, NodeCore};
 
 /// Texture input id. Type: texture; flags: not-keyframable; this is
@@ -149,7 +149,7 @@ impl NodeBehavior for ClampNode {
 
 		table.push(
 			crate::value::ValueType::Texture,
-			crate::value::NodeValue::Texture(crate::handle::make_owned(ShaderJobPayload {
+			crate::value::NodeValue::Texture(crate::handle::make_owned(Job::ShaderJob(ShaderJobPayload {
 				node_id: crate::id::NodeId::INVALID,
 				time,
 				iterations: 1,
@@ -158,7 +158,7 @@ impl NodeBehavior for ClampNode {
 				effect_input: core.effect_input.clone(),
 				params,
 				iterative_input: String::new(),
-			})),
+			}))),
 			None,
 		);
 	}
@@ -280,7 +280,7 @@ mod tests {
             panic!("expected a texture-typed value");
         };
         let payload =
-            unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(handle) }
+            unsafe { crate::jobs::shader_job(handle) }
                 .expect("shader job pushed");
         assert_eq!(payload.type_id, "org.olivevideoeditor.Olive.clamp");
         assert_eq!(payload.effect_input, TEXTURE_INPUT);
@@ -305,7 +305,7 @@ mod tests {
             panic!("expected a texture-typed value");
         };
         let payload =
-            unsafe { crate::handle::get_checked::<crate::jobs::ShaderJobPayload>(handle) }
+            unsafe { crate::jobs::shader_job(handle) }
                 .expect("shader job pushed");
         assert_eq!(payload.params.get(MAX_INPUT), Some(&NodeValue::Float(0.5)));
     }

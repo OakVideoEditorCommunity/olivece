@@ -35,7 +35,7 @@
 //! alphabetically first key of the job's `BTreeMap` row).
 
 use crate::factory::NodeMeta;
-use crate::jobs::ShaderJobPayload;
+use crate::jobs::{Job, ShaderJobPayload};
 use crate::node::{Category, NodeBehavior, NodeCore};
 
 /// Background texture input id. Type: texture; flags: not-keyframable.
@@ -164,7 +164,7 @@ impl NodeBehavior for KeyMixNode {
 			(Some(NodeValue::Texture(_)), Some(NodeValue::Texture(_))) => {
 				table.push(
 					ValueType::Texture,
-					NodeValue::Texture(crate::handle::make_owned(ShaderJobPayload {
+					NodeValue::Texture(crate::handle::make_owned(Job::ShaderJob(ShaderJobPayload {
 						node_id: crate::id::NodeId::INVALID,
 						time,
 						iterations: 1,
@@ -173,7 +173,7 @@ impl NodeBehavior for KeyMixNode {
 						effect_input: core.effect_input.clone(),
 						params: inputs.clone(),
 						iterative_input: String::new(),
-					})),
+					}))),
 					None,
 				);
 			}
@@ -236,7 +236,7 @@ mod tests {
 		let Some(NodeValue::Texture(h)) = table.get(ValueType::Texture) else {
 			panic!("shader job expected");
 		};
-		unsafe { crate::handle::get_checked::<ShaderJobPayload>(h) }
+		unsafe { crate::jobs::shader_job(h) }
 			.expect("shader job payload boxed")
 			.clone()
 	}
