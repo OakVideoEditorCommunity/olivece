@@ -358,6 +358,12 @@ impl WorkerSession {
 				"runtime: color-manager default config failed ({e}); continuing"
 			));
 		}
+		// The text nodes rasterize through the textbackend hooks: the pool
+		// renders text clips too, so every worker installs the same
+		// cosmic-text engine as the UI process (installing it only there
+		// left text invisible in previews — the hooks are per-process).
+		log_error("runtime: installing text layout backends");
+		oak_render::textengine::install();
 		// M15 S1: the plugin execution stack lives in the worker process
 		// (OFX crashes take down this process, not the editor — design
 		// §3.6). oakplugin installs its render driver into the oakrender

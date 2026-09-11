@@ -4723,7 +4723,6 @@ dependencies = [
 name = "oak-app"
 version = "0.5.0"
 dependencies = [
- "cosmic-text",
  "embed-resource",
  "gpui",
  "gpui_elements",
@@ -4836,6 +4835,7 @@ dependencies = [
 name = "oak-render"
 version = "0.5.0"
 dependencies = [
+ "cosmic-text",
  "libc",
  "naga 25.0.1",
  "oak-codec",

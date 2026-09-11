@@ -31,6 +31,11 @@ naga = { version = "25", default-features = false, features = ["glsl-in", "wgsl-
 ocio-rs = { version = "0.2", features = ["bundled"] }
 # `std::error::Error` impls for the crate-internal error enum.
 thiserror = "2"
+# The text layout/raster engine installed into oak-node's textbackend
+# hooks (src/textengine.rs) — shared by the app and the worker pool, so
+# both sides pin the same version as gpui's text system (one cosmic-text
+# in the lockfile).
+cosmic-text = "=0.19.0"
 # M15 S1: physical-memory query for the process-pool worker-count policy
 # (sysctlbyname on macOS / sysconf on Linux) in src/procpool.rs.
 libc = "0.2"

@@ -52,5 +52,6 @@ pub mod manager;
 pub mod procpool;
 pub mod scheduler;
 pub mod shaderfx;
+pub mod textengine;
 pub mod ticket;
 pub mod worker;
