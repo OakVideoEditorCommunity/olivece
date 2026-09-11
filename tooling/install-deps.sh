@@ -21,6 +21,9 @@
 # itself is built from source by tooling/ffmpeg/build-ffmpeg.sh (which
 # installs into .cache/ffmpeg) and is NOT installed here.
 #
+# This is the local-build path. CI/CD gets the same libraries from the
+# vcpkg manifest (root vcpkg.json) instead — see docs/build.md.
+#
 # Supported: Homebrew (macOS), MSYS2 UCRT64 (Windows), Debian/Ubuntu,
 # Fedora, Arch. Run it yourself — nothing in the build invokes it
 # automatically (it needs sudo on Linux).

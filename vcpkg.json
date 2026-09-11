@@ -1,7 +1,8 @@
 {
 	"name": "oak",
 	"version": "0.5.0",
-	"comment": "Windows dependencies (CI/CD, MSVC): the project's FFmpeg with every free codec + hwaccel (mirrors tooling/ffmpeg/build-ffmpeg.sh's configure), plus pkgconf so the -sys crates can find the .pc files. ffmpeg version pinning via builtin-baseline is a follow-up once CI reports the resolved version (see .github/workflows/ci.yml).",
+	"$comment": "FFmpeg (+ pkgconf, librsvg on Windows) for every desktop platform CI/CD builds — Linux, macOS and Windows — with the project's feature set (every free codec + hwaccel, mirroring tooling/ffmpeg/build-ffmpeg.sh's configure switches). Local builds may keep using tooling/install-deps.sh + tooling/ffmpeg/build-ffmpeg.sh. ffmpeg is pinned to 9.0.1#1 via overrides; builtin-baseline pins the rest of the port tree.",
+	"builtin-baseline": "771b0a2e7c473c3a6bee56553be4d5bb32bb653c",
 	"dependencies": [
 		{
 			"name": "ffmpeg",
@@ -25,11 +26,27 @@
 				"freetype",
 				"fribidi",
 				"fontconfig",
-				"gnutls",
-				"ffnvcodec"
+				"openssl",
+				{
+					"name": "nvcodec",
+					"platform": "linux | (windows & !arm64)"
+				},
+				{
+					"name": "vaapi",
+					"platform": "linux"
+				}
 			]
 		},
 		"pkgconf",
-		"librsvg"
+		{
+			"name": "librsvg",
+			"platform": "windows"
+		}
+	],
+	"overrides": [
+		{
+			"name": "ffmpeg",
+			"version": "9.0.1#1"
+		}
 	]
 }

@@ -35,19 +35,49 @@ jobs:
       # ------------------------------------------------------------------
       - name: Install system dependencies
         run: |
-          # Codec/filter libraries for the ffmpeg-sys-next build feature
-          # (see tooling/install-deps.sh).
-          tooling/install-deps.sh
-          # cmake/make for the vendored OpenColorIO build (ocio-sys
-          # `bundled`; Ubuntu's libopencolorio-dev is 2.1, older than the
-          # bridge's API floor) plus the headless test infra gpui needs:
-          # X11, software Mesa Vulkan (lavapipe) and xvfb.
+          sudo apt-get update
+          # The codec/filter libraries behind FFmpeg come from the vcpkg
+          # manifest (root vcpkg.json; see docs/build.md) — this list is
+          # the toolchain vcpkg itself needs, cmake/make for the vendored
+          # OpenColorIO build (ocio-sys `bundled`; Ubuntu's
+          # libopencolorio-dev is 2.1, older than the bridge's API floor),
+          # and the headless test infra gpui needs: X11, software Mesa
+          # Vulkan (lavapipe) and xvfb.
           sudo apt-get install -y \
-            cmake \
+            build-essential clang libclang-dev cmake pkg-config nasm \
+            git curl zip unzip tar python3 \
             libpipewire-0.3-dev libspa-0.2-dev libjack-jackd2-dev \
             libasound2-dev libpulse-dev libsndfile1-dev \
             libgl1-mesa-dev libgl1-mesa-dri mesa-vulkan-drivers \
-            libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev xvfb build-essential clang libclang-dev
+            libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev xvfb
+
+      # ------------------------------------------------------------------
+      # vcpkg (manifest mode) + caches
+      # ------------------------------------------------------------------
+      # The runner has no vcpkg preinstalled; bootstrap a fresh clone.
+      # The manifest at the repo root pins the dependency set (FFmpeg 9.0.1
+      # via `overrides`, everything else via `builtin-baseline`) and the
+      # resolved tree lands in vcpkg_installed/.
+      - name: Bootstrap vcpkg
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git .cache/vcpkg
+          .cache/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          echo "$PWD/.cache/vcpkg" >> "$GITHUB_PATH"
+          echo "VCPKG_ROOT=$PWD/.cache/vcpkg" >> "$GITHUB_ENV"
+
+      # The archives dir is vcpkg's binary cache: a manifest bump then
+      # rebuilds only what changed. Same key scheme as the Windows job.
+      - name: Cache vcpkg artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg_installed
+            ~/.cache/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          save-always: true
+
+      - name: Install dependencies (vcpkg manifest)
+        run: vcpkg install --triplet x64-linux
 
       # ------------------------------------------------------------------
       # Build environment
@@ -60,7 +90,10 @@ jobs:
       - name: Configure build environment
         run: |
           bash tooling/ocio-env.sh >> "$GITHUB_ENV"
-          echo "FFMPEG_DIR=.cache/ffmpeg" >> "$GITHUB_ENV"
+          prefix="$PWD/vcpkg_installed/x64-linux"
+          echo "FFMPEG_DIR=$prefix" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "$prefix/tools/pkgconf" >> "$GITHUB_PATH"
 
       # ------------------------------------------------------------------
       # Caches
@@ -72,25 +105,6 @@ jobs:
         with:
           shared-key: oak-ci-linux
           cache-on-failure: true
-
-      # The project FFmpeg (release/8.0, static, all free codecs + hwaccel)
-      # is built by tooling/ffmpeg/build-ffmpeg.sh — 10-20 min on a cold
-      # cache. It does not depend on the Rust toolchain, so key it on the
-      # script itself and keep it out of rust-cache.
-      - name: Cache project FFmpeg
-        uses: actions/cache@v4
-        with:
-          path: .cache/ffmpeg
-          key: ffmpeg-${{ runner.os }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
-          save-always: true
-
-      # ------------------------------------------------------------------
-      # Project FFmpeg (script + FFMPEG_DIR; see docs/build.md)
-      # ------------------------------------------------------------------
-      - name: Build project FFmpeg
-        run: |
-          tooling/ffmpeg/build-ffmpeg.sh
-          echo "FFMPEG_DIR=$PWD/.cache/ffmpeg" >> "$GITHUB_ENV"
 
       # ------------------------------------------------------------------
       # Build & test
@@ -223,6 +237,17 @@ jobs:
       # every free codec + hwaccel, pkgconf, librsvg); the resolved tree
       # lands in vcpkg_installed/ and is keyed on the manifest. The
       # binary-cache archives dir makes a manifest bump rebuild cheap.
+      # Bootstrap a fresh clone rather than leaning on whatever vcpkg the
+      # image carries: `builtin-baseline`/`overrides` are only honored by
+      # a recent vcpkg-tool, and all three OS jobs must behave alike.
+      - name: Bootstrap vcpkg
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:GITHUB_WORKSPACE\.cache\vcpkg"
+          & "$env:GITHUB_WORKSPACE\.cache\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "$env:GITHUB_WORKSPACE\.cache\vcpkg" >> $env:GITHUB_PATH
+          "VCPKG_ROOT=$env:GITHUB_WORKSPACE\.cache\vcpkg" >> $env:GITHUB_ENV
+
       - name: Cache vcpkg artifacts
         uses: actions/cache@v4
         with:
@@ -250,8 +275,8 @@ jobs:
           # no OCIO_RS_NO_MSVC_INCLUDES anywhere.
           "OCIO_RS_ENABLE_REAL=1" >> $env:GITHUB_ENV
           "OCIO_RS_LINK=static" >> $env:GITHUB_ENV
-          # Record the resolved versions in the build log: pinning them
-          # with builtin-baseline in vcpkg.json is a follow-up.
+          # Record the resolved versions in the build log (the manifest
+          # pins them via overrides + builtin-baseline).
           vcpkg list
 
       # Covers the whole target/ dir plus ~/.cargo; shared across branches
@@ -304,8 +329,36 @@ jobs:
       # ------------------------------------------------------------------
       - name: Install system dependencies
         run: |
-          tooling/install-deps.sh
-          brew install cmake
+          # Homebrew's pkgconf installs a `pkg-config` symlink, which is
+          # the name crates/oak-ffmpeg-link/build.rs invokes; nasm is what
+          # vcpkg's ffmpeg port requires to build (same split as the other
+          # platforms: FFmpeg libraries come from the vcpkg manifest).
+          brew install cmake pkg-config nasm
+
+      # ------------------------------------------------------------------
+      # vcpkg (manifest mode) + caches
+      # ------------------------------------------------------------------
+      # The runner has no vcpkg preinstalled; bootstrap a fresh clone.
+      - name: Bootstrap vcpkg
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git .cache/vcpkg
+          .cache/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          echo "$PWD/.cache/vcpkg" >> "$GITHUB_PATH"
+          echo "VCPKG_ROOT=$PWD/.cache/vcpkg" >> "$GITHUB_ENV"
+
+      # The archives dir is vcpkg's binary cache: a manifest bump then
+      # rebuilds only what changed. Same key scheme as the Windows job.
+      - name: Cache vcpkg artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg_installed
+            ~/.cache/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          save-always: true
+
+      - name: Install dependencies (vcpkg manifest)
+        run: vcpkg install --triplet arm64-osx
 
       # ------------------------------------------------------------------
       # Build environment
@@ -315,14 +368,10 @@ jobs:
           # Vendored static OCIO (same as every non-Windows platform via
           # tooling/ocio-env.sh); no OCIO_INSTALL_DIR override.
           bash tooling/ocio-env.sh >> "$GITHUB_ENV"
-          # Homebrew quirks: lame.pc / snappy / libopenjp2.pc live off the
-          # default pkg-config search paths (see docs/build.md).
-          {
-            echo "CFLAGS=-I/opt/homebrew/include"
-            echo "LDFLAGS=-L/opt/homebrew/lib"
-            echo "PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig/openjpeg"
-          } >> "$GITHUB_ENV"
-          echo "FFMPEG_DIR=.cache/ffmpeg" >> "$GITHUB_ENV"
+          prefix="$PWD/vcpkg_installed/arm64-osx"
+          echo "FFMPEG_DIR=$prefix" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "$prefix/tools/pkgconf" >> "$GITHUB_PATH"
 
       # ------------------------------------------------------------------
       # Caches
@@ -334,24 +383,6 @@ jobs:
         with:
           shared-key: oak-ci-macos
           cache-on-failure: true
-
-      # The project FFmpeg (release/8.0, static, all free codecs + hwaccel)
-      # is built by tooling/ffmpeg/build-ffmpeg.sh — 10-20 min on a cold
-      # cache. It does not depend on the Rust toolchain, so key it on the
-      # script itself and keep it out of rust-cache.
-      - name: Cache project FFmpeg
-        uses: actions/cache@v4
-        with:
-          path: .cache/ffmpeg
-          key: ffmpeg-${{ runner.os }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
-
-      # ------------------------------------------------------------------
-      # Project FFmpeg (script + FFMPEG_DIR; see docs/build.md)
-      # ------------------------------------------------------------------
-      - name: Build project FFmpeg
-        run: |
-          tooling/ffmpeg/build-ffmpeg.sh
-          echo "FFMPEG_DIR=$PWD/.cache/ffmpeg" >> "$GITHUB_ENV"
 
       # ------------------------------------------------------------------
       # Build & test
@@ -372,4 +403,149 @@ jobs:
           if ! cargo test --workspace --locked; then
             echo "first pass failed; retrying once for worker-pool flakes"
             cargo test --workspace --locked
+          fi
+
+  # second upstream target: openKylin (Debian/Ubuntu-derived) in its own
+  # image. The base image is bare (no sudo, no make, no python3) and the
+  # steps run as root, so there is no sudo prefix anywhere below.
+  openkylin:
+    name: Build & test (openKylin ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    container: openkylin/openkylin:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: warp-ubuntu-latest-x64-8x
+            triplet: x64-linux
+          - arch: arm64
+            runner: warp-ubuntu-latest-arm64-16x
+            triplet: arm64-linux
+    # The Test step's watchdog caps a hung suite at 30 min; give a cold
+    # vcpkg install + full compile + test room beyond that.
+    timeout-minutes: 90
+    steps:
+      # The image ships neither git nor curl (checkout and vcpkg need
+      # both). First step of the job, so the package lists are still fresh.
+      - name: Install git and curl
+        run: apt-get update && apt-get install -y git curl ca-certificates
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # gpui/ is a git submodule; its crates are workspace members of
+          # their own repo and build as path dependencies of oakapp.
+          submodules: true
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # ------------------------------------------------------------------
+      # System dependencies
+      # ------------------------------------------------------------------
+      # Same package set as the Linux job (both distros carry the Ubuntu
+      # names); patch/xz-utils are openKylin's own packaging brought in by
+      # zip/unzip. nasm and zip come from the kylinsoft "anything" PPA,
+      # which the image enables by default.
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            build-essential clang libclang-dev cmake pkg-config nasm \
+            git curl zip unzip tar python3 patch xz-utils \
+            libpipewire-0.3-dev libspa-0.2-dev libjack-jackd2-dev \
+            libasound2-dev libpulse-dev libsndfile1-dev \
+            libgl1-mesa-dev libgl1-mesa-dri mesa-vulkan-drivers \
+            libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev xvfb \
+            gdb file
+
+      # ------------------------------------------------------------------
+      # vcpkg (manifest mode) + caches
+      # ------------------------------------------------------------------
+      # The image has no vcpkg preinstalled; bootstrap a fresh clone.
+      - name: Bootstrap vcpkg
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git .cache/vcpkg
+          .cache/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          echo "$PWD/.cache/vcpkg" >> "$GITHUB_PATH"
+          echo "VCPKG_ROOT=$PWD/.cache/vcpkg" >> "$GITHUB_ENV"
+
+      # The archives dir is vcpkg's binary cache: a manifest bump then
+      # rebuilds only what changed.
+      - name: Cache vcpkg artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg_installed
+            ~/.cache/vcpkg/archives
+          # The arch prefix matters here: both jobs run the same distro
+          # image through the same cache scope, unlike the OS jobs.
+          key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-openkylin-${{ hashFiles('vcpkg.json') }}
+          save-always: true
+
+      - name: Install dependencies (vcpkg manifest)
+        run: vcpkg install --triplet ${{ matrix.triplet }}
+
+      # ------------------------------------------------------------------
+      # Build environment
+      # ------------------------------------------------------------------
+      - name: Configure build environment
+        run: |
+          {
+            echo "CC=clang"
+            echo "CXX=clang++"
+          } >> "$GITHUB_ENV"
+          bash tooling/ocio-env.sh >> "$GITHUB_ENV"
+          prefix="$PWD/vcpkg_installed/${{ matrix.triplet }}"
+          echo "FFMPEG_DIR=$prefix" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "$prefix/tools/pkgconf" >> "$GITHUB_PATH"
+
+      # Covers the whole target/ dir plus ~/.cargo.
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: oak-ci-openkylin-${{ matrix.arch }}
+          cache-on-failure: true
+
+      # ------------------------------------------------------------------
+      # Build & test
+      # ------------------------------------------------------------------
+      - name: Build
+        run: cargo check --workspace --locked
+
+      # xvfb + 24-bit screen, same as the Linux job: the gpui
+      # #[gpui::test] tests open real windows and render through wgpu on
+      # Mesa's software Vulkan (lavapipe). The watchdog logic is the Linux
+      # job's; the retry once below covers the same worker-pool flake,
+      # which is a stale-tmpfs/container property too — a real regression
+      # fails both passes.
+      - name: Test
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          run_suite() {
+            xvfb-run -a -s "-screen 0 1920x1080x24" cargo test --workspace --locked &
+            TEST_PID=$!
+            (
+              sleep 1800
+              echo "::warning::test suite exceeded 1800s; dumping hung-process stacks"
+              for p in $(pgrep -f 'target/debug/deps/|target/debug/oak-worker'); do
+                echo "===== thread stacks of pid $p ($(readlink /proc/$p/exe 2>/dev/null)) ====="
+                gdb -batch -ex 'thread apply all bt' -p "$p" || true
+              done
+              pkill -9 -f 'target/debug/deps/' || true
+              pkill -9 -f 'target/debug/oak-worker' || true
+            ) >/dev/null 2>&1 &
+            WATCHDOG_PID=$!
+            wait $TEST_PID
+            rc=$?
+            kill $WATCHDOG_PID 2>/dev/null || true
+            wait $WATCHDOG_PID 2>/dev/null || true
+            return $rc
+          }
+          if ! run_suite; then
+            echo "first pass failed; retrying once for worker-pool flakes"
+            run_suite
           fi

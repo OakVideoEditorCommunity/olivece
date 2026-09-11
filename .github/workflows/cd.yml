@@ -20,9 +20,12 @@ jobs:
   # Linux: one native package per distro, each built INSIDE that
   # distro's container so the declared dependencies always resolve to
   # the distro's own package names (dpkg-shlibdeps / rpmbuild
-  # auto-requires / Arch static base list). deb: hand-rolled dpkg-deb;
-  # rpm: rpmbuild; arch: makepkg. AppImage stays on the Ubuntu runner
-  # (self-contained by design).
+  # auto-requires / Arch static base list). The FFmpeg/codec libraries
+  # come from the vcpkg manifest (root vcpkg.json, x64-linux triplet), so
+  # these containers carry the build toolchain and the headless/UI
+  # runtime deps only. deb: hand-rolled dpkg-deb; rpm: rpmbuild; arch:
+  # makepkg. AppImage stays on the Ubuntu runner (self-contained by
+  # design).
   # ------------------------------------------------------------------
   linux:
     name: Linux packages (${{ matrix.distro }})
@@ -63,68 +66,81 @@ jobs:
         run: |
           case "${{ matrix.distro }}" in
             debian)
+              apt-get update
               apt-get install -y \
-                build-essential cmake pkg-config nasm dpkg-dev \
+                build-essential clang libclang-dev cmake pkg-config nasm \
+                git curl zip unzip tar python3 dpkg-dev \
                 libpipewire-0.3-dev libspa-0.2-dev libjack-jackd2-dev \
                 libasound2-dev libpulse-dev libsndfile1-dev \
                 libgl1-mesa-dev libgl1-mesa-dri mesa-vulkan-drivers \
                 libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev \
-                librsvg2-bin
-              # ffnvcodec headers (NVDEC for the project FFmpeg build) are
-              # NOT in Ubuntu/Debian's apt index under a stable name
-              # (the old libffnvcodec-dev was dropped from noble; the
-              # community replacement is distro-version specific). The
-              # headers are distribution-free, so install them from
-              # source like the Fedora branch.
-              git clone --depth 1 https://git.videolan.org/git/ffmpeg/nv-codec-headers.git /tmp/nv-codec-headers
-              make -C /tmp/nv-codec-headers install PREFIX=/usr
+                gdb xvfb librsvg2-bin
               ;;
             fedora)
               dnf install -y \
-                gcc gcc-c++ cmake pkgconf-pkg-config nasm \
+                gcc gcc-c++ clang clang-devel cmake pkgconf-pkg-config nasm \
+                git curl zip unzip tar python3 \
                 pipewire-devel jack-audio-connection-kit-devel \
                 alsa-lib-devel pulseaudio-libs-devel libsndfile-devel \
                 mesa-libGL-devel mesa-vulkan-drivers \
                 vulkan-headers vulkan-loader-devel \
                 libxkbcommon-devel libxkbcommon-x11-devel \
                 rpm-build librsvg2-tools
-              # ffnvcodec headers (NVDEC for the project FFmpeg build) are
-              # not in Fedora's base repos (RPM Fusion only); they are
-              # distribution-free headers, so install them from source.
-              git clone --depth 1 https://git.videolan.org/git/ffmpeg/nv-codec-headers.git /tmp/nv-codec-headers
-              make -C /tmp/nv-codec-headers install PREFIX=/usr
               ;;
             arch)
               pacman -S --needed --noconfirm \
-                base-devel cmake pkgconf nasm \
+                base-devel clang cmake pkgconf nasm \
+                git curl zip unzip tar python \
                 pipewire jack2 alsa-lib libpulse libsndfile \
                 mesa vulkan-headers vulkan-icd-loader \
-                libxkbcommon libxkbcommon-x11 librsvg \
-                ffnvcodec-headers
+                libxkbcommon libxkbcommon-x11 librsvg
               ;;
           esac
 
+      # ------------------------------------------------------------------
+      # vcpkg (manifest mode) + caches
+      # ------------------------------------------------------------------
+      - name: Bootstrap vcpkg
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git .cache/vcpkg
+          .cache/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          echo "$PWD/.cache/vcpkg" >> "$GITHUB_PATH"
+          echo "VCPKG_ROOT=$PWD/.cache/vcpkg" >> "$GITHUB_ENV"
+
+      - name: Cache vcpkg artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg_installed
+            ~/.cache/vcpkg/archives
+          # The distro prefix matters: the same Ubuntu-runner cache scope
+          # backs three different container distros.
+          key: vcpkg-${{ matrix.distro }}-x64-linux-${{ hashFiles('vcpkg.json') }}
+          save-always: true
+
+      - name: Install dependencies (vcpkg manifest)
+        run: vcpkg install --triplet x64-linux
+
       - name: Configure build environment
         run: |
+          {
+            echo "CC=clang"
+            echo "CXX=clang++"
+          } >> "$GITHUB_ENV"
           # tooling/ocio-env.sh: vendored static OCIO everywhere it
           # builds (the [patch.crates-io] ocio-sys tracks shaloong/ocio-rs
           # main, whose vendored sources build on GCC >= 16).
           bash tooling/ocio-env.sh >> "$GITHUB_ENV"
+          prefix="$PWD/vcpkg_installed/x64-linux"
+          echo "FFMPEG_DIR=$prefix" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "$prefix/tools/pkgconf" >> "$GITHUB_PATH"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: oak-${{ matrix.distro }}
           cache-on-failure: true
-
-      - name: Cache project FFmpeg
-        uses: actions/cache@v4
-        with:
-          path: .cache/ffmpeg
-          key: ffmpeg-${{ matrix.distro }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
-
-      - name: Build project FFmpeg (static, GPL + free codecs + hwaccel)
-        run: tooling/ffmpeg/build-ffmpeg.sh
 
       - name: Build (release)
         run: cargo build --release --locked
@@ -173,35 +189,54 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          tooling/install-deps.sh
+          sudo apt-get update
+          # FFmpeg/codec libraries come from the vcpkg manifest (root
+          # vcpkg.json); this list is the toolchain vcpkg needs plus the
+          # GUI runtime deps the AppImage bundles.
           sudo apt-get install -y \
-            cmake librsvg2-bin \
+            build-essential clang libclang-dev cmake pkg-config nasm \
+            git curl zip unzip tar python3 \
+            librsvg2-bin \
             libpipewire-0.3-dev libspa-0.2-dev libjack-jackd2-dev \
             libasound2-dev libpulse-dev libsndfile1-dev \
             libgl1-mesa-dev libgl1-mesa-dri mesa-vulkan-drivers \
             libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev
-          # ffnvcodec headers (NVDEC for the project FFmpeg build) are
-          # handled by install-deps.sh (source install; the Ubuntu package
-          # name differs per release and `libffnvcodec-dev` is gone on
-          # noble) — do NOT apt-install them here.
+
+      # ------------------------------------------------------------------
+      # vcpkg (manifest mode) + caches
+      # ------------------------------------------------------------------
+      - name: Bootstrap vcpkg
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git .cache/vcpkg
+          .cache/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          echo "$PWD/.cache/vcpkg" >> "$GITHUB_PATH"
+          echo "VCPKG_ROOT=$PWD/.cache/vcpkg" >> "$GITHUB_ENV"
+
+      - name: Cache vcpkg artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg_installed
+            ~/.cache/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-appimage-${{ hashFiles('vcpkg.json') }}
+          save-always: true
+
+      - name: Install dependencies (vcpkg manifest)
+        run: vcpkg install --triplet x64-linux
 
       - name: Configure build environment
-        run: bash tooling/ocio-env.sh >> "$GITHUB_ENV"
+        run: |
+          bash tooling/ocio-env.sh >> "$GITHUB_ENV"
+          prefix="$PWD/vcpkg_installed/x64-linux"
+          echo "FFMPEG_DIR=$prefix" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "$prefix/tools/pkgconf" >> "$GITHUB_PATH"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: oak-appimage
           cache-on-failure: true
-
-      - name: Cache project FFmpeg
-        uses: actions/cache@v4
-        with:
-          path: .cache/ffmpeg
-          key: ffmpeg-appimage-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
-
-      - name: Build project FFmpeg (static, GPL + free codecs + hwaccel)
-        run: tooling/ffmpeg/build-ffmpeg.sh
 
       - name: Install cargo-packager
         run: cargo install cargo-packager --locked
@@ -240,36 +275,49 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          tooling/install-deps.sh
-          brew install cmake librsvg
+          # Homebrew's pkgconf installs a `pkg-config` symlink, which is
+          # the name crates/oak-ffmpeg-link/build.rs invokes; nasm is what
+          # vcpkg's ffmpeg port requires to build. librsvg stays for
+          # rsvg-convert (app icon) and is bundled into the .app below.
+          brew install cmake pkg-config nasm librsvg
+
+      # ------------------------------------------------------------------
+      # vcpkg (manifest mode) + caches
+      # ------------------------------------------------------------------
+      - name: Bootstrap vcpkg
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git .cache/vcpkg
+          .cache/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          echo "$PWD/.cache/vcpkg" >> "$GITHUB_PATH"
+          echo "VCPKG_ROOT=$PWD/.cache/vcpkg" >> "$GITHUB_ENV"
+
+      - name: Cache vcpkg artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg_installed
+            ~/.cache/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          save-always: true
+
+      - name: Install dependencies (vcpkg manifest)
+        run: vcpkg install --triplet arm64-osx
 
       - name: Configure build environment
         run: |
           # Vendored static OCIO (same as every non-Windows platform via
           # tooling/ocio-env.sh); no OCIO_INSTALL_DIR override.
           bash tooling/ocio-env.sh >> "$GITHUB_ENV"
-          {
-            echo "CFLAGS=-I/opt/homebrew/include"
-            echo "LDFLAGS=-L/opt/homebrew/lib"
-            echo "PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig/openjpeg"
-          } >> "$GITHUB_ENV"
+          prefix="$PWD/vcpkg_installed/arm64-osx"
+          echo "FFMPEG_DIR=$prefix" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "$prefix/tools/pkgconf" >> "$GITHUB_PATH"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: oak-workspace
           cache-on-failure: true
-
-      - name: Cache project FFmpeg
-        uses: actions/cache@v4
-        with:
-          path: .cache/ffmpeg
-          key: ffmpeg-${{ runner.os }}-${{ hashFiles('tooling/ffmpeg/build-ffmpeg.sh') }}
-
-      - name: Build project FFmpeg (static, GPL + free codecs + hwaccel)
-        run: |
-          tooling/ffmpeg/build-ffmpeg.sh
-          echo "FFMPEG_DIR=$PWD/.cache/ffmpeg" >> "$GITHUB_ENV"
 
       - name: Install cargo-packager
         run: cargo install cargo-packager --locked
@@ -339,6 +387,17 @@ jobs:
       # every free codec + hwaccel, pkgconf, librsvg); the resolved tree
       # lands in vcpkg_installed/ and is keyed on the manifest. The
       # binary-cache archives dir makes a manifest bump rebuild cheap.
+      # Bootstrap a fresh clone rather than leaning on whatever vcpkg the
+      # image carries: `builtin-baseline`/`overrides` are only honored by
+      # a recent vcpkg-tool, and every OS job must behave alike.
+      - name: Bootstrap vcpkg
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:GITHUB_WORKSPACE\.cache\vcpkg"
+          & "$env:GITHUB_WORKSPACE\.cache\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "$env:GITHUB_WORKSPACE\.cache\vcpkg" >> $env:GITHUB_PATH
+          "VCPKG_ROOT=$env:GITHUB_WORKSPACE\.cache\vcpkg" >> $env:GITHUB_ENV
+
       - name: Cache vcpkg artifacts
         uses: actions/cache@v4
         with:
