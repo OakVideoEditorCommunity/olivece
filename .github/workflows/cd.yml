@@ -74,7 +74,7 @@ jobs:
                 libasound2-dev libpulse-dev libsndfile1-dev \
                 libgl1-mesa-dev libgl1-mesa-dri mesa-vulkan-drivers \
                 libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev \
-                gdb xvfb librsvg2-bin
+                gdb xvfb librsvg2-bin autoconf autoconf-archive automake libtool
               ;;
             fedora)
               dnf install -y \
@@ -84,8 +84,8 @@ jobs:
                 alsa-lib-devel pulseaudio-libs-devel libsndfile-devel \
                 mesa-libGL-devel mesa-vulkan-drivers \
                 vulkan-headers vulkan-loader-devel \
-                libxkbcommon-devel libxkbcommon-x11-devel \
-                rpm-build librsvg2-tools libdrm-devel
+                libxkbcommon-devel libxkbcommon-x11-devel \ 
+                rpm-build librsvg2-tools libdrm-devel autoconf autoconf-archive automake libtool
               ;;
             arch)
               pacman -S --needed --noconfirm \
@@ -93,7 +93,7 @@ jobs:
                 git curl zip unzip tar python \
                 pipewire jack2 alsa-lib libpulse libsndfile \
                 mesa vulkan-headers vulkan-icd-loader \
-                libxkbcommon libxkbcommon-x11 librsvg libdrm
+                libxkbcommon libxkbcommon-x11 librsvg libdrm autoconf autoconf-archive automake libtool
               ;;
           esac
 
@@ -200,7 +200,8 @@ jobs:
             libpipewire-0.3-dev libspa-0.2-dev libjack-jackd2-dev \
             libasound2-dev libpulse-dev libsndfile1-dev \
             libgl1-mesa-dev libgl1-mesa-dri mesa-vulkan-drivers \
-            libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev libdrm-dev
+            libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev libdrm-dev \
+            autoconf autoconf-archive automake libtool
 
       # ------------------------------------------------------------------
       # vcpkg (manifest mode) + caches
