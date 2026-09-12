@@ -837,6 +837,7 @@ fn execute_plugin_job(
 
     let oak_render::eval::JobSpec::Plugin {
 		instance,
+		type_id: _,
 		time,
 		effect_input_id,
 		inputs,
@@ -1167,6 +1168,7 @@ mod tests {
 		}
 		let spec = oak_render::eval::JobSpec::Plugin {
 			instance,
+			type_id: "org.oak.test-plugin".to_string(),
 			time: 0.0,
 			effect_input_id: Some("Source".to_string()),
 			inputs: Vec::new(),

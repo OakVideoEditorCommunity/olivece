@@ -200,6 +200,34 @@
 - GPU 型 OFX 插件（OpenGL/CUDA 上下文的）本期不支持直通，按 CPU 插件处理
   （文档明示；真有需要时按 §3.6 的平台分支再开 GPU 句柄通道）。
 
+> **M3 落地回填（2026-09-12）**：
+>
+> - 采用 **`oak-worker --ofx-host` 模式**（新增 `oak-worker/src/ofx_host.rs`），
+>   不新增可执行目标，省掉打包/路径解析的分支。宿主启动即
+>   `install_render_executor` + `Host::cache.scan()`，按**插件标识符**
+>   （`shared_plugin_instance`，跨进程稳定）解析宿主本地实例。
+> - 客户端在 `oak-render/src/ofxhost.rs`：`RenderManager` 在 **Pipeline
+>   后端**创建并安装进程级客户端（首个个 PluginJob 才 spawn，空闲不占进程），
+>   `eval::process_plugin_job` 优先走它，失败/缺席再回退进程内 executor（进程池
+>   后端在 M4 之前仍按现状在每个 worker 内渲染，见 §5 回退策略）。
+>   数据面为输入/输出两个 `FrameSlotPool`（handshake 的 `input_*` 字段首次启用）：
+>   命名 clip + src 各写一个输入槽，插件输出写输出槽；槽容量/数量按 job 需求
+>   自动扩容（重启一次宿主，无在途任务时安全）。
+> - 崩溃：reader 线程 EOF 即判死，`submit` 在同一调用内**重生宿主并重投同一
+>   job**（输入帧只回读一次，重投不重复回读）；连续
+>   `HOST_MAX_FAILURES=3` 次崩溃后熔断，`process_plugin_job` 落紫帧
+>   （`plugin_job_host_failure_yields_purple_frame` 直接断言）。
+> - 进度/取消：宿主 reporter 即时 flush `plugin_progress`（不再是 worker 的
+>   批末缓冲，进度条可实时更新）；宿主用独立 stdin 线程，`plugin_cancel`
+>   在该线程内直接置黏性 flag（渲染中也能生效），下次 `progressStart` 复位；
+>   `request_plugin_cancel_all` 同时广播给 worker 池与宿主。取消的生效粒度
+>   取决于插件是否回调 progressUpdate（与现状契约一致）。
+> - 验收测试（`oak-worker/tests/ofx_host.rs`，真实宿主 + 内置测试插件）：
+>   渲染与进度转发；`--ofx-crash-once` 崩溃后重投成功；`--ofx-crash-always`
+>   连续三次崩溃后熔断（紫帧由 eval 单测覆盖）；慢速测试插件
+>   （`org.oak.test-plugin.slow`，progressUpdate x20ms）上取消在途渲染；
+>   并发 submit 由客户端互斥串行化。
+
 ### 3.3 队列与 ticket
 
 - 对上层（oak-app/oak-cli）**ticket API 不变**：RenderManager 仍是唯一入口，
@@ -386,7 +414,7 @@ fallback。** 解码上传与上屏共用一层 `gpuinteop` 抽象，按后端�
 | **M0b Job 图 + 虚拟端点 + BFS** | §3.8 全量：图固定 GraphInput/GraphOutput 虚拟节点（默认相连、禁删禁复制、序列化往返）、节点编辑器显示两节点、resolve 改为从输入节点的 Kahn 形态 BFS | 新增测试：多输入汇合等齐全部输入、多输出分叉各自成帧、非全连通图不可达节点不执行、环报错断支、虚拟节点删除/复制被拒、序列化往返后端点仍在；节点编辑器 UI 测试（端点可见、入线/出线规则）；既有测试全绿 |
 | **M1 线程管线骨架** | 解码/渲染/上屏三线程+三队列进 oak-render（`pipeline` 模块）；RenderManager 增加线程后端，进程池后端保留，`OAK_PIPELINE=processes` 可回退 | 同一套渲染测试在两个后端下都绿（测试矩阵化）；播放/seek/导出 smoke 等价 |
 | **M2 GPU 零拷贝** | 图内全程 `Texture::Gpu`（合成/转场/调整层不再逐帧回读）；wgpu 29 统一 + 采用 gpui device（§3.5 攻关已回填）；GPU 色彩管理（工作空间→输出规格→显示器 ICC 烘焙 3D LUT，GPU 执行）；导出/缓存/OFX 三处边界显式回读；内置 YUV→RGB GPU pass（M5 解码导入的依赖项，解码接线随 M5） | 图播放路径 **GPU→CPU 回读为 0**（`oak_core::backend::gpu_transfer_counters` 计数断言，M1 帧缓存范式）；`RenderedFrame::Gpu` + `to_display` 上屏在 adopted device 上零拷贝（app 测试）；YUV→RGB pass 与 `colormath::yuv444p16_to_rgb_f32` 对拍；全 workspace 测试绿 |
-| **M3 OFX 独立进程** | oak-ofx-host 单进程宿主；PluginJob 经 IPC；崩溃重生+紫帧回退；进度/取消协议搬运 | 杀掉 ofx-host 进程 → 在途 job 重投成功；连续三次崩溃 → 紫帧；进度条/取消行为与现状一致 |
+| **M3 OFX 独立进程** | `oak-worker --ofx-host` 单进程宿主 + `oak-render/ofxhost` 客户端（Pipeline 后端安装，首 job 惰性 spawn）；PluginJob 经 NDJSON + 输入/输出 shm 槽；崩溃重生+在途 job 重投+三次熔断紫帧；`plugin_progress`/`plugin_cancel` 搬运（宿主即时 flush） | 植入确定性崩溃钩子：`--ofx-crash-once` 杀掉宿主 → 在途 job 重投成功；`--ofx-crash-always` 连续三次崩溃 → 客户端熔断、eval 紫帧；进度事件（含 0.5/1.0）到达 app 回调；取消 flag 语义单测（`oak-worker/tests/ofx_host.rs` + eval/ofx_host 单测） |
 | **M4 流水线预取** | 调度层按 §3.4 投依赖窗口；背压策略 | 1080p 播放 CPU 占用不升、fps 不低于进程池后端；首帧延迟不劣化（基准对比留档） |
 | **M5 GPU 解码零拷贝** | §3.6 表逐行落地：staging fallback 基线 → Linux NVDEC/VAAPI 导入 → Windows D3D11VA 导入 → macOS VideoToolbox 导入；FFmpeg 无 hwaccel 的组合才评估手写 GPU 解码 | 硬解路径 `HW_TRANSFERS` 计数归零（不再下载）；逐平台导入开/关对比测试；每行独立 PR 可回退 |
 

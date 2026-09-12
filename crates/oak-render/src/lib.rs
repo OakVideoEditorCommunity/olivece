@@ -53,6 +53,7 @@ pub mod frameio;
 pub mod handle;
 pub mod ipc;
 pub mod manager;
+pub mod ofxhost;
 pub mod pipeline;
 pub mod procpool;
 pub mod scheduler;

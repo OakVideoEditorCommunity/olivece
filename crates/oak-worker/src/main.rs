@@ -32,6 +32,7 @@
 
 mod framecache;
 mod ipc;
+mod ofx_host;
 mod worker;
 
 use std::process::exit;
@@ -64,6 +65,11 @@ fn parse_backend(args: &[String]) -> String {
 
 fn main() {
 	let args: Vec<String> = std::env::args().collect();
+	// M3: `--ofx-host` runs the single OpenFX host loop instead of the
+	// ticket worker (same binary, no extra target to package).
+	if args.iter().any(|arg| arg == "--ofx-host") {
+		exit(ofx_host::ofx_host_main(&args));
+	}
 	let backend = parse_backend(&args);
 	exit(worker::worker_main(&backend));
 }

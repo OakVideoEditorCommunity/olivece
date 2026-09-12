@@ -37,6 +37,8 @@
 #include <stdarg.h>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 /* Windows 上插件 DLL 带自己的 CRT 环境块：宿主 Rust 侧的
@@ -373,6 +375,90 @@ static OfxStatus actionRender(OfxImageEffectHandle inst, OfxPropertySetHandle in
     return kOfxStatOK;
 }
 
+/* ---------- 慢速变体（M3）：取消 e2e 测试 ---------- */
+
+/* progressUpdate 之间的睡眠（宿主取消在渲染中置位，下一次
+ * progressUpdate 返回非 OK，插件立即中止）。 */
+static void slow_sleep_ms(int ms)
+{
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
+    usleep((useconds_t)ms * 1000);
+#endif
+}
+
+/* 100 次 progressUpdate x 20ms（约 2 秒）：把输出填成常量 0.25。
+ * 任一次 progressUpdate 返回非 OK（宿主取消）→ kOfxStatFailed。 */
+static OfxStatus actionRenderSlow(OfxImageEffectHandle inst, OfxPropertySetHandle inArgs)
+{
+    double time = 0.0;
+    propGetDouble(inArgs, kOfxPropTime, 0, &time);
+
+    OfxImageClipHandle clip = NULL;
+    OfxPropertySetHandle clipProps = NULL;
+    OfxStatus st = g_imageEffectSuite->clipGetHandle(inst, "Output", &clip, &clipProps);
+    if (st != kOfxStatOK)
+        return st;
+
+    OfxPropertySetHandle image = NULL;
+    st = g_imageEffectSuite->clipGetImage(clip, time, NULL, &image);
+    if (st != kOfxStatOK)
+        return st;
+
+    void *data = NULL;
+    int rowBytes = 0;
+    int bounds[4] = { 0, 0, 0, 0 };
+    propGetPointer(image, kOfxImagePropData, 0, &data);
+    propGetInt(image, kOfxImagePropRowBytes, 0, &rowBytes);
+    propGetIntN(image, kOfxImagePropBounds, 4, bounds);
+
+    if (g_progressSuite) {
+        g_progressSuite->progressStart((OfxImageEffectHandle)inst, "slow-render");
+        for (int i = 0; i < 100; i++) {
+            OfxStatus ps = g_progressSuite->progressUpdate((OfxImageEffectHandle)inst,
+                                                           (double)(i + 1) / 100.0);
+            if (ps != kOfxStatOK) {
+                g_progressSuite->progressEnd((OfxImageEffectHandle)inst);
+                return kOfxStatFailed;
+            }
+            slow_sleep_ms(20);
+        }
+    }
+
+    int w = bounds[2] - bounds[0];
+    int h = bounds[3] - bounds[1];
+    if (data && w > 0 && h > 0) {
+        for (int y = 0; y < h; y++) {
+            float *row = (float *)((char *)data + (size_t)y * (size_t)rowBytes);
+            for (int x = 0; x < w; x++) {
+                row[x * 4 + 0] = 0.25f;
+                row[x * 4 + 1] = 0.25f;
+                row[x * 4 + 2] = 0.25f;
+                row[x * 4 + 3] = 1.0f;
+            }
+        }
+    }
+
+    g_imageEffectSuite->clipReleaseImage(image);
+    if (g_progressSuite) {
+        g_progressSuite->progressEnd((OfxImageEffectHandle)inst);
+    }
+    return kOfxStatOK;
+}
+
+/* 慢速变体的效果入口：render 走慢速路径，其余 action 委托基础实现。 */
+static OfxStatus mainEntry(const char *action, const void *handle,
+                           OfxPropertySetHandle inArgs, OfxPropertySetHandle outArgs);
+
+static OfxStatus mainEntrySlow(const char *action, const void *handle,
+                               OfxPropertySetHandle inArgs, OfxPropertySetHandle outArgs)
+{
+    if (strcmp(action, kOfxImageEffectActionRender) == 0) {
+        return actionRenderSlow((OfxImageEffectHandle)handle, inArgs);
+    }
+    return mainEntry(action, handle, inArgs, outArgs);
+}
 /* ---------- ofxColour（M11 §4）：GetOutputColourspace ---------- */
 
 static OfxStatus actionGetOutputColourspace(OfxPropertySetHandle inArgs,
@@ -827,9 +913,20 @@ static const OfxPlugin test_plugin_interact = {
     /* mainEntry */ mainEntryInteractEffect,
 };
 
+/* M3 取消 e2e：慢速 filter（progressUpdate x20ms 循环，取消即中止）。 */
+static const OfxPlugin test_plugin_slow = {
+    /* pluginApi */ kOfxImageEffectPluginApi,
+    /* apiVersion */ kOfxImageEffectPluginApiVersion,
+    /* pluginIdentifier */ "org.oak.test-plugin.slow",
+    /* pluginVersionMajor */ 1,
+    /* pluginVersionMinor */ 0,
+    /* setHost */ setHost,
+    /* mainEntry */ mainEntrySlow,
+};
+
 OfxExport int OfxGetNumberOfPlugins(void)
 {
-    return 4;
+    return 5;
 }
 
 OfxExport OfxPlugin *OfxGetPlugin(int nth)
@@ -842,5 +939,7 @@ OfxExport OfxPlugin *OfxGetPlugin(int nth)
         return (OfxPlugin *)&test_plugin_id;
     if (nth == 3)
         return (OfxPlugin *)&test_plugin_interact;
+    if (nth == 4)
+        return (OfxPlugin *)&test_plugin_slow;
     return NULL;
 }

@@ -80,6 +80,9 @@ impl PluginInstanceHandle {
 pub struct PluginJobPayload {
 	/// The instance identity (oakplugin registry key).
 	pub instance: PluginInstanceHandle,
+	/// The OFX plugin identifier (cross-process stable; the single OFX
+	/// host process resolves its own instance from it).
+	pub type_id: String,
 	/// The request time (C++ `globals.time().in()`).
 	pub time: Rational,
 	/// The effect input id the main source texture arrives on (C++
@@ -238,6 +241,7 @@ impl NodeBehavior for PluginNode {
 		if tex.is_some() && !self.instance.is_null() {
 			let payload = Job::PluginJob(PluginJobPayload {
 				instance: self.instance,
+				type_id: self.type_id.clone(),
 				time,
 				effect_input_id: core.effect_input.clone(),
 				values: inputs.clone(),

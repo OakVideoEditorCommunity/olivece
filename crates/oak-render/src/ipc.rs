@@ -132,6 +132,13 @@ pub const TYPE_PLUGIN_PROGRESS: &str = "plugin_progress";
 /// progress reporter then answers false (the plugin aborts at its next
 /// progressUpdate).
 pub const TYPE_PLUGIN_CANCEL: &str = "plugin_cancel";
+/// `"ofx_job"` (M3): main->ofx-host — one OpenFX `PluginJob` to render
+/// against frames in the dedicated input pool; the result returns through
+/// the output pool with [`TYPE_OFX_RESULT`].
+pub const TYPE_OFX_JOB: &str = "ofx_job";
+/// `"ofx_result"` (M3): ofx-host->main — the rendered job's output-pool
+/// slot, or `slot: -1` plus an error string.
+pub const TYPE_OFX_RESULT: &str = "ofx_result";
 
 /// Wire-format slot format for 8-bit BGRA frames (M15 S1). The viewer
 /// preview path requests BGRA8 so the worker converts its F32 pipeline
@@ -650,6 +657,85 @@ impl PluginProgressMsg {
 /// The wire `plugin_cancel` message (main->worker; no payload).
 pub fn plugin_cancel_json() -> Value {
 	json!({ "type": TYPE_PLUGIN_CANCEL })
+}
+
+/// One clip input on an [`OfxJobMsg`]: the OFX clip name and the
+/// input-pool slot holding the frame.
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct OfxInputRef {
+	/// OFX clip name (`"Source"`, …).
+	pub name: String,
+	/// Input-pool slot index.
+	pub slot: u32,
+}
+
+/// `ofx_job` (main->ofx-host, M3) — one OpenFX `PluginJob` render request.
+///
+/// The host owns the plugin instances (resolved from `type_id` through the
+/// process-local instance factory) and the frames live in the dedicated
+/// input/output [`FrameSlotPool`]s announced by the handshake. `src_slot`
+/// is the input-pool slot the effect's main source arrived on (`None` when
+/// the job has no source).
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct OfxJobMsg {
+	/// Client-assigned job id (the result echoes it).
+	pub job: u64,
+	/// OFX plugin identifier (`org.oak.test-plugin`, …).
+	pub type_id: String,
+	/// Request time in seconds.
+	pub time: f64,
+	/// Effect input id the main source arrives on (`""` = none).
+	pub effect_input_id: String,
+	/// Clip inputs by name.
+	pub inputs: Vec<OfxInputRef>,
+	/// Param overrides (input id -> value).
+	pub values: Vec<WireEffectParam>,
+	/// Input-pool slot of the main source frame.
+	pub src_slot: Option<u32>,
+}
+
+impl OfxJobMsg {
+	/// The wire `ofx_job` value.
+	pub fn to_json(&self) -> Value {
+		json!({
+			"type": TYPE_OFX_JOB,
+			"job": self.job,
+			"type_id": self.type_id,
+			"time": self.time,
+			"effect_input_id": self.effect_input_id,
+			"inputs": self.inputs,
+			"values": self.values,
+			"src_slot": self.src_slot,
+		})
+	}
+}
+
+/// `ofx_result` (ofx-host->main, M3) — the job's output-pool slot on
+/// success, or `slot: -1` with the failure reason (the client then reports
+/// the job as failed and the evaluator falls back to a purple frame).
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct OfxResultMsg {
+	/// The job id being answered.
+	pub job: u64,
+	/// Output-pool slot, or -1 on failure.
+	pub slot: i32,
+	/// Failure reason (empty on success).
+	pub error: String,
+}
+
+impl OfxResultMsg {
+	/// The wire `ofx_result` value.
+	pub fn to_json(&self) -> Value {
+		json!({
+			"type": TYPE_OFX_RESULT,
+			"job": self.job,
+			"slot": self.slot,
+			"error": self.error,
+		})
+	}
 }
 
 /// Build a worker-side error report, mirroring `error_message()` in
@@ -1936,6 +2022,83 @@ mod tests {
 	fn plugin_cancel_wire_shape() {
 		let value = plugin_cancel_json();
 		assert_eq!(value["type"], TYPE_PLUGIN_CANCEL);
+	}
+
+	// ---- M3 OFX-host job protocol ---------------------------------------
+
+	#[test]
+	fn ofx_job_wire_roundtrip() {
+		let job = OfxJobMsg {
+			job: 7,
+			type_id: "org.oak.test-plugin".into(),
+			time: 0.5,
+			effect_input_id: "Source".into(),
+			inputs: vec![
+				OfxInputRef {
+					name: "Source".into(),
+					slot: 3,
+				},
+				OfxInputRef {
+					name: "Background".into(),
+					slot: 4,
+				},
+			],
+			values: vec![WireEffectParam {
+				input: "gain".into(),
+				value: WireNodeValue::Float(0.25),
+			}],
+			src_slot: Some(3),
+		};
+		let value = job.to_json();
+		assert_eq!(value["type"], TYPE_OFX_JOB);
+		assert_eq!(value["job"], 7);
+		assert_eq!(value["type_id"], "org.oak.test-plugin");
+		assert_eq!(value["inputs"][0]["name"], "Source");
+		assert_eq!(value["inputs"][0]["slot"], 3);
+		assert_eq!(value["values"][0]["input"], "gain");
+		assert_eq!(value["src_slot"], 3);
+
+		// The typed form parses the same line (the type tag is ignored by
+		// serde's default unknown-field handling).
+		let parsed: OfxJobMsg = serde_json::from_value(value).unwrap();
+		assert_eq!(parsed, job);
+
+		// A src-less job omits `src_slot` (defaults to None).
+		let bare: OfxJobMsg = serde_json::from_str(r#"{"job":1,"type_id":"x"}"#).unwrap();
+		assert_eq!(bare.src_slot, None);
+		assert!(bare.inputs.is_empty());
+		assert!(bare.values.is_empty());
+	}
+
+	#[test]
+	fn ofx_result_wire_roundtrip() {
+		let ok = OfxResultMsg {
+			job: 7,
+			slot: 2,
+			error: String::new(),
+		};
+		let value = ok.to_json();
+		assert_eq!(value["type"], TYPE_OFX_RESULT);
+		assert_eq!(value["job"], 7);
+		assert_eq!(value["slot"], 2);
+		let parsed: OfxResultMsg = serde_json::from_value(value).unwrap();
+		assert_eq!(parsed, ok);
+
+		let failed = OfxResultMsg {
+			job: 8,
+			slot: -1,
+			error: "plugin not found".into(),
+		};
+		let parsed: OfxResultMsg = serde_json::from_value(failed.to_json()).unwrap();
+		assert_eq!(parsed, failed);
+	}
+
+	#[test]
+	fn ofx_protocol_type_constants_are_stable() {
+		assert_eq!(TYPE_OFX_JOB, "ofx_job");
+		assert_eq!(TYPE_OFX_RESULT, "ofx_result");
+		assert_eq!(TYPE_PLUGIN_PROGRESS, "plugin_progress");
+		assert_eq!(TYPE_PLUGIN_CANCEL, "plugin_cancel");
 	}
 
 	#[test]

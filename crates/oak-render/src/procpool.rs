@@ -148,7 +148,7 @@ pub fn set_plugin_progress_cb(cb: Option<PluginProgressCb>) {
 		.unwrap_or_else(|e| e.into_inner()) = cb;
 }
 
-fn plugin_progress_cb() -> Option<PluginProgressCb> {
+pub(crate) fn plugin_progress_cb() -> Option<PluginProgressCb> {
 	PLUGIN_PROGRESS_CB
 		.get_or_init(|| Mutex::new(None))
 		.lock()
@@ -178,6 +178,8 @@ pub fn request_plugin_cancel_all() {
 	if let Some(dispatcher) = dispatcher {
 		dispatcher.broadcast_plugin_cancel();
 	}
+	// M3: the single OFX host (thread pipeline) gets the same broadcast.
+	crate::ofxhost::request_cancel_all();
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +251,7 @@ impl ShmRegionView {
 	/// Create (and initialize) a segment of `slots` x `slot_bytes` under
 	/// `key`. A stale segment under the same name (left by a crashed
 	/// previous owner) is unlinked and the create retried once.
-	fn create(key: &str, slots: u32, slot_bytes: usize) -> Result<Arc<ShmRegionView>> {
+	pub(crate) fn create(key: &str, slots: u32, slot_bytes: usize) -> Result<Arc<ShmRegionView>> {
 		let mut region = SharedMemoryRegion::new();
 		let bytes = FrameSlotPool::bytes_needed(slots, slot_bytes);
 		if !region.open(key, bytes, ShmMode::Create) {

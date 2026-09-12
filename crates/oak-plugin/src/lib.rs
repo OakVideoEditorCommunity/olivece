@@ -72,3 +72,24 @@ pub mod property;
 pub mod render;
 pub mod render_driver;
 pub mod suites;
+
+/// The minimal test plugin shared library built by this crate's build
+/// script (`$OUT_DIR/oak_test_plugin.{so,dylib}`), for integration tests
+/// that exercise the real plugin path — including the single OFX host
+/// process (M3) — without a system plugin. The build script always
+/// compiles it, so this is `None` only if the build directory was
+/// tampered with (tests treat that as a hard failure, not a skip).
+pub fn bundled_test_plugin() -> Option<std::path::PathBuf> {
+	let dir = std::path::Path::new(env!("OUT_DIR"));
+	for name in [
+		"oak_test_plugin.dylib",
+		"oak_test_plugin.so",
+		"oak_test_plugin.dll",
+	] {
+		let path = dir.join(name);
+		if path.exists() {
+			return Some(path);
+		}
+	}
+	None
+}

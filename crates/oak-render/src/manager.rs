@@ -117,6 +117,10 @@ pub struct RenderManager {
 	/// the inline and process backends). Holding the `Arc` keeps the
 	/// render/decode threads alive for the manager's lifetime.
 	pipeline: Option<Arc<crate::pipeline::PipelineBackend>>,
+	/// The single OpenFX host client (M3), when the Pipeline backend is
+	/// live: the render thread's plugin jobs go through it instead of the
+	/// in-process executor (design §3.2).
+	ofx_host: Option<Arc<crate::ofxhost::OfxHost>>,
 }
 
 impl RenderManager {
@@ -171,18 +175,19 @@ impl RenderManager {
 			eval::render_produced_frame(time, params)
 				.map(crate::ticket::TicketPayload::Video)
 		});
-		let (dispatch, audio_dispatch, audio_fallback, process_pool, pipeline): (
+		let (dispatch, audio_dispatch, audio_fallback, process_pool, pipeline, ofx_host): (
 			Arc<dyn JobDispatch>,
 			Arc<dyn JobDispatch>,
 			Option<Arc<dyn JobDispatch>>,
 			Option<Arc<ProcessDispatcher>>,
 			Option<Arc<crate::pipeline::PipelineBackend>>,
+			Option<Arc<crate::ofxhost::OfxHost>>,
 		) = match choice {
 			RenderBackendChoice::Threads => {
 				// Test-only inline backend: synchronous execution on the
 				// calling thread, shared by video and audio.
 				let inline = InlineDispatcher::sync();
-				(inline.clone(), inline, None, None, None)
+				(inline.clone(), inline, None, None, None, None)
 			}
 			RenderBackendChoice::Processes(config) => {
 				let dispatcher = ProcessDispatcher::new(config)?;
@@ -200,16 +205,29 @@ impl RenderManager {
 				// audio-side plugin crash now takes down the main process,
 				// and the mix cost lands on the UI tick.
 				let inline = InlineDispatcher::sync();
-				(dispatcher.clone(), inline, None, Some(dispatcher), None)
+				(dispatcher.clone(), inline, None, Some(dispatcher), None, None)
 			}
 			RenderBackendChoice::Pipeline => {
 				// M1 thread pipeline: the render thread executes the same
 				// producer (so graph mode included), and the decode thread
 				// the producer's footage decodes rendezvous with. Audio
 				// stays inline, as on the process backend.
+				//
+				// M3: one OFX host process serves every plugin job the
+				// in-process render thread evaluates (isolation without a
+				// pool). The client starts lazily on the first plugin job.
+				let host = crate::ofxhost::OfxHost::new(crate::ofxhost::OfxHostConfig::default())?;
+				crate::ofxhost::install_client(Some(host.clone()));
 				let pipeline = crate::pipeline::PipelineBackend::new()?;
 				let inline = InlineDispatcher::sync();
-				(pipeline.clone(), inline, None, None, Some(pipeline))
+				(
+					pipeline.clone(),
+					inline,
+					None,
+					None,
+					Some(pipeline),
+					Some(host),
+				)
 			}
 		};
 		let tickets = Arc::new(TicketArena::new_with_audio_fallback(
@@ -233,6 +251,7 @@ impl RenderManager {
 			stopping: AtomicBool::new(false),
 			process_pool,
 			pipeline,
+			ofx_host,
 		}));
 		Ok(())
 	}
@@ -250,6 +269,12 @@ impl RenderManager {
 	/// stats and decode service). `None` on the inline and process backends.
 	pub fn pipeline_backend(&self) -> Option<Arc<crate::pipeline::PipelineBackend>> {
 		self.pipeline.clone()
+	}
+
+	/// The single OpenFX host client, when the Pipeline backend is live
+	/// (tests/observability). `None` on the inline and process backends.
+	pub fn ofx_host(&self) -> Option<Arc<crate::ofxhost::OfxHost>> {
+		self.ofx_host.clone()
 	}
 
 	/// Global access; `None` before init.
@@ -276,6 +301,12 @@ impl RenderManager {
 			// dispatcher after it is drained.
 			manager.stopping.store(true, Ordering::Release);
 			manager.tickets.cancel_all();
+			// Stop routing plugin jobs to the OFX host before tearing it
+			// down (an in-flight submit fails out to a purple frame).
+			if let Some(host) = &manager.ofx_host {
+				crate::ofxhost::install_client(None);
+				host.shutdown();
+			}
 			// Drain after the cancels so queued completions fire. Both
 			// dispatches are idempotent.
 			manager.dispatch.shutdown();

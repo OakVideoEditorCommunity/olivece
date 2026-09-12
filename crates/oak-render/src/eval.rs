@@ -142,6 +142,10 @@ pub enum JobSpec {
     Plugin {
         /// Plugin instance identity (oakplugin instance registry key).
         instance: u64,
+        /// OFX plugin identifier (cross-process stable). The single OFX
+        /// host process (M3) resolves its own instance from this; the
+        /// in-process executor ignores it and uses `instance`.
+        type_id: String,
         /// Request time in seconds (C++ `PluginJob` time).
         time: f64,
         /// Clip name the main source texture arrives on (C++
@@ -401,13 +405,16 @@ impl RenderEvalHooks {
         Ok(())
     }
 
-    /// C++ process_plugin_job: dispatch through the installed plugin
-    /// executor (the oakplugin render driver; dependency inversion). A
-    /// missing executor or a failed render yields a purple failure frame
-    /// instead of aborting the graph, matching pluginjob.cpp's fallback.
+    /// C++ process_plugin_job: dispatch through the single OFX host
+    /// process when one is installed (M3), else through the in-process
+    /// plugin executor (the oakplugin render driver; dependency
+    /// inversion). A missing host/executor or a failed render yields a
+    /// purple failure frame instead of aborting the graph, matching
+    /// pluginjob.cpp's fallback.
     fn process_plugin_job(&mut self, src: Texture, spec: &JobSpec) -> Result<Texture> {
         let JobSpec::Plugin {
             instance,
+            type_id,
             time,
             effect_input_id,
             inputs,
@@ -417,10 +424,21 @@ impl RenderEvalHooks {
             return Err(Error::Invalid);
         };
         let size = src.size();
+        if let Some(host) = crate::ofxhost::client() {
+            return match host.submit(spec, &src) {
+                Ok(frame) => Ok(Texture::wrap_frame(frame)),
+                Err(err) => {
+                    eprintln!(
+                        "OFX host job {type_id} (instance {instance}) at t={time}s failed: {err:#}"
+                    );
+                    Ok(purple_frame(Rational::from_double(*time), size))
+                }
+            };
+        }
         let Some(executor) = plugin_executor() else {
             return Ok(purple_frame(Rational::from_double(*time), size));
         };
-        let _ = (instance, effect_input_id, inputs, values);
+        let _ = (instance, type_id, effect_input_id, inputs, values);
         match executor(&PluginJobRequest { spec, src }) {
             Ok(texture) => Ok(texture),
             Err(err) => {
@@ -602,6 +620,7 @@ impl RenderEvalHooks {
 
         let spec = JobSpec::Plugin {
             instance: payload.instance.0,
+            type_id: payload.type_id.clone(),
             time: payload.time.to_f64(),
             effect_input_id: if payload.effect_input_id.is_empty() {
                 None
@@ -2867,23 +2886,31 @@ fn apply_montage_effect(
     // plugin identifier; the rendering process resolves it to a live
     // instance through the oakplugin-installed factory (lazily created
     // and cached per identifier), then dispatches through the plugin
-    // executor exactly like the graph path's plugin jobs.
-    let Some(factory) = plugin_instance_factory() else {
-        warn_unsupported_once(
-            &effect.type_id,
-            "no plugin instance factory installed (oakplugin init missing in this process)",
-        );
-        return src;
-    };
-    let Some(instance) = factory(&effect.type_id) else {
-        warn_unsupported_once(
-            &effect.type_id,
-            "no evaluator: unknown built-in effect or OFX plugin unavailable in this process",
-        );
-        return src;
+    // executor exactly like the graph path's plugin jobs. When the single
+    // OFX host client is installed the local instance is not needed: the
+    // host resolves the identifier itself.
+    let instance = if crate::ofxhost::client().is_some() {
+        0
+    } else {
+        let Some(factory) = plugin_instance_factory() else {
+            warn_unsupported_once(
+                &effect.type_id,
+                "no plugin instance factory installed (oakplugin init missing in this process)",
+            );
+            return src;
+        };
+        let Some(instance) = factory(&effect.type_id) else {
+            warn_unsupported_once(
+                &effect.type_id,
+                "no evaluator: unknown built-in effect or OFX plugin unavailable in this process",
+            );
+            return src;
+        };
+        instance
     };
     let spec = JobSpec::Plugin {
         instance,
+        type_id: effect.type_id.clone(),
         time: time.to_f64(),
         effect_input_id: effect.effect_input_id.clone(),
         inputs: Vec::new(),
@@ -3113,6 +3140,7 @@ mod tests {
     fn plugin_spec() -> JobSpec {
         JobSpec::Plugin {
             instance: 7,
+            type_id: "org.oak.test-plugin".into(),
             time: 0.5,
             effect_input_id: Some("Source".into()),
             inputs: Vec::new(),
@@ -3134,6 +3162,7 @@ mod tests {
     #[test]
     fn plugin_job_without_executor_yields_purple_frame() {
         let _guard = PLUGIN_TEST_LOCK.lock().unwrap();
+        crate::ofxhost::install_client(None);
         set_plugin_executor(None);
         let mut hooks = RenderEvalHooks::new();
         let src = Texture::wrap_frame(
@@ -3147,6 +3176,7 @@ mod tests {
     #[test]
     fn plugin_job_executor_error_falls_back_to_purple() {
         let _guard = PLUGIN_TEST_LOCK.lock().unwrap();
+        crate::ofxhost::install_client(None);
         set_plugin_executor(Some(Arc::new(|_req: &PluginJobRequest<'_>| {
             Err(Error::Failed("boom".into()))
         })));
@@ -3159,9 +3189,40 @@ mod tests {
         set_plugin_executor(None);
     }
 
+    /// M3 acceptance: a host that cannot come up (or crashes past its
+    /// budget) yields the purple failure frame, exactly like a failing
+    /// in-process executor.
+    #[test]
+    #[cfg(unix)]
+    fn plugin_job_host_failure_yields_purple_frame() {
+        let _guard = PLUGIN_TEST_LOCK.lock().unwrap();
+        // An executor that would succeed, to prove the host result wins.
+        set_plugin_executor(Some(Arc::new(|_req: &PluginJobRequest<'_>| {
+            Ok(Texture::wrap_frame(
+                generate_frame(Rational::new(0, 1), (2, 2), PixelFormat::F32).unwrap(),
+            ))
+        })));
+        let host = crate::ofxhost::OfxHost::new(crate::ofxhost::OfxHostConfig {
+            host_bin: Some(std::path::PathBuf::from("/bin/false")),
+            max_failures: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        crate::ofxhost::install_client(Some(host));
+        let mut hooks = RenderEvalHooks::new();
+        let src = Texture::wrap_frame(
+            generate_frame(Rational::new(0, 1), (2, 2), PixelFormat::F32).unwrap(),
+        );
+        let out = hooks.process_plugin_job(src, &plugin_spec()).unwrap();
+        assert_eq!(first_pixel(&out), [1.0, 0.0, 1.0, 1.0]);
+        crate::ofxhost::install_client(None);
+        set_plugin_executor(None);
+    }
+
     #[test]
     fn plugin_job_dispatches_through_installed_executor() {
         let _guard = PLUGIN_TEST_LOCK.lock().unwrap();
+        crate::ofxhost::install_client(None);
         set_plugin_executor(Some(Arc::new(|req: &PluginJobRequest<'_>| {
             // Echo: paint the source size with the instance id.
             let JobSpec::Plugin { instance, .. } = req.spec else {
@@ -3190,6 +3251,7 @@ mod tests {
         use oak_node::nodes::plugin::{PluginInstanceHandle, PluginJobPayload};
 
         let _guard = PLUGIN_TEST_LOCK.lock().unwrap();
+        crate::ofxhost::install_client(None);
         set_plugin_executor(Some(Arc::new(|req: &PluginJobRequest<'_>| {
             let JobSpec::Plugin {
                 instance,
@@ -3227,6 +3289,7 @@ mod tests {
         values.insert("gain".into(), NodeValue::Float(0.25));
         let payload = PluginJobPayload {
             instance: PluginInstanceHandle(7),
+            type_id: "org.oak.test-plugin".into(),
             time: Rational::new(1, 2),
             effect_input_id: "Source".into(),
             values,
