@@ -279,16 +279,19 @@ impl ExportTask {
 		}
 	}
 
-	/// Copy a rendered `oakrender` CPU texture into an `oakcodec` frame
-	/// with the matching video params (row-wise copy — line sizes may
-	/// differ between the render and codec frame layouts).
+	/// Copy a rendered `oakrender` texture into an `oakcodec` frame with
+	/// the matching video params (row-wise copy — line sizes may differ
+	/// between the render and codec frame layouts). A GPU texture is read
+	/// back here: the encoder input is one of the three explicit CPU
+	/// boundaries (M2).
 	fn to_codec_frame(texture: &Texture) -> Result<oak_codec::frame::Frame> {
-		let Texture::Cpu(frame) = texture else {
-			return Err(Error::Failed(
-				"Render produced a GPU texture; the CPU encoder path cannot consume it"
-					.to_string(),
-			));
+		let frame = match texture {
+			Texture::Cpu(frame) => frame.clone(),
+			Texture::Gpu { .. } => texture.to_frame().map_err(|e| {
+				Error::Failed(format!("Render frame readback for the encoder failed: {e:?}"))
+			})?,
 		};
+		let frame = &frame;
 		let params = CommonVideoParams::new_basic(
             frame.width,
             frame.height,

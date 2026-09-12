@@ -30,11 +30,12 @@
 //! surface; when no adapter is available (headless CI, VMs) or the only
 //! candidates cannot render the pipeline's canonical Rgba32Float target
 //! (downlevel GL/GLES), it returns `None` and every consumer falls back
-//! to the CPU path. GPU tests skip with no adapter. Verified on macOS
-//! Metal (wgpu 25.0.2).
+//! to the CPU path. GPU tests skip with no adapter unless
+//! `OAK_REQUIRE_GPU` is set (CI). Verified on macOS Metal and Linux
+//! lavapipe (wgpu 29).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::PixelFormat;
@@ -212,12 +213,16 @@ impl DisplayBitDepth {
 	}
 }
 
-/// A GPU-resident texture in the context registry.
+/// A GPU-resident texture in the context registry. `Arc` so the present
+/// path can hand the very same `wgpu::Texture` to the UI without a copy
+/// (M2 zero-copy present): the registry keeps its own reference as long
+/// as the engine token lives.
 #[derive(Clone)]
 struct GpuTexture {
-	texture: wgpu::Texture,
+	texture: Arc<wgpu::Texture>,
 	width: u32,
 	height: u32,
+	format: wgpu::TextureFormat,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -243,15 +248,35 @@ pub trait GpuContextLike: Send + Sync {
         dst: u64,
         processor: Option<&crate::color::ColorProcessor>,
 	) -> Result<()>;
+
+	/// Concrete-context downcast hook (M2). The present path uses it to
+	/// reach the LUT/display-pass API and the raw `wgpu::Texture`;
+	/// trait-only fakes return `None` and callers fall back to CPU
+	/// delivery.
+	fn as_any(&self) -> Option<&dyn std::any::Any> {
+		None
+	}
+
+	/// The raw texture for a token, for zero-copy presentation. `None`
+	/// when the context cannot expose it (fakes) or the token is unknown.
+	fn texture_handle(&self, _token: u64) -> Option<Arc<wgpu::Texture>> {
+		None
+	}
 }
 
 /// The GPU context: one wgpu instance/device/queue for the process,
 /// plus the texture registry and the blit pipeline.
+///
+/// The device may be **adopted** from the host application instead of
+/// created here (M2): when the UI and the render thread share one wgpu
+/// device, engine textures are directly sampleable by the presenter and
+/// the whole present path is zero-copy. `_instance`/`_adapter` are then
+/// `None` (the adopter owns them).
 pub struct GpuContext {
 	// Kept alive for the whole context: the instance must outlive the
-	// adapter on native backends.
-	_instance: wgpu::Instance,
-	_adapter: wgpu::Adapter,
+	// adapter on native backends. `None` for an adopted context.
+	_instance: Option<wgpu::Instance>,
+	_adapter: Option<wgpu::Adapter>,
 	device: wgpu::Device,
 	queue: wgpu::Queue,
 	kind: BackendKind,
@@ -264,6 +289,106 @@ pub struct GpuContext {
 	programs: Mutex<HashMap<String, Arc<ShaderProgram>>>,
 	/// The lazily created 1×1 placeholder texture (unconnected inputs).
 	placeholder: Mutex<Option<u64>>,
+	/// The display LUT texture (M2): the app-installed working-space →
+	/// display-device transform, applied by [`GpuContext::present_texture`].
+	display_lut: Mutex<Option<DisplayLutState>>,
+	/// The compiled display-LUT passes, keyed by output format.
+	present: Mutex<Vec<(wgpu::TextureFormat, PresentPipeline)>>,
+	/// The compiled YUV→RGB pass (M5 decode import dependency).
+	yuv: Mutex<Option<PresentPipeline>>,
+	/// Caller-keyed 3D LUT textures (per-node color transforms; M2).
+	color_luts: Mutex<Vec<(String, u64)>>,
+	/// Set once this context has created a GPU resource (texture or
+	/// pipeline). A context that has never touched the GPU can still be
+	/// replaced by the UI's adopted device (`install_shared`).
+	used: AtomicBool,
+}
+
+/// The installed display transform: a 3D LUT texture plus its input domain.
+struct DisplayLutState {
+	token: u64,
+	edge: u32,
+	lo: [f32; 3],
+	hi: [f32; 3],
+}
+
+/// Process-wide GPU↔CPU transfer counters (M2 acceptance, modeled on
+/// `procpool::main_heap_frame_copies`). `uploads` counts
+/// [`GpuContext::upload`] calls (CPU→GPU), `downloads` counts
+/// [`GpuContext::download`] calls (GPU→CPU). The GPU graph/present path
+/// must not download: readbacks happen only at the three explicit
+/// boundaries (CPU OpenFX, export encoder, disk cache) and in tests.
+static GPU_UPLOADS: AtomicU64 = AtomicU64::new(0);
+static GPU_DOWNLOADS: AtomicU64 = AtomicU64::new(0);
+
+/// The current (uploads, downloads) GPU transfer counters.
+pub fn gpu_transfer_counters() -> (u64, u64) {
+	(
+		GPU_UPLOADS.load(Ordering::Relaxed),
+		GPU_DOWNLOADS.load(Ordering::Relaxed),
+	)
+}
+
+/// Reset the GPU transfer counters (tests).
+pub fn reset_gpu_transfer_counters() {
+	GPU_UPLOADS.store(0, Ordering::Relaxed);
+	GPU_DOWNLOADS.store(0, Ordering::Relaxed);
+}
+
+/// The process-wide shared-context slot (`shared` / `install_shared`).
+struct SharedSlot {
+	decided: bool,
+	ctx: Option<Arc<GpuContext>>,
+}
+
+fn shared_slot() -> &'static Mutex<SharedSlot> {
+	static SLOT: std::sync::OnceLock<Mutex<SharedSlot>> = std::sync::OnceLock::new();
+	SLOT.get_or_init(|| {
+		Mutex::new(SharedSlot {
+			decided: false,
+			ctx: None,
+		})
+	})
+}
+
+/// Whether GPU-dependent tests must hard-fail when no adapter is
+/// available. CI sets `OAK_REQUIRE_GPU=1` on the software-Vulkan runner
+/// (lavapipe is present), so a degraded environment fails the suite
+/// instead of silently losing the GPU acceptance signal.
+pub fn require_gpu_adapter() -> bool {
+	match std::env::var("OAK_REQUIRE_GPU") {
+		Ok(v) => !(v == "0" || v.eq_ignore_ascii_case("false")),
+		Err(_) => false,
+	}
+}
+
+/// Handle a missing adapter in a GPU acceptance test: panic when
+/// `OAK_REQUIRE_GPU` is set, otherwise log the skip (the caller returns).
+pub fn skip_or_fail_gpu(what: &str) {
+	if require_gpu_adapter() {
+		panic!("no GPU adapter available for {what} (OAK_REQUIRE_GPU is set)");
+	}
+	eprintln!("no GPU adapter; skipping {what}");
+}
+
+/// A fresh [`GpuContext`] for a test, or `None` when no adapter exists
+/// (panics instead when `OAK_REQUIRE_GPU` is set).
+pub fn gpu_or_skip(what: &str) -> Option<Arc<GpuContext>> {
+	let ctx = GpuContext::create(BackendKind::Auto);
+	if ctx.is_none() {
+		skip_or_fail_gpu(what);
+	}
+	ctx
+}
+
+/// The process-wide shared context for a test, with the same
+/// `OAK_REQUIRE_GPU` policy as [`gpu_or_skip`].
+pub fn shared_gpu_or_skip(what: &str) -> Option<Arc<GpuContext>> {
+	let ctx = GpuContext::shared();
+	if ctx.is_none() {
+		skip_or_fail_gpu(what);
+	}
+	ctx
 }
 
 // SAFETY check: wgpu Device/Queue/Instance are Send+Sync; the rest is
@@ -277,9 +402,9 @@ impl GpuContext {
 	/// path).
 	pub fn create(prefer: BackendKind) -> Option<Arc<Self>> {
 		for backends in prefer.wgpu_fallbacks() {
-			let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+			let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
 				backends,
-				..Default::default()
+				..wgpu::InstanceDescriptor::new_without_display_handle()
 			});
 			let adapter =
 				match pollster_block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -317,6 +442,7 @@ impl GpuContext {
 					label: Some("oakrender"),
 					required_features,
 					required_limits: wgpu::Limits::default(),
+					experimental_features: wgpu::ExperimentalFeatures::disabled(),
 					memory_hints: wgpu::MemoryHints::default(),
 					trace: wgpu::Trace::Off,
 				})) {
@@ -328,8 +454,8 @@ impl GpuContext {
 				continue;
 			}
 			return Some(Arc::new(Self {
-				_instance: instance,
-				_adapter: adapter,
+				_instance: Some(instance),
+				_adapter: Some(adapter),
 				device,
 				queue,
 				kind,
@@ -339,9 +465,71 @@ impl GpuContext {
 				filterable,
 				programs: Mutex::new(HashMap::new()),
 				placeholder: Mutex::new(None),
+				display_lut: Mutex::new(None),
+				present: Mutex::new(Vec::new()),
+				yuv: Mutex::new(None),
+				color_luts: Mutex::new(Vec::new()),
+				used: AtomicBool::new(false),
 			}));
 		}
 		None
+	}
+
+	/// Adopt an existing wgpu device/queue (M2): the host UI creates the
+	/// device (gpui_wgpu) and the engine renders on it, so the textures
+	/// the render thread produces are directly sampleable by the UI's
+	/// renderer — the zero-copy present path. `kind` labels the backend
+	/// (the device does not expose it); `BackendKind::Auto` is acceptable.
+	pub fn adopt(
+		device: Arc<wgpu::Device>,
+		queue: Arc<wgpu::Queue>,
+		kind: BackendKind,
+	) -> Arc<Self> {
+		// The adopted device's feature set decides filtering; the render
+		// pipeline's `Rgba32Float` render target works on every adapter
+		// whose device made it this far (the adopter only hands over a
+		// live, validated device).
+		let filterable = device
+			.features()
+			.contains(wgpu::Features::FLOAT32_FILTERABLE);
+		Arc::new(Self {
+			_instance: None,
+			_adapter: None,
+			device: (*device).clone(),
+			queue: (*queue).clone(),
+			kind,
+			textures: Mutex::new(HashMap::new()),
+			next_token: AtomicU64::new(1),
+			blit: Mutex::new(None),
+			filterable,
+			programs: Mutex::new(HashMap::new()),
+			placeholder: Mutex::new(None),
+			display_lut: Mutex::new(None),
+			present: Mutex::new(Vec::new()),
+			yuv: Mutex::new(None),
+			color_luts: Mutex::new(Vec::new()),
+			used: AtomicBool::new(false),
+		})
+	}
+
+	/// True when this context wraps a device it did not create (the UI
+	/// shared its device; presentation is zero-copy on this context).
+	pub fn is_adopted(&self) -> bool {
+		self._adapter.is_none()
+	}
+
+	/// True once the context has created a GPU resource (texture or
+	/// pipeline). An unused context is replaceable by
+	/// [`GpuContext::install_shared`].
+	pub fn is_used(&self) -> bool {
+		self.used.load(Ordering::Acquire)
+	}
+
+	/// The underlying wgpu device/queue. Handing these out lets another
+	/// context (or the UI) wrap the same device: contexts sharing a device
+	/// can present each other's textures zero-copy.
+	pub fn device_queue(&self) -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
+		(Arc::new(self.device.clone()), Arc::new(self.queue.clone()))
 	}
 
 	/// The backend actually in use.
@@ -357,34 +545,60 @@ impl GpuContext {
 
 	/// Create an F32 RGBA texture (the pipeline's canonical format).
 	pub fn create_texture(&self, width: i32, height: i32) -> Result<u64> {
-		if width <= 0 || height <= 0 {
+		self.create_texture_format(
+			width,
+			height,
+			1,
+			wgpu::TextureFormat::Rgba32Float,
+			wgpu::TextureUsages::TEXTURE_BINDING
+				| wgpu::TextureUsages::RENDER_ATTACHMENT
+				| wgpu::TextureUsages::COPY_DST
+				| wgpu::TextureUsages::COPY_SRC,
+		)
+	}
+
+	/// Create a texture of an arbitrary format/depth (M2): the display
+	/// LUT is a 3D `R32Float` texture and the YUV→RGB pass reads
+	/// single-channel plane textures. `depth` > 1 selects `D3`.
+	pub fn create_texture_format(
+		&self,
+		width: i32,
+		height: i32,
+		depth: u32,
+		format: wgpu::TextureFormat,
+		usage: wgpu::TextureUsages,
+	) -> Result<u64> {
+		if width <= 0 || height <= 0 || depth == 0 {
 			return Err(Error::Invalid);
 		}
+		self.used.store(true, Ordering::Release);
 		let size = wgpu::Extent3d {
 			width: width as u32,
 			height: height as u32,
-			depth_or_array_layers: 1,
+			depth_or_array_layers: depth,
 		};
 		let texture = self.device.create_texture(&wgpu::TextureDescriptor {
 			label: Some("oakrender-texture"),
 			size,
 			mip_level_count: 1,
 			sample_count: 1,
-			dimension: wgpu::TextureDimension::D2,
-			format: wgpu::TextureFormat::Rgba32Float,
-			usage: wgpu::TextureUsages::TEXTURE_BINDING
-				| wgpu::TextureUsages::RENDER_ATTACHMENT
-				| wgpu::TextureUsages::COPY_DST
-				| wgpu::TextureUsages::COPY_SRC,
+			dimension: if depth > 1 {
+				wgpu::TextureDimension::D3
+			} else {
+				wgpu::TextureDimension::D2
+			},
+			format,
+			usage,
 			view_formats: &[],
 		});
 		let token = self.next_token.fetch_add(1, Ordering::Relaxed);
 		lock(&self.textures).insert(
 			token,
 			GpuTexture {
-				texture,
+				texture: Arc::new(texture),
 				width: width as u32,
 				height: height as u32,
+				format,
 			},
 		);
 		Ok(token)
@@ -407,8 +621,676 @@ impl GpuContext {
 		lock(&self.textures).contains_key(&token)
 	}
 
-	/// Upload a CPU frame into a texture (F32 RGBA).
+	/// The raw `wgpu::Texture` behind a token (M2 zero-copy present): the
+	/// UI hands this very texture to gpui's surface path. The registry
+	/// keeps its reference, so the caller may drop/destroy its token as
+	/// soon as the returned `Arc` is stored elsewhere.
+	pub fn texture_handle(&self, token: u64) -> Option<Arc<wgpu::Texture>> {
+		lock(&self.textures).get(&token).map(|t| t.texture.clone())
+	}
+
+	/// The texture's format (tests/plane uploads).
+	pub fn texture_format(&self, token: u64) -> Option<wgpu::TextureFormat> {
+		lock(&self.textures).get(&token).map(|t| t.format)
+	}
+
+	/// Upload tightly packed raw bytes into a plain-format texture (the
+	/// YUV→RGB planes). Counted as a CPU→GPU transfer.
+	pub fn upload_plane(&self, token: u64, data: &[u8]) -> Result<()> {
+		GPU_UPLOADS.fetch_add(1, Ordering::Relaxed);
+		let entry = lock(&self.textures)
+			.get(&token)
+			.cloned()
+			.ok_or(Error::NotFound)?;
+		let w = entry.width;
+		let h = entry.height;
+		let bpp = match entry.format {
+			wgpu::TextureFormat::R8Unorm => 1usize,
+			wgpu::TextureFormat::R16Unorm | wgpu::TextureFormat::R16Float => 2,
+			wgpu::TextureFormat::R32Float => 4,
+			_ => return Err(Error::Invalid),
+		};
+		let row = w as usize * bpp;
+		if data.len() < row * h as usize {
+			return Err(Error::Invalid);
+		}
+		self.queue.write_texture(
+			wgpu::TexelCopyTextureInfo {
+				texture: &entry.texture,
+				mip_level: 0,
+				origin: wgpu::Origin3d::ZERO,
+				aspect: wgpu::TextureAspect::All,
+			},
+			data,
+			wgpu::TexelCopyBufferLayout {
+				offset: 0,
+				bytes_per_row: Some(row as u32),
+				rows_per_image: None,
+			},
+			wgpu::Extent3d {
+				width: w,
+				height: h,
+				depth_or_array_layers: 1,
+			},
+		);
+		Ok(())
+	}
+
+	/// Install the display transform LUT (M2). The LUT maps working-space
+	/// RGB to display-encoded RGB (the output node plus the display ICC
+	/// chain, baked on the CPU by the app); [`present_texture`] applies it
+	/// entirely on the GPU. Replaces (and destroys) any previous LUT.
+	pub fn set_display_lut(&self, lut: &crate::lut::Lut3d) -> Result<()> {
+		let token = self.upload_lut(lut)?;
+		let mut slot = lock(&self.display_lut);
+		if let Some(old) = slot.take() {
+			self.destroy_texture(old.token);
+		}
+		*slot = Some(DisplayLutState {
+			token,
+			edge: lut.edge,
+			lo: lut.lo,
+			hi: lut.hi,
+		});
+		Ok(())
+	}
+
+	/// Upload a 3D LUT as an `Rgba32Float` D3 texture. Counted as a
+	/// CPU→GPU transfer; callers cache the GPU resource per LUT.
+	fn upload_lut(&self, lut: &crate::lut::Lut3d) -> Result<u64> {
+		let expected = (lut.edge as usize).pow(3) * 3;
+		if lut.data.len() != expected {
+			return Err(Error::Invalid);
+		}
+		let token = self.create_texture_format(
+			lut.edge as i32,
+			lut.edge as i32,
+			lut.edge,
+			wgpu::TextureFormat::Rgba32Float,
+			wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+		)?;
+		// `write_texture` on a 3D texture: one row per (z,y), each row
+		// `edge` RGBA f32 values, padded to the copy alignment.
+		let row = lut.edge as usize * 16;
+		let padded = (row + 255) & !255;
+		let mut bytes = vec![0u8; padded * lut.edge as usize * lut.edge as usize];
+		for z in 0..lut.edge as usize {
+			for y in 0..lut.edge as usize {
+				let src = &lut.data[(z * lut.edge as usize + y) * lut.edge as usize * 3..];
+				let dst_off = (z * lut.edge as usize + y) * padded;
+				for x in 0..lut.edge as usize {
+					bytes[dst_off + x * 16..dst_off + x * 16 + 4]
+						.copy_from_slice(&src[x * 3].to_le_bytes());
+					bytes[dst_off + x * 16 + 4..dst_off + x * 16 + 8]
+						.copy_from_slice(&src[x * 3 + 1].to_le_bytes());
+					bytes[dst_off + x * 16 + 8..dst_off + x * 16 + 12]
+						.copy_from_slice(&src[x * 3 + 2].to_le_bytes());
+					bytes[dst_off + x * 16 + 12..dst_off + x * 16 + 16]
+						.copy_from_slice(&1.0f32.to_le_bytes());
+				}
+			}
+		}
+		let entry = lock(&self.textures)
+			.get(&token)
+			.cloned()
+			.ok_or(Error::NotFound)?;
+		GPU_UPLOADS.fetch_add(1, Ordering::Relaxed);
+		self.queue.write_texture(
+			wgpu::TexelCopyTextureInfo {
+				texture: &entry.texture,
+				mip_level: 0,
+				origin: wgpu::Origin3d::ZERO,
+				aspect: wgpu::TextureAspect::All,
+			},
+			&bytes,
+			wgpu::TexelCopyBufferLayout {
+				offset: 0,
+				bytes_per_row: Some(padded as u32),
+				rows_per_image: Some(lut.edge),
+			},
+			wgpu::Extent3d {
+				width: lut.edge,
+				height: lut.edge,
+				depth_or_array_layers: lut.edge,
+			},
+		);
+		Ok(token)
+	}
+
+	/// Whether a display LUT is installed.
+	pub fn has_display_lut(&self) -> bool {
+		lock(&self.display_lut).is_some()
+	}
+
+	/// Apply the installed display LUT to `src` (a working-space
+	/// `Rgba32Float` texture) and return the resulting `Rgba16Float`
+	/// display texture token. GPU→GPU: no upload, no download. The caller
+	/// retrieves the raw handle with [`GpuContext::texture_handle`].
+	pub fn present_texture(&self, src: u64) -> Result<u64> {
+		let lut = {
+			let slot = lock(&self.display_lut);
+			let Some(lut) = slot.as_ref() else {
+				return Err(Error::Failed("no display LUT installed".into()));
+			};
+			(lut.token, lut.edge, lut.lo, lut.hi)
+		};
+		self.apply_lut_to(
+			src,
+			lut.0,
+			lut.1,
+			lut.2,
+			lut.3,
+			wgpu::TextureFormat::Rgba16Float,
+		)
+	}
+
+	/// Apply a caller-keyed 3D LUT to `src` and return a new
+	/// `Rgba32Float` texture token — the GPU color transform for graph
+	/// nodes (`ColorTransformJob`, M2). The LUT texture is uploaded once
+	/// per key (the caller passes a stable processor cache id); applying
+	/// it is GPU→GPU.
+	pub fn apply_color_lut(
+		&self,
+		src: u64,
+		key: &str,
+		lut: &crate::lut::Lut3d,
+	) -> Result<u64> {
+		let token = {
+			let mut cache = lock(&self.color_luts);
+			if let Some((_, token)) = cache.iter().find(|(k, _)| k == key) {
+				*token
+			} else {
+				let token = self.upload_lut(lut)?;
+				if cache.len() >= 8 {
+					let (_, old) = cache.remove(0);
+					self.destroy_texture(old);
+				}
+				cache.push((key.to_string(), token));
+				token
+			}
+		};
+		self.apply_lut_to(
+			src,
+			token,
+			lut.edge,
+			lut.lo,
+			lut.hi,
+			wgpu::TextureFormat::Rgba32Float,
+		)
+	}
+
+	/// The shared LUT pass: sample the D3 LUT with manual trilinear
+	/// interpolation into a new texture of `dst_format`.
+	fn apply_lut_to(
+		&self,
+		src: u64,
+		lut_token: u64,
+		edge: u32,
+		lo: [f32; 3],
+		hi: [f32; 3],
+		dst_format: wgpu::TextureFormat,
+	) -> Result<u64> {
+		let src_tex = lock(&self.textures)
+			.get(&src)
+			.cloned()
+			.ok_or(Error::NotFound)?;
+		let lut_tex = lock(&self.textures)
+			.get(&lut_token)
+			.cloned()
+			.ok_or(Error::NotFound)?;
+		let dst = self.create_texture_format(
+			src_tex.width as i32,
+			src_tex.height as i32,
+			1,
+			dst_format,
+			wgpu::TextureUsages::TEXTURE_BINDING
+				| wgpu::TextureUsages::RENDER_ATTACHMENT
+				| wgpu::TextureUsages::COPY_SRC,
+		)?;
+		let dst_tex = lock(&self.textures)
+			.get(&dst)
+			.cloned()
+			.ok_or(Error::NotFound)?;
+
+		let pipeline = self.present_pipeline(dst_format)?;
+		let params: [f32; 12] = [
+			edge as f32,
+			0.0,
+			0.0,
+			0.0,
+			lo[0],
+			lo[1],
+			lo[2],
+			0.0,
+			hi[0],
+			hi[1],
+			hi[2],
+			0.0,
+		];
+		let uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
+			label: Some("oakrender-present-params"),
+			size: 48,
+			usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+			mapped_at_creation: false,
+		});
+		self.queue.write_buffer(&uniform, 0, &f32_uniform_bytes(&params));
+		let src_view = src_tex
+			.texture
+			.create_view(&wgpu::TextureViewDescriptor::default());
+		let lut_view = lut_tex
+			.texture
+			.create_view(&wgpu::TextureViewDescriptor::default());
+		let dst_view = dst_tex
+			.texture
+			.create_view(&wgpu::TextureViewDescriptor::default());
+		let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+			label: Some("oakrender-present-bg"),
+			layout: &pipeline.layout,
+			entries: &[
+				wgpu::BindGroupEntry {
+					binding: 0,
+					resource: wgpu::BindingResource::TextureView(&src_view),
+				},
+				wgpu::BindGroupEntry {
+					binding: 1,
+					resource: wgpu::BindingResource::TextureView(&lut_view),
+				},
+				wgpu::BindGroupEntry {
+					binding: 2,
+					resource: uniform.as_entire_binding(),
+				},
+			],
+		});
+		let mut encoder = self
+			.device
+			.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+				label: Some("oakrender-present"),
+			});
+		{
+			let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+				label: Some("oakrender-present-pass"),
+				color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+					view: &dst_view,
+					depth_slice: None,
+					resolve_target: None,
+					ops: wgpu::Operations {
+						load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+						store: wgpu::StoreOp::Store,
+					},
+				})],
+				depth_stencil_attachment: None,
+				timestamp_writes: None,
+				occlusion_query_set: None,
+				multiview_mask: None,
+			});
+			pass.set_pipeline(&pipeline.pipeline);
+			pass.set_bind_group(0, &bind_group, &[]);
+			pass.draw(0..3, 0..1);
+		}
+		self.queue.submit(Some(encoder.finish()));
+		Ok(dst)
+	}
+
+	/// The LUT pass (manual trilinear, no float-filtering feature
+	/// required), cached per output format.
+	fn present_pipeline(&self, format: wgpu::TextureFormat) -> Result<PresentPipeline> {
+		let mut cache = lock(&self.present);
+		if let Some((_, p)) = cache.iter().find(|(f, _)| *f == format) {
+			return Ok(p.clone());
+		}
+		let layout = self
+			.device
+			.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+				label: Some("oakrender-present-layout"),
+				entries: &[
+					wgpu::BindGroupLayoutEntry {
+						binding: 0,
+						visibility: wgpu::ShaderStages::FRAGMENT,
+						ty: wgpu::BindingType::Texture {
+							sample_type: wgpu::TextureSampleType::Float { filterable: false },
+							view_dimension: wgpu::TextureViewDimension::D2,
+							multisampled: false,
+						},
+						count: None,
+					},
+					wgpu::BindGroupLayoutEntry {
+						binding: 1,
+						visibility: wgpu::ShaderStages::FRAGMENT,
+						ty: wgpu::BindingType::Texture {
+							sample_type: wgpu::TextureSampleType::Float { filterable: false },
+							view_dimension: wgpu::TextureViewDimension::D3,
+							multisampled: false,
+						},
+						count: None,
+					},
+					wgpu::BindGroupLayoutEntry {
+						binding: 2,
+						visibility: wgpu::ShaderStages::FRAGMENT,
+						ty: wgpu::BindingType::Buffer {
+							ty: wgpu::BufferBindingType::Uniform,
+							has_dynamic_offset: false,
+							min_binding_size: None,
+						},
+						count: None,
+					},
+				],
+			});
+		let vs = self
+			.device
+			.create_shader_module(wgpu::ShaderModuleDescriptor {
+				label: Some("oakrender-present-vs"),
+				source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(EFFECT_VS_WGSL)),
+			});
+		let fs = self
+			.device
+			.create_shader_module(wgpu::ShaderModuleDescriptor {
+				label: Some("oakrender-present-fs"),
+				source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(PRESENT_WGSL)),
+			});
+		let pipeline_layout = self
+			.device
+			.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+				label: Some("oakrender-present-pipeline-layout"),
+				bind_group_layouts: &[Some(&layout)],
+				immediate_size: 0,
+			});
+		let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+		let pipeline = self
+			.device
+			.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+				label: Some("oakrender-present"),
+				layout: Some(&pipeline_layout),
+				vertex: wgpu::VertexState {
+					module: &vs,
+					entry_point: Some("vs_main"),
+					compilation_options: Default::default(),
+					buffers: &[],
+				},
+				primitive: wgpu::PrimitiveState::default(),
+				depth_stencil: None,
+				multisample: wgpu::MultisampleState::default(),
+				fragment: Some(wgpu::FragmentState {
+					module: &fs,
+					entry_point: Some("main"),
+					compilation_options: Default::default(),
+					targets: &[Some(wgpu::ColorTargetState {
+						format,
+						blend: None,
+						write_mask: wgpu::ColorWrites::ALL,
+					})],
+				}),
+				multiview_mask: None,
+				cache: None,
+			});
+		if let Some(err) = pollster_block_on(scope.pop()) {
+			return Err(Error::Failed(format!("present pipeline validation failed: {err}")));
+		}
+		let program = PresentPipeline {
+			pipeline,
+			layout,
+		};
+		cache.push((format, program.clone()));
+		Ok(program)
+	}
+
+	/// Run the YUV→RGB pass (M5 dependency): three `R16Float` plane
+	/// textures (values normalized 0..1) → one `Rgba32Float` destination,
+	/// with the BT.601/709/2020 matrix and full/limited range encoded in
+	/// `transform`. This is the GPU replacement for the CPU swscale /
+	/// `colormath::yuv444p16_to_rgb_f32` conversion; the hardware-decode
+	/// import path (M5) feeds it imported planes.
+	pub fn run_yuv_to_rgb(
+		&self,
+		y: u64,
+		u: u64,
+		v: u64,
+		dst: u64,
+		transform: &YuvTransform,
+	) -> Result<()> {
+		let y_tex = lock(&self.textures)
+			.get(&y)
+			.cloned()
+			.ok_or(Error::NotFound)?;
+		let u_tex = lock(&self.textures)
+			.get(&u)
+			.cloned()
+			.ok_or(Error::NotFound)?;
+		let v_tex = lock(&self.textures)
+			.get(&v)
+			.cloned()
+			.ok_or(Error::NotFound)?;
+		let dst_tex = lock(&self.textures)
+			.get(&dst)
+			.cloned()
+			.ok_or(Error::NotFound)?;
+		let pipeline = self.yuv_pipeline()?;
+		let m = transform.matrix;
+		let b = transform.offset;
+		let params: [f32; 16] = [
+			m[0][0],
+			m[0][1],
+			m[0][2],
+			b[0],
+			m[1][0],
+			m[1][1],
+			m[1][2],
+			b[1],
+			m[2][0],
+			m[2][1],
+			m[2][2],
+			b[2],
+			u_tex.width as f32 / y_tex.width as f32,
+			u_tex.height as f32 / y_tex.height as f32,
+			0.0,
+			0.0,
+		];
+		let uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
+			label: Some("oakrender-yuv-params"),
+			size: 64,
+			usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+			mapped_at_creation: false,
+		});
+		self.queue.write_buffer(&uniform, 0, &f32_uniform_bytes(&params));
+		let y_view = y_tex
+			.texture
+			.create_view(&wgpu::TextureViewDescriptor::default());
+		let u_view = u_tex
+			.texture
+			.create_view(&wgpu::TextureViewDescriptor::default());
+		let v_view = v_tex
+			.texture
+			.create_view(&wgpu::TextureViewDescriptor::default());
+		let dst_view = dst_tex
+			.texture
+			.create_view(&wgpu::TextureViewDescriptor::default());
+		let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+			label: Some("oakrender-yuv-bg"),
+			layout: &pipeline.layout,
+			entries: &[
+				wgpu::BindGroupEntry {
+					binding: 0,
+					resource: wgpu::BindingResource::TextureView(&y_view),
+				},
+				wgpu::BindGroupEntry {
+					binding: 1,
+					resource: wgpu::BindingResource::TextureView(&u_view),
+				},
+				wgpu::BindGroupEntry {
+					binding: 2,
+					resource: wgpu::BindingResource::TextureView(&v_view),
+				},
+				wgpu::BindGroupEntry {
+					binding: 3,
+					resource: uniform.as_entire_binding(),
+				},
+			],
+		});
+		let mut encoder = self
+			.device
+			.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+				label: Some("oakrender-yuv"),
+			});
+		{
+			let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+				label: Some("oakrender-yuv-pass"),
+				color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+					view: &dst_view,
+					depth_slice: None,
+					resolve_target: None,
+					ops: wgpu::Operations {
+						load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+						store: wgpu::StoreOp::Store,
+					},
+				})],
+				depth_stencil_attachment: None,
+				timestamp_writes: None,
+				occlusion_query_set: None,
+				multiview_mask: None,
+			});
+			pass.set_pipeline(&pipeline.pipeline);
+			pass.set_bind_group(0, &bind_group, &[]);
+			pass.draw(0..3, 0..1);
+		}
+		self.queue.submit(Some(encoder.finish()));
+		Ok(())
+	}
+
+	/// The YUV→RGB pass pipeline (built once).
+	fn yuv_pipeline(&self) -> Result<PresentPipeline> {
+		let mut cache = lock(&self.yuv);
+		if let Some(p) = cache.as_ref() {
+			return Ok(p.clone());
+		}
+		let plane = |binding: u32| wgpu::BindGroupLayoutEntry {
+			binding,
+			visibility: wgpu::ShaderStages::FRAGMENT,
+			ty: wgpu::BindingType::Texture {
+				sample_type: wgpu::TextureSampleType::Float { filterable: false },
+				view_dimension: wgpu::TextureViewDimension::D2,
+				multisampled: false,
+			},
+			count: None,
+		};
+		let layout = self
+			.device
+			.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+				label: Some("oakrender-yuv-layout"),
+				entries: &[
+					plane(0),
+					plane(1),
+					plane(2),
+					wgpu::BindGroupLayoutEntry {
+						binding: 3,
+						visibility: wgpu::ShaderStages::FRAGMENT,
+						ty: wgpu::BindingType::Buffer {
+							ty: wgpu::BufferBindingType::Uniform,
+							has_dynamic_offset: false,
+							min_binding_size: None,
+						},
+						count: None,
+					},
+				],
+			});
+		let vs = self
+			.device
+			.create_shader_module(wgpu::ShaderModuleDescriptor {
+				label: Some("oakrender-yuv-vs"),
+				source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(EFFECT_VS_WGSL)),
+			});
+		let fs = self
+			.device
+			.create_shader_module(wgpu::ShaderModuleDescriptor {
+				label: Some("oakrender-yuv-fs"),
+				source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(YUV_WGSL)),
+			});
+		let pipeline_layout = self
+			.device
+			.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+				label: Some("oakrender-yuv-pipeline-layout"),
+				bind_group_layouts: &[Some(&layout)],
+				immediate_size: 0,
+			});
+		let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+		let pipeline = self
+			.device
+			.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+				label: Some("oakrender-yuv"),
+				layout: Some(&pipeline_layout),
+				vertex: wgpu::VertexState {
+					module: &vs,
+					entry_point: Some("vs_main"),
+					compilation_options: Default::default(),
+					buffers: &[],
+				},
+				primitive: wgpu::PrimitiveState::default(),
+				depth_stencil: None,
+				multisample: wgpu::MultisampleState::default(),
+				fragment: Some(wgpu::FragmentState {
+					module: &fs,
+					entry_point: Some("main"),
+					compilation_options: Default::default(),
+					targets: &[Some(wgpu::ColorTargetState {
+						format: wgpu::TextureFormat::Rgba32Float,
+						blend: None,
+						write_mask: wgpu::ColorWrites::ALL,
+					})],
+				}),
+				multiview_mask: None,
+				cache: None,
+			});
+		if let Some(err) = pollster_block_on(scope.pop()) {
+			return Err(Error::Failed(format!("YUV pipeline validation failed: {err}")));
+		}
+		let program = PresentPipeline {
+			pipeline,
+			layout,
+		};
+		*cache = Some(program.clone());
+		Ok(program)
+	}
+
+	/// Clear a texture to transparent black on the GPU (no CPU transfer):
+	/// the graph compositor's starting accumulator and single-sided
+	/// transition sides.
+	pub fn clear_texture(&self, token: u64) -> Result<()> {
+		let entry = lock(&self.textures)
+			.get(&token)
+			.cloned()
+			.ok_or(Error::NotFound)?;
+		let view = entry
+			.texture
+			.create_view(&wgpu::TextureViewDescriptor::default());
+		let mut encoder = self
+			.device
+			.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+				label: Some("oakrender-clear"),
+			});
+		{
+			let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+				label: Some("oakrender-clear-pass"),
+				color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+					view: &view,
+					depth_slice: None,
+					resolve_target: None,
+					ops: wgpu::Operations {
+						load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+						store: wgpu::StoreOp::Store,
+					},
+				})],
+				depth_stencil_attachment: None,
+				timestamp_writes: None,
+				occlusion_query_set: None,
+				multiview_mask: None,
+			});
+		}
+		self.queue.submit(Some(encoder.finish()));
+		Ok(())
+	}
+
+	/// Upload a CPU frame into a texture (F32 RGBA). Counted as a CPU→GPU
+	/// transfer ([`gpu_transfer_counters`]).
 	pub fn upload(&self, token: u64, frame: &Frame) -> Result<()> {
+		GPU_UPLOADS.fetch_add(1, Ordering::Relaxed);
 		if frame.format != PixelFormat::F32 {
 			return Err(Error::Invalid);
 		}
@@ -447,16 +1329,31 @@ impl GpuContext {
 		Ok(())
 	}
 
-	/// Download a texture into a CPU frame.
+	/// Download a texture into a CPU frame. Counted as a GPU→CPU transfer
+	/// ([`gpu_transfer_counters`]); the playback path must never take it.
+	///
+	/// Format-aware (M2): `Rgba32Float` copies raw, `Rgba16Float` (the
+	/// present target) converts half→f32. Other formats are rejected —
+	/// explicit readback boundaries only ever meet these two.
 	pub fn download(&self, token: u64) -> Result<Frame> {
+		GPU_DOWNLOADS.fetch_add(1, Ordering::Relaxed);
 		let entry = lock(&self.textures)
 			.get(&token)
 			.cloned()
 			.ok_or(Error::NotFound)?;
+		let (bpp, convert_half) = match entry.format {
+			wgpu::TextureFormat::Rgba32Float => (16usize, false),
+			wgpu::TextureFormat::Rgba16Float => (8usize, true),
+			other => {
+				return Err(Error::Failed(format!(
+					"texture download: unsupported format {other:?}"
+				)))
+			}
+		};
 		let w = entry.width as usize;
 		let h = entry.height as usize;
-		let linesize = w * 4 * 4; // Rgba32Float
-							// copy_texture_to_buffer requires a 256-byte-aligned row stride.
+		let linesize = w * bpp;
+		// copy_texture_to_buffer requires a 256-byte-aligned row stride.
 		let padded = (linesize + 255) & !255;
 
 		let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -502,7 +1399,7 @@ impl GpuContext {
 			.map_async(wgpu::MapMode::Read, move |result| {
 				let _ = tx.send(result.is_ok());
 			});
-		let _ = self.device.poll(wgpu::PollType::wait());
+		let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
 		if !rx.recv().unwrap_or(false) {
 			return Err(Error::Failed("texture download map failed".into()));
 		}
@@ -515,6 +1412,16 @@ impl GpuContext {
 		}
 		drop(mapped);
 		buffer.unmap();
+
+		if convert_half {
+			let mut f32_data = vec![0u8; w * h * 16];
+			for i in 0..w * h * 4 {
+				let bits = u16::from_le_bytes([data[i * 2], data[i * 2 + 1]]);
+				let v = half::f16::from_bits(bits).to_f32();
+				f32_data[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+			}
+			data = f32_data;
+		}
 
 		let mut frame = Frame::new();
 		let mut pod = VideoParamsPod::default();
@@ -577,6 +1484,7 @@ impl GpuContext {
 				label: Some("oakrender-blit-pass"),
 				color_attachments: &[Some(wgpu::RenderPassColorAttachment {
 					view: &dst_view,
+					depth_slice: None,
 					resolve_target: None,
 					ops: wgpu::Operations {
 						load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -586,6 +1494,7 @@ impl GpuContext {
 				depth_stencil_attachment: None,
 				timestamp_writes: None,
 				occlusion_query_set: None,
+				multiview_mask: None,
 			});
 			pass.set_pipeline(&pipeline);
 			pass.set_bind_group(0, &bind_group, &[]);
@@ -624,8 +1533,8 @@ impl GpuContext {
 			.device
 			.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
 				label: Some("oakrender-blit-layout"),
-				bind_group_layouts: &[&layout],
-				push_constant_ranges: &[],
+				bind_group_layouts: &[Some(&layout)],
+				immediate_size: 0,
 			});
 		let pipeline = self
 			.device
@@ -651,7 +1560,7 @@ impl GpuContext {
 						write_mask: wgpu::ColorWrites::ALL,
 					})],
 				}),
-				multiview: None,
+				multiview_mask: None,
 				cache: None,
 			});
 		Ok(pipeline)
@@ -663,11 +1572,54 @@ impl GpuContext {
 	/// follows the user's `GraphicsBackend` config (`OAK_RENDER_BACKEND`
 	/// overrides). `DisplayRenderer::init` adopts it too, so a process
 	/// owns exactly one wgpu device.
+	///
+	/// The host may install a context first ([`GpuContext::install_shared`],
+	/// M2): the app hands over the gpui device so the render thread and
+	/// the presenter share it. Once decided (installed or lazily created)
+	/// the slot is fixed for the process.
 	pub fn shared() -> Option<Arc<GpuContext>> {
-		static SHARED: std::sync::OnceLock<Option<Arc<GpuContext>>> = std::sync::OnceLock::new();
-		SHARED
-			.get_or_init(|| Self::create(BackendKind::from_user_config()))
-			.clone()
+		let mut slot = lock(shared_slot());
+		if !slot.decided {
+			slot.ctx = Self::create(BackendKind::from_user_config());
+			slot.decided = true;
+		}
+		slot.ctx.clone()
+	}
+
+	/// Install (or clear) the process-wide shared context (M2). Called by
+	/// the app before the first render with the UI's adopted device, so
+	/// the pipeline backend renders on the presenter's device.
+	///
+	/// **Timing guard**: an engine-created context that has not touched
+	/// the GPU yet is *replaced* — an early [`GpuContext::shared`] call
+	/// (a thumbnail, a task) must not silently cost the zero-copy present
+	/// path. Once the incumbent has created any texture or pipeline the
+	/// replacement is refused (`false`); the caller degrades to the
+	/// single staging readback. Also `false` when an adopted context is
+	/// already installed.
+	pub fn install_shared(ctx: Option<Arc<GpuContext>>) -> bool {
+		let mut slot = lock(shared_slot());
+		if slot.decided {
+			let replaceable = ctx.is_some()
+				&& slot
+					.ctx
+					.as_ref()
+					.is_some_and(|c| !c.is_adopted() && !c.is_used());
+			if !replaceable {
+				return false;
+			}
+		}
+		slot.ctx = ctx;
+		slot.decided = true;
+		true
+	}
+
+	/// True when the app installed the shared context (as opposed to the
+	/// engine lazily creating one from user config). Tests/UI use this to
+	/// tell "the presenter's device" from "a private device".
+	pub fn shared_is_installed() -> bool {
+		let slot = lock(shared_slot());
+		slot.decided && slot.ctx.is_some()
 	}
 
 	/// True when the device can linear-sample Rgba32Float textures
@@ -713,6 +1665,7 @@ impl GpuContext {
 		has_uniforms: bool,
 		filtering: bool,
 	) -> Result<Arc<ShaderProgram>> {
+		self.used.store(true, Ordering::Release);
 		if let Some(p) = lock(&self.programs).get(key) {
 			return Ok(p.clone());
 		}
@@ -781,11 +1734,11 @@ impl GpuContext {
 			.device
 			.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
 				label: Some("oakrender-fx-pipeline-layout"),
-				bind_group_layouts: &[&layout],
-				push_constant_ranges: &[],
+				bind_group_layouts: &[Some(&layout)],
+				immediate_size: 0,
 			});
 
-		self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+		let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
 		let pipeline = self
 			.device
 			.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -810,10 +1763,10 @@ impl GpuContext {
 						write_mask: wgpu::ColorWrites::ALL,
 					})],
 				}),
-				multiview: None,
+				multiview_mask: None,
 				cache: None,
 			});
-		if let Some(err) = pollster_block_on(self.device.pop_error_scope()) {
+		if let Some(err) = pollster_block_on(scope.pop()) {
 			return Err(Error::Failed(format!("effect pipeline validation failed: {err}")));
 		}
 
@@ -926,6 +1879,7 @@ impl GpuContext {
 				label: Some("oakrender-fx-pass"),
 				color_attachments: &[Some(wgpu::RenderPassColorAttachment {
 					view: &dst_view,
+					depth_slice: None,
 					resolve_target: None,
 					ops: wgpu::Operations {
 						load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -935,6 +1889,7 @@ impl GpuContext {
 				depth_stencil_attachment: None,
 				timestamp_writes: None,
 				occlusion_query_set: None,
+				multiview_mask: None,
 			});
 			pass.set_pipeline(&program.pipeline);
 			pass.set_bind_group(0, &bind_group, &[]);
@@ -957,6 +1912,191 @@ pub struct ShaderProgram {
 	/// Whether the input samplers filter (subject to FLOAT32_FILTERABLE).
 	pub filtering: bool,
 }
+
+/// The compiled display-LUT pass (M2).
+#[derive(Clone)]
+struct PresentPipeline {
+	pipeline: wgpu::RenderPipeline,
+	layout: wgpu::BindGroupLayout,
+}
+
+/// The YUV→RGB matrix/offset for [`GpuContext::run_yuv_to_rgb`], derived
+/// from the same (Kr, Kb) coefficients and range expansion as
+/// [`crate::colormath::yuv444p16_to_rgb_f32`]. Inputs are R16Unorm
+/// plane textures (normalized 0..1); `rgb = M·yuv + b`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct YuvTransform {
+	/// Row-major 3×3 matrix applied to `(y, u, v)`.
+	pub matrix: [[f32; 3]; 3],
+	/// Per-channel offset added after the matrix.
+	pub offset: [f32; 3],
+}
+
+impl YuvTransform {
+	/// Build the transform for a luma matrix and range.
+	pub fn from_matrix(matrix: crate::colormath::YuvMatrix, full_range: bool) -> Self {
+		let (kr, kb) = matrix.kr_kb();
+		let kg = 1.0 - kr - kb;
+		// CPU reference: Y spans 219<<8 for limited, chroma 224<<8, both
+		// divided per code value; inputs here are code/65535.
+		let (ay, by, ac, bc) = if full_range {
+			(1.0, 0.0, 1.0, 32768.0 / 65535.0)
+		} else {
+			(
+				65535.0 / 56064.0,
+				4096.0 / 56064.0,
+				65535.0 / 57344.0,
+				32768.0 / 57344.0,
+			)
+		};
+		let rv = 2.0 * (1.0 - kr) * ac;
+		let bu = 2.0 * (1.0 - kb) * ac;
+		let gu = -(2.0 * kb * (1.0 - kb) / kg) * ac;
+		let gv = -(2.0 * kr * (1.0 - kr) / kg) * ac;
+		Self {
+			matrix: [[ay, 0.0, rv], [ay, gu, gv], [ay, bu, 0.0]],
+			offset: [
+				-by - 2.0 * (1.0 - kr) * bc,
+				-by + (2.0 * kr * (1.0 - kr) + 2.0 * kb * (1.0 - kb)) / kg * bc,
+				-by - 2.0 * (1.0 - kb) * bc,
+			],
+		}
+	}
+
+	/// BT.601, limited range.
+	pub fn bt601_limited() -> Self {
+		Self::from_matrix(crate::colormath::YuvMatrix::Bt601, false)
+	}
+
+	/// BT.601, full range.
+	pub fn bt601_full() -> Self {
+		Self::from_matrix(crate::colormath::YuvMatrix::Bt601, true)
+	}
+
+	/// BT.709, limited range.
+	pub fn bt709_limited() -> Self {
+		Self::from_matrix(crate::colormath::YuvMatrix::Bt709, false)
+	}
+
+	/// BT.709, full range.
+	pub fn bt709_full() -> Self {
+		Self::from_matrix(crate::colormath::YuvMatrix::Bt709, true)
+	}
+
+	/// BT.2020, limited range.
+	pub fn bt2020_limited() -> Self {
+		Self::from_matrix(crate::colormath::YuvMatrix::Bt2020, false)
+	}
+
+	/// BT.2020, full range.
+	pub fn bt2020_full() -> Self {
+		Self::from_matrix(crate::colormath::YuvMatrix::Bt2020, true)
+	}
+}
+
+/// Pack an f32 slice as little-endian bytes for `write_buffer`.
+fn f32_uniform_bytes(values: &[f32]) -> Vec<u8> {
+	let mut out = Vec::with_capacity(values.len() * 4);
+	for v in values {
+		out.extend_from_slice(&v.to_le_bytes());
+	}
+	out
+}
+
+/// The display pass: manual trilinear 3D-LUT sampling (R32Float, no
+/// float-filtering feature needed) of the working-space pixel, alpha
+/// passes through. The LUT is the CPU-baked output node + display ICC
+/// chain, so the presentation transform runs entirely on the GPU.
+const PRESENT_WGSL: &str = r#"
+struct Params {
+    edge: vec4<f32>,
+    lo: vec4<f32>,
+    hi: vec4<f32>,
+};
+@group(0) @binding(0) var src_tex: texture_2d<f32>;
+@group(0) @binding(1) var lut_tex: texture_3d<f32>;
+@group(0) @binding(2) var<uniform> p: Params;
+
+	fn lut_at(x: i32, y: i32, z: i32) -> vec3<f32> {
+    return textureLoad(lut_tex, vec3<i32>(x, y, z), 0).rgb;
+}
+
+@fragment
+fn main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+    let dims = textureDimensions(src_tex);
+    let coord = clamp(
+        vec2<i32>(i32(frag.x), i32(frag.y)),
+        vec2<i32>(0, 0),
+        vec2<i32>(i32(dims.x), i32(dims.y)) - vec2<i32>(1, 1),
+    );
+    let c = textureLoad(src_tex, coord, 0);
+    let n = i32(p.edge.x);
+    let last = f32(n - 1);
+    let span = p.hi.xyz - p.lo.xyz;
+    let u = (c.xyz - p.lo.xyz) / max(span, vec3<f32>(1e-12));
+    let t = clamp(u, vec3<f32>(0.0), vec3<f32>(1.0)) * last;
+    let i0 = vec3<i32>(floor(t));
+    let f = t - floor(t);
+    let i1 = min(i0 + vec3<i32>(1, 1, 1), vec3<i32>(n - 1));
+    let c000 = lut_at(i0.x, i0.y, i0.z);
+    let c100 = lut_at(i1.x, i0.y, i0.z);
+    let c010 = lut_at(i0.x, i1.y, i0.z);
+    let c110 = lut_at(i1.x, i1.y, i0.z);
+    let c001 = lut_at(i0.x, i0.y, i1.z);
+    let c101 = lut_at(i1.x, i0.y, i1.z);
+    let c011 = lut_at(i0.x, i1.y, i1.z);
+    let c111 = lut_at(i1.x, i1.y, i1.z);
+    let c00 = mix(c000, c100, f.x);
+    let c10 = mix(c010, c110, f.x);
+    let c01 = mix(c001, c101, f.x);
+    let c11 = mix(c011, c111, f.x);
+    let c0 = mix(c00, c10, f.y);
+    let c1 = mix(c01, c11, f.y);
+    let out = mix(c0, c1, f.z);
+    return vec4<f32>(out, c.a);
+}
+"#;
+
+/// The YUV→RGB pass (M5 dependency): three `R16Float` plane inputs
+/// sampled 1:1 from the frame's Y/U/V planes, one `Rgba32Float` output.
+const YUV_WGSL: &str = r#"
+struct Params {
+    m0: vec4<f32>,
+    m1: vec4<f32>,
+    m2: vec4<f32>,
+    uv_scale: vec4<f32>,
+};
+@group(0) @binding(0) var y_tex: texture_2d<f32>;
+@group(0) @binding(1) var u_tex: texture_2d<f32>;
+@group(0) @binding(2) var v_tex: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> p: Params;
+
+@fragment
+fn main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+    let yd = textureDimensions(y_tex);
+    let coord = clamp(
+        vec2<i32>(i32(frag.x), i32(frag.y)),
+        vec2<i32>(0, 0),
+        vec2<i32>(i32(yd.x), i32(yd.y)) - vec2<i32>(1, 1),
+    );
+    let yv = textureLoad(y_tex, coord, 0).r;
+    let ud = textureDimensions(u_tex);
+    let uc = clamp(
+        vec2<i32>(vec2<f32>(coord) * p.uv_scale.xy),
+        vec2<i32>(0, 0),
+        vec2<i32>(i32(ud.x), i32(ud.y)) - vec2<i32>(1, 1),
+    );
+    let uv = textureLoad(u_tex, uc, 0).r;
+    let vv = textureLoad(v_tex, uc, 0).r;
+    let yuv = vec3<f32>(yv, uv, vv);
+    let rgb = vec3<f32>(
+        dot(p.m0.xyz, yuv) + p.m0.w,
+        dot(p.m1.xyz, yuv) + p.m1.w,
+        dot(p.m2.xyz, yuv) + p.m2.w,
+    );
+    return vec4<f32>(rgb, 1.0);
+}
+"#;
 
 /// The fixed vertex stage for effect passes: a fullscreen triangle
 /// emitting `ove_texcoord`-convention UVs at location 0. UV v=0 is the
@@ -1006,6 +2146,14 @@ impl GpuContextLike for GpuContext {
         processor: Option<&crate::color::ColorProcessor>,
 	) -> Result<()> {
 		self.blit(src, dst, processor)
+	}
+
+	fn as_any(&self) -> Option<&dyn std::any::Any> {
+		Some(self)
+	}
+
+	fn texture_handle(&self, token: u64) -> Option<Arc<wgpu::Texture>> {
+		self.texture_handle(token)
 	}
 }
 
@@ -1176,14 +2324,13 @@ impl DisplayRenderer {
 				};
 				ctx.upload(token, &frame)?;
 			}
-			Ok(Texture::Gpu {
+			Ok(Texture::gpu(
+				ctx.clone(),
 				token,
-				backend: ctx.kind(),
 				width,
 				height,
-				format: PixelFormat::F32,
-				ctx: ctx.clone(),
-			})
+				PixelFormat::F32,
+			))
 		} else {
 			let mut frame = Frame::new();
 			let mut pod = *params;
@@ -1344,6 +2491,11 @@ pub fn frame_from_pixels_for_upload(
 mod tests {
     use super::*;
 
+    /// Serializes the tests that assert on the process-global GPU
+    /// transfer counters (and install a display LUT): parallel tests would
+    /// otherwise see each other's transfers.
+    static GPU_COUNTER_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
 	fn backend_string_roundtrip() {
 		for (s, kind) in [
@@ -1422,14 +2574,55 @@ mod tests {
 		assert!(GpuContext::create(BackendKind::Cpu).is_none());
 	}
 
+	/// The M2 timing guard: an engine-created context that has not touched
+	/// the GPU is replaced when the UI installs its adopted device, so an
+	/// early `shared()` cannot silently cost zero-copy present. A context
+	/// that has created a texture is no longer replaceable.
+	#[test]
+	fn shared_slot_replaces_an_unused_engine_context() {
+		let Some(base) = any_gpu() else {
+			return;
+		};
+		assert!(
+			GpuContext::install_shared(Some(base.clone())),
+			"the slot starts undecided"
+		);
+		assert!(!GpuContext::shared().unwrap().is_adopted());
+
+		let (device, queue) = base.device_queue();
+		let adopted =
+			GpuContext::adopt(device, queue, BackendKind::Auto);
+		assert!(
+			GpuContext::install_shared(Some(adopted.clone())),
+			"an unused engine context is replaceable by the UI device"
+		);
+		assert!(
+			GpuContext::shared().unwrap().is_adopted(),
+			"the adopted context is now shared"
+		);
+
+		// Once the context has created GPU resources it must not be
+		// pulled out from under in-flight work.
+		let _texture = adopted.create_texture(2, 2).unwrap();
+		let (device, queue) = adopted.device_queue();
+		let second =
+			GpuContext::adopt(device, queue, BackendKind::Auto);
+		assert!(
+			!GpuContext::install_shared(Some(second)),
+			"a used context is not replaceable"
+		);
+		assert!(GpuContext::shared().unwrap().is_adopted());
+	}
+
 	fn any_gpu() -> Option<Arc<GpuContext>> {
-		GpuContext::create(BackendKind::Auto)
+		// `gpu_or_skip` hard-fails when `OAK_REQUIRE_GPU` is set (CI).
+		gpu_or_skip("a backend GPU test")
 	}
 
 	#[test]
 	fn gpu_texture_upload_download_roundtrip() {
+		let _guard = GPU_COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let Some(ctx) = any_gpu() else {
-			eprintln!("no adapter; skipping GPU round-trip");
 			return;
 		};
 		let w = 8;
@@ -1460,8 +2653,8 @@ mod tests {
 
 	#[test]
 	fn gpu_blit_copies_pixels() {
+		let _guard = GPU_COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let Some(ctx) = any_gpu() else {
-			eprintln!("no adapter; skipping blit");
 			return;
 		};
 		let w = 8;
@@ -1496,8 +2689,295 @@ mod tests {
 		ctx.destroy_texture(dst);
 	}
 
+	/// The GPU present pass reproduces the CPU 3D-LUT evaluation (within
+	/// the Rgba16Float output quantization) and performs no CPU transfer.
+	#[test]
+	fn gpu_present_lut_matches_cpu_trilinear() {
+		let _guard = GPU_COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		let Some(ctx) = any_gpu() else {
+			return;
+		};
+		// A non-trivial LUT (channel mix + gamma-ish curve).
+		let lut = crate::lut::Lut3d::build(9, [0.0; 3], [1.0; 3], |c| {
+			[
+				(0.5 * c[0] + 0.25 * c[1] + 0.25 * c[2]).powf(0.8),
+				c[1].powf(1.2),
+				(0.2 * c[0] + 0.8 * c[2]).powf(0.9),
+			]
+		});
+		ctx.set_display_lut(&lut).unwrap();
+		assert!(ctx.has_display_lut());
+
+		let w = 4;
+		let h = 3;
+		let src = ctx.create_texture(w, h).unwrap();
+		let mut frame = Frame::new();
+		let mut pod = VideoParamsPod::default();
+		pod.width = w;
+		pod.height = h;
+		frame.set_video_params(pod);
+		frame.allocate();
+		let sample = |i: usize| -> [f32; 4] {
+			[
+				(i as f32 * 0.13) % 1.0,
+				(i as f32 * 0.29) % 1.0,
+				(i as f32 * 0.47) % 1.0,
+				1.0,
+			]
+		};
+		for i in 0..(w * h) as usize {
+			let px = sample(i);
+			for (c, v) in px.iter().enumerate() {
+				frame.data[i * 16 + c * 4..i * 16 + c * 4 + 4]
+					.copy_from_slice(&v.to_le_bytes());
+			}
+		}
+		ctx.upload(src, &frame).unwrap();
+		// Installation and input upload are one-time boundaries; the
+		// present itself must transfer nothing to/from the CPU.
+		reset_gpu_transfer_counters();
+		let dst = ctx.present_texture(src).unwrap();
+		assert_eq!(gpu_transfer_counters(), (0, 0), "present is GPU→GPU");
+		let out = ctx.download(dst).unwrap();
+		for i in 0..(w * h) as usize {
+			let px = sample(i);
+			let expect = lut.eval([px[0], px[1], px[2]]);
+			let got = [
+				f32::from_le_bytes(out.data[i * 16..i * 16 + 4].try_into().unwrap()),
+				f32::from_le_bytes(out.data[i * 16 + 4..i * 16 + 8].try_into().unwrap()),
+				f32::from_le_bytes(out.data[i * 16 + 8..i * 16 + 12].try_into().unwrap()),
+			];
+			for c in 0..3 {
+				assert!(
+					(got[c] - expect[c]).abs() < 5e-3,
+					"px {i} c{c}: {} vs {}",
+					got[c],
+					expect[c]
+				);
+			}
+		}
+		ctx.destroy_texture(src);
+		ctx.destroy_texture(dst);
+	}
+
+	#[test]
+	fn gpu_present_requires_a_lut() {
+		let Some(ctx) = any_gpu() else {
+			return;
+		};
+		assert!(!ctx.has_display_lut());
+		let tex = ctx.create_texture(2, 2).unwrap();
+		assert!(ctx.present_texture(tex).is_err());
+		ctx.destroy_texture(tex);
+	}
+
+	#[test]
+	fn gpu_copy_counters_track_cpu_transfers() {
+		let _guard = GPU_COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		let Some(ctx) = any_gpu() else {
+			return;
+		};
+		reset_gpu_transfer_counters();
+		let token = ctx.create_texture(2, 2).unwrap();
+		let mut frame = Frame::new();
+		let mut pod = VideoParamsPod::default();
+		pod.width = 2;
+		pod.height = 2;
+		frame.set_video_params(pod);
+		frame.allocate();
+		ctx.upload(token, &frame).unwrap();
+		assert_eq!(gpu_transfer_counters(), (1, 0));
+		ctx.download(token).unwrap();
+		assert_eq!(gpu_transfer_counters(), (1, 1));
+	}
+
+	/// The GPU YUV→RGB pass reproduces the CPU reference conversion
+	/// (`colormath::yuv444p16_to_rgb_f32`) exactly: same coefficients, same
+	/// limited/full-range expansion, 4:4:4 planes sampled 1:1.
+	#[test]
+	fn gpu_yuv_to_rgb_matches_cpu_reference() {
+		let _guard = GPU_COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		let Some(ctx) = any_gpu() else {
+			return;
+		};
+		let (w, h) = (8usize, 4usize);
+		let mut y_code_plane = vec![0u8; w * h * 2];
+		let mut u_code_plane = vec![0u8; w * h * 2];
+		let mut v_code_plane = vec![0u8; w * h * 2];
+		let mut y_plane = vec![0u8; w * h * 2];
+		let mut u_plane = vec![0u8; w * h * 2];
+		let mut v_plane = vec![0u8; w * h * 2];
+		for row in 0..h {
+			for x in 0..w {
+				let i = (row * w + x) * 2;
+				let y_code = (4096 + (x * 8191) % 56064) as u16;
+				let u_code = (32768i32 - 20000 + (row * 4000) as i32) as u16;
+				let v_code = (32768i32 + (x * 5000) as i32 - 20000) as u16;
+				for (code_plane, plane, code) in [
+					(&mut y_code_plane, &mut y_plane, y_code),
+					(&mut u_code_plane, &mut u_plane, u_code),
+					(&mut v_code_plane, &mut v_plane, v_code),
+				] {
+					code_plane[i..i + 2].copy_from_slice(&code.to_le_bytes());
+					let norm = code as f32 / 65535.0;
+					plane[i..i + 2]
+						.copy_from_slice(&half::f16::from_f32(norm).to_bits().to_le_bytes());
+				}
+			}
+		}
+		let y = ctx
+			.create_texture_format(
+				w as i32,
+				h as i32,
+				1,
+				wgpu::TextureFormat::R16Float,
+				wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+			)
+			.unwrap();
+		let u = ctx
+			.create_texture_format(
+				w as i32,
+				h as i32,
+				1,
+				wgpu::TextureFormat::R16Float,
+				wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+			)
+			.unwrap();
+		let v = ctx
+			.create_texture_format(
+				w as i32,
+				h as i32,
+				1,
+				wgpu::TextureFormat::R16Float,
+				wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+			)
+			.unwrap();
+		ctx.upload_plane(y, &y_plane).unwrap();
+		ctx.upload_plane(u, &u_plane).unwrap();
+		ctx.upload_plane(v, &v_plane).unwrap();
+		let dst = ctx.create_texture(w as i32, h as i32).unwrap();
+
+		let mut expected = vec![0.0f32; w * h * 4];
+		let mut compare = |ctx: &GpuContext,
+		                    tag: &str,
+		                    matrix: crate::colormath::YuvMatrix,
+		                    transform: YuvTransform,
+		                    full_range: bool| {
+			crate::colormath::yuv444p16_to_rgb_f32(
+				&y_code_plane,
+				w * 2,
+				&u_code_plane,
+				w * 2,
+				&v_code_plane,
+				w * 2,
+				w,
+				h,
+				matrix,
+				full_range,
+				&mut expected,
+			);
+			ctx.run_yuv_to_rgb(y, u, v, dst, &transform).unwrap();
+			let out = ctx.download(dst).unwrap();
+			for i in 0..w * h {
+				let got = [
+					f32::from_le_bytes(out.data[i * 16..i * 16 + 4].try_into().unwrap()),
+					f32::from_le_bytes(out.data[i * 16 + 4..i * 16 + 8].try_into().unwrap()),
+					f32::from_le_bytes(out.data[i * 16 + 8..i * 16 + 12].try_into().unwrap()),
+				];
+				for (got_c, want) in got.iter().zip(&expected[i * 4..i * 4 + 3]) {
+					assert!(
+						(got_c - want).abs() < 4e-3,
+						"{tag}: px {i}: got {got_c} want {want}"
+					);
+				}
+			}
+		};
+		use crate::colormath::YuvMatrix;
+		compare(&ctx, "bt601 limited", YuvMatrix::Bt601, YuvTransform::bt601_limited(), false);
+		compare(&ctx, "bt601 full", YuvMatrix::Bt601, YuvTransform::bt601_full(), true);
+		compare(&ctx, "bt709 limited", YuvMatrix::Bt709, YuvTransform::bt709_limited(), false);
+		compare(&ctx, "bt709 full", YuvMatrix::Bt709, YuvTransform::bt709_full(), true);
+		compare(&ctx, "bt2020 limited", YuvMatrix::Bt2020, YuvTransform::bt2020_limited(), false);
+		compare(&ctx, "bt2020 full", YuvMatrix::Bt2020, YuvTransform::bt2020_full(), true);
+
+		ctx.destroy_texture(y);
+		ctx.destroy_texture(u);
+		ctx.destroy_texture(v);
+		ctx.destroy_texture(dst);
+	}
+
+	/// The generic color LUT pass (graph `ColorTransformJob`): trilinear
+	/// LUT application into an `Rgba32Float` texture, GPU→GPU.
+	#[test]
+	fn gpu_apply_color_lut_matches_cpu() {
+		let _guard = GPU_COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		let Some(ctx) = any_gpu() else {
+			return;
+		};
+		let lut = crate::lut::Lut3d::build(9, [0.0; 3], [1.0; 3], |c| {
+			[c[1], c[2], c[0]]
+		});
+		let (w, h) = (4, 2);
+		let src = ctx.create_texture(w, h).unwrap();
+		let mut frame = Frame::new();
+		let mut pod = VideoParamsPod::default();
+		pod.width = w;
+		pod.height = h;
+		frame.set_video_params(pod);
+		frame.allocate();
+		for i in 0..(w * h) as usize {
+			let px = [
+				(i as f32 * 0.11) % 1.0,
+				(i as f32 * 0.23) % 1.0,
+				(i as f32 * 0.37) % 1.0,
+				1.0,
+			];
+			for (c, v) in px.iter().enumerate() {
+				frame.data[i * 16 + c * 4..i * 16 + c * 4 + 4]
+					.copy_from_slice(&v.to_le_bytes());
+			}
+		}
+		ctx.upload(src, &frame).unwrap();
+		reset_gpu_transfer_counters();
+		let dst = ctx.apply_color_lut(src, "test/swap", &lut).unwrap();
+		assert_eq!(
+			gpu_transfer_counters(),
+			(1, 0),
+			"the first apply uploads the LUT once and never reads back"
+		);
+		reset_gpu_transfer_counters();
+		let dst2 = ctx.apply_color_lut(src, "test/swap", &lut).unwrap();
+		assert_eq!(gpu_transfer_counters(), (0, 0), "cached apply is GPU→GPU");
+		let out = ctx.download(dst).unwrap();
+		let out2 = ctx.download(dst2).unwrap();
+		for got in [&out, &out2] {
+			for i in 0..(w * h) as usize {
+				let src_px = [
+					f32::from_le_bytes(frame.data[i * 16..i * 16 + 4].try_into().unwrap()),
+					f32::from_le_bytes(frame.data[i * 16 + 4..i * 16 + 8].try_into().unwrap()),
+					f32::from_le_bytes(frame.data[i * 16 + 8..i * 16 + 12].try_into().unwrap()),
+				];
+				let want = lut.eval(src_px);
+				for c in 0..3 {
+					let g = f32::from_le_bytes(
+						got.data[i * 16 + c * 4..i * 16 + c * 4 + 4].try_into().unwrap(),
+					);
+					assert!(
+						(g - want[c]).abs() < 1e-4,
+						"px {i} c{c}: {g} vs {}",
+						want[c]
+					);
+				}
+			}
+		}
+		ctx.destroy_texture(src);
+		ctx.destroy_texture(dst);
+		ctx.destroy_texture(dst2);
+	}
+
 	#[test]
 	fn gpu_missing_texture_errors() {
+		let _guard = GPU_COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let Some(ctx) = any_gpu() else {
 			return;
 		};

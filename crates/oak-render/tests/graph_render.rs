@@ -131,11 +131,10 @@ fn build_project(clips: &[(&str, Rational, Rational)]) -> (Arc<Mutex<Project>>, 
 }
 
 /// The raw CPU frame bytes of a rendered texture.
-fn frame_data(texture: &Texture) -> &[u8] {
-    let Texture::Cpu(frame) = texture else {
-        panic!("graph render produced a non-CPU texture");
-    };
-    &frame.data
+/// The raw frame bytes of a rendered texture (GPU textures are read back
+/// for the assertion; the playback path itself never downloads).
+fn frame_data(texture: &Texture) -> Vec<u8> {
+    texture.to_frame().expect("graph frame readback").data
 }
 
 /// Two clips on two tracks, non-overlapping in time: at each request time
@@ -228,10 +227,10 @@ fn graph_sequence_stacks_highest_track_on_top() {
         .expect("stacked render");
     let data = frame_data(&tex);
     assert!(
-        channel(data, 8, 8, 2) > 0.5 && channel(data, 8, 8, 0) < 0.4,
+        channel(&data, 8, 8, 2) > 0.5 && channel(&data, 8, 8, 0) < 0.4,
         "V2's blue covers V1's red (r={}, b={})",
-        channel(data, 8, 8, 0),
-        channel(data, 8, 8, 2)
+        channel(&data, 8, 8, 0),
+        channel(&data, 8, 8, 2)
     );
 
     // Distinguishability guard: solo, the V1 clip really is red (the two
@@ -241,10 +240,10 @@ fn graph_sequence_stacks_highest_track_on_top() {
         .expect("solo V1 render");
     let solo_data = frame_data(&solo_tex);
     assert!(
-        channel(solo_data, 8, 8, 0) > 0.5 && channel(solo_data, 8, 8, 2) < 0.4,
+        channel(&solo_data, 8, 8, 0) > 0.5 && channel(&solo_data, 8, 8, 2) < 0.4,
         "solo V1 is red (r={}, b={})",
-        channel(solo_data, 8, 8, 0),
-        channel(solo_data, 8, 8, 2)
+        channel(&solo_data, 8, 8, 0),
+        channel(&solo_data, 8, 8, 2)
     );
 
     let _ = std::fs::remove_file(&red);
@@ -366,8 +365,7 @@ fn channel(data: &[u8], x: usize, y: usize, c: usize) -> f32 {
 /// when no GPU adapter exists.
 #[test]
 fn shader_job_opacity_halves_pixels() {
-    if oak_core::backend::GpuContext::shared().is_none() {
-        eprintln!("skipping shader_job_opacity_halves_pixels: no GPU adapter");
+    if oak_core::backend::shared_gpu_or_skip("shader_job_opacity_halves_pixels").is_none() {
         return;
     }
     let path = clip_path("opacity_job");
@@ -452,8 +450,7 @@ fn shader_job_opacity_halves_pixels() {
 /// boundary pixel on the right half. Skipped when no GPU adapter exists.
 #[test]
 fn shader_job_blur_smooths_edge() {
-    if oak_core::backend::GpuContext::shared().is_none() {
-        eprintln!("skipping shader_job_blur_smooths_edge: no GPU adapter");
+    if oak_core::backend::shared_gpu_or_skip("shader_job_blur_smooths_edge").is_none() {
         return;
     }
     let path = clip_path("blur_job");
@@ -554,8 +551,8 @@ fn shader_job_blur_smooths_edge() {
 /// Skipped when no GPU adapter or OCIO config exists.
 #[test]
 fn chromakey_job_keys_green_with_ociobased_stub() {
-    if oak_core::backend::GpuContext::shared().is_none() {
-        eprintln!("skipping chromakey_job_keys_green_with_ociobased_stub: no GPU adapter");
+    if oak_core::backend::shared_gpu_or_skip("chromakey_job_keys_green_with_ociobased_stub").is_none()
+    {
         return;
     }
     if oak_core::color::set_up_default_config().is_err() {
@@ -650,8 +647,7 @@ fn chromakey_job_keys_green_with_ociobased_stub() {
 /// target-anchored behavior drew 50% vs 12.5%).
 #[test]
 fn shape_generator_size_is_sequence_relative() {
-    if oak_core::backend::GpuContext::shared().is_none() {
-        eprintln!("skipping shape_generator_size_is_sequence_relative: no GPU adapter");
+    if oak_core::backend::shared_gpu_or_skip("shape_generator_size_is_sequence_relative").is_none() {
         return;
     }
     let path = clip_path("shape_seqrel");
@@ -693,9 +689,7 @@ fn shape_generator_size_is_sequence_relative() {
             PixelFormat::F32,
         )
         .expect("shape render");
-        let Texture::Cpu(frame) = &tex else {
-            panic!("graph render produced a non-CPU texture");
-        };
+        let frame = tex.to_frame().expect("shape frame readback");
         let stride = frame.linesize_bytes() as usize;
         let y = (height / 2) as usize;
         let mut red = 0usize;

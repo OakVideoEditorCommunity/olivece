@@ -163,11 +163,11 @@ fn render_video(params: VideoTicketParams) -> Texture {
 	}
 }
 
-fn frame_of(texture: &Texture) -> &Frame {
-	let Texture::Cpu(frame) = texture else {
-		panic!("ticket produced a non-CPU texture");
-	};
-	frame
+/// The frame bytes of a rendered texture. GPU textures (the pipeline
+/// backend on a GPU-capable host) are read back for the assertion; the
+/// playback path itself never downloads.
+fn frame_of(texture: &Texture) -> Frame {
+	texture.to_frame().expect("ticket frame readback")
 }
 
 /// Byte-for-byte frame equality with a first-difference report.
@@ -403,6 +403,174 @@ fn build_project(clips: &[(&str, Rational, Rational)]) -> (Arc<Mutex<Project>>, 
 	(project, seq)
 }
 
+/// Create one footage clip on `track` (not appended: the layered fixture
+/// orders V1 as clip/transition/clip explicitly).
+fn add_clip(
+	graph: &mut oak_node::graph::Graph,
+	path: &Path,
+	in_: Rational,
+	out: Rational,
+) -> NodeId {
+	let mut footage = FootageBehavior::new(path.to_string_lossy().as_ref());
+	footage.probe().expect("probe the generated clip");
+	let footage = graph.add_node(NodeCore::new(), Box::new(footage));
+	let (ccore, cbehavior) = clip_create();
+	let clip = graph.add_node(ccore, cbehavior);
+	graph
+		.connect(footage, clip, clip_input::TEXTURE_INPUT, -1)
+		.expect("connect footage to clip");
+	graph
+		.get_mut(clip)
+		.unwrap()
+		.behavior
+		.as_any_mut()
+		.unwrap()
+		.downcast_mut::<ClipBlockBehavior>()
+		.expect("clip block")
+		.core
+		.range = TimeRange::new(in_, out);
+	clip
+}
+
+fn track_mut(graph: &mut oak_node::graph::Graph, id: NodeId) -> &mut TrackBehavior {
+	graph
+		.get_mut(id)
+		.unwrap()
+		.behavior
+		.as_any_mut()
+		.unwrap()
+		.downcast_mut::<TrackBehavior>()
+		.expect("video track")
+}
+
+/// The layered M2 playback fixture: V1 carries two clips joined by a
+/// transition, V2 an overlapping clip (multi-track composite) and V3 an
+/// adjustment layer with an Opacity effect (the sweep). At the transition
+/// seam (t=1) one frame exercises all three mechanisms — the transitions'
+/// two decoded sides, the multi-track composite and the adjustment sweep
+/// — end to end.
+fn build_layered_project(
+	first: &Path,
+	second: &Path,
+	below: &Path,
+) -> (Arc<Mutex<Project>>, NodeId) {
+	pin_legacy_working_space();
+	let project = Project::new();
+	let seq;
+	{
+		let mut p = project.lock().unwrap();
+		p.initialize().expect("initialize the project");
+		let (score, sbehavior) = SequenceBehavior::create();
+		seq = p.graph.add_node(score, sbehavior);
+		let (tl_core, tl_beh) = TrackListBehavior::create();
+		let tl = p.graph.add_node(tl_core, tl_beh);
+
+		// V1: A [0,1) + transition [0.5,1.5) + B [1,2).
+		let (v1_core, v1_beh) = TrackBehavior::create();
+		let v1 = p.graph.add_node(v1_core, v1_beh);
+		let a = add_clip(&mut p.graph, first, Rational::new(0, 1), Rational::new(1, 1));
+		let b = add_clip(&mut p.graph, second, Rational::new(1, 1), Rational::new(2, 1));
+		let (tcore, tbehavior) = oak_node::block::transition_create();
+		let transition = p.graph.add_node(tcore, tbehavior);
+		{
+			let behavior = p
+				.graph
+				.get_mut(transition)
+				.unwrap()
+				.behavior
+				.as_any_mut()
+				.unwrap()
+				.downcast_mut::<oak_node::block::TransitionBlockBehavior>()
+				.expect("transition block");
+			behavior.core.range = TimeRange::new(Rational::new(1, 2), Rational::new(3, 2));
+			behavior.in_offset = Rational::new(1, 2);
+			behavior.out_offset = Rational::new(1, 2);
+		}
+		p.graph
+			.connect(
+				a,
+				transition,
+				oak_node::block::transition_input::OUT_BLOCK,
+				-1,
+			)
+			.expect("connect the outgoing clip to the transition");
+		p.graph
+			.connect(
+				b,
+				transition,
+				oak_node::block::transition_input::IN_BLOCK,
+				-1,
+			)
+			.expect("connect the incoming clip to the transition");
+		track_mut(&mut p.graph, v1).blocks = vec![a, transition, b];
+
+		// V2: C [0,2), overlapping the transition track.
+		let (v2_core, v2_beh) = TrackBehavior::create();
+		let v2 = p.graph.add_node(v2_core, v2_beh);
+		let c = add_clip(&mut p.graph, below, Rational::new(0, 1), Rational::new(2, 1));
+		track_mut(&mut p.graph, v2).append_block(c);
+
+		// V3: an adjustment layer [0,2) with an Opacity(0.75) chain.
+		let (v3_core, v3_beh) = TrackBehavior::create();
+		let v3 = p.graph.add_node(v3_core, v3_beh);
+		let (acore, abehavior) = oak_node::block::adjustment_create();
+		let adjustment = p.graph.add_node(acore, abehavior);
+		p.graph
+			.get_mut(adjustment)
+			.unwrap()
+			.behavior
+			.as_any_mut()
+			.unwrap()
+			.downcast_mut::<oak_node::block::AdjustmentBlockBehavior>()
+			.expect("adjustment block")
+			.core
+			.range = TimeRange::new(Rational::new(0, 1), Rational::new(2, 1));
+		let (ecore, ebehavior) = oak_node::nodes::opacity::create();
+		let effect = p.graph.add_node(ecore, ebehavior);
+		p.graph
+			.connect(
+				effect,
+				adjustment,
+				oak_node::block::adjustment_input::TEXTURE_INPUT,
+				-1,
+			)
+			.expect("connect opacity to the adjustment block");
+		p.graph.get_mut(effect).unwrap().core.set_standard_value(
+			oak_node::nodes::opacity::VALUE_INPUT,
+			-1,
+			oak_node::value::NodeValue::Float(0.75),
+		);
+		track_mut(&mut p.graph, v3).append_block(adjustment);
+
+		// V3 is last = topmost: its sweep covers V1 and V2.
+		{
+			let tl = p
+				.graph
+				.get_mut(tl)
+				.unwrap()
+				.behavior
+				.as_any_mut()
+				.unwrap()
+				.downcast_mut::<TrackListBehavior>()
+				.expect("video track list");
+			tl.tracks.push(v1);
+			tl.tracks.push(v2);
+			tl.tracks.push(v3);
+		}
+		p.graph
+			.get_mut(seq)
+			.unwrap()
+			.behavior
+			.as_any_mut()
+			.unwrap()
+			.downcast_mut::<SequenceBehavior>()
+			.expect("sequence")
+			.track_lists
+			.push(tl);
+	}
+	(project, seq)
+}
+
 /// `OAK_PIPELINE=threads` selects the thread pipeline (the default stays
 /// the process backend, which the manager-guard init below exercises as
 /// the test-only inline choice).
@@ -547,6 +715,112 @@ fn pipeline_viewer_ticket_matches_inline_pixels() {
 	}
 
 	let _ = std::fs::remove_file(&path);
+}
+
+// M2: the playback graph path keeps every frame on the GPU. Rendering
+// a sequence graph through the thread pipeline must transfer pixels
+// CPU→GPU once per decoded frame (the M5 gap — decode is still CPU)
+// and never read back; the final texture is GPU-resident until the
+// presentation boundary.
+#[test]
+fn pipeline_graph_playback_has_zero_gpu_readbacks() {
+	let _lock = lock();
+	pin_legacy_working_space();
+	if oak_core::backend::shared_gpu_or_skip("the pipeline GPU zero-copy assertion").is_none() {
+		return;
+	}
+	let path = test_clip("gpu_zero");
+	let filename = path.to_string_lossy().to_string();
+	let clip = (filename.as_str(), Rational::new(0, 1), Rational::new(1, 1));
+	let (project, sequence) = build_project(&[clip]);
+	let uuid = project.lock().unwrap().uuid.clone();
+	let viewer = sequence.identity();
+	let times = [
+		Rational::new(0, 1),
+		Rational::new(3, 10),
+		Rational::new(6, 10),
+	];
+
+	let guard = common::ManagerGuard::init_with(RenderBackendChoice::Pipeline);
+	let manager = RenderManager::global().expect("manager installed");
+	manager.set_inline_project(project.clone());
+	if let Some(backend) = manager.pipeline_backend() {
+		assert!(backend.decode_service().wait_idle(), "service drained");
+	}
+	oak_core::backend::reset_gpu_transfer_counters();
+	let mut rendered = 0u64;
+	for &time in &times {
+		let texture = render_video(viewer_params(&uuid, viewer, time));
+		assert!(
+			matches!(texture, Texture::Gpu { .. }),
+			"the thread-pipeline graph path must produce a GPU texture"
+		);
+		rendered += 1;
+	}
+	let (uploads, downloads) = oak_core::backend::gpu_transfer_counters();
+	assert_eq!(downloads, 0, "playback must not read the frame back to CPU");
+	assert_eq!(
+		uploads, rendered,
+		"one decode upload per frame until M5 imports the decode surface"
+	);
+	drop(guard);
+	let _ = std::fs::remove_file(&path);
+}
+/// M2: the layered playback path — multi-track composite + transition
+/// blend + adjustment sweep — is zero-readback too. The single clip test
+/// above covers the common case; this one proves the per-clip readback
+/// pattern that used to exist in each of these paths is gone: every clip
+/// uploads once (the M5 gap) and nothing comes back.
+#[test]
+fn pipeline_layered_playback_has_zero_gpu_readbacks() {
+	let _lock = lock();
+	if oak_core::backend::shared_gpu_or_skip("the layered playback zero-readback assertion").is_none()
+	{
+		return;
+	}
+	let first = test_clip("layered_first");
+	let second = test_clip_copy(&first, "layered_second");
+	let below = test_clip_copy(&first, "layered_below");
+	let (project, sequence) = build_layered_project(&first, &second, &below);
+	let uuid = project.lock().unwrap().uuid.clone();
+	let viewer = sequence.identity();
+
+	let guard = common::ManagerGuard::init_with(RenderBackendChoice::Pipeline);
+	let manager = RenderManager::global().expect("manager installed");
+	manager.set_inline_project(project.clone());
+	if let Some(backend) = manager.pipeline_backend() {
+		assert!(backend.decode_service().wait_idle(), "service drained");
+	}
+	oak_core::backend::reset_gpu_transfer_counters();
+	// The transition seam: V1 blends A/B, V2 composites underneath and V3
+	// sweeps the result with Opacity(0.75).
+	let texture = render_video(viewer_params(&uuid, viewer, Rational::new(1, 1)));
+	assert!(
+		matches!(texture, Texture::Gpu { .. }),
+		"layered playback must produce a GPU texture"
+	);
+	let (uploads, downloads) = oak_core::backend::gpu_transfer_counters();
+	assert_eq!(
+		downloads, 0,
+		"multi-track/transition/adjustment playback must not read back"
+	);
+	assert_eq!(
+		uploads, 3,
+		"each decoded clip uploads exactly once (A, B, C); the passes are GPU→GPU"
+	);
+	// The adjustment sweep must have participated: the final alpha is the
+	// Opacity(0.75) value (readback only for the assertion, after the
+	// counter sample above).
+	let frame = texture.to_frame().expect("frame readback");
+	let alpha = f32::from_le_bytes(frame.data[12..16].try_into().unwrap());
+	assert!(
+		alpha > 0.0 && alpha < 0.99,
+		"the adjustment sweep applied (alpha {alpha})"
+	);
+	drop(guard);
+	let _ = std::fs::remove_file(&first);
+	let _ = std::fs::remove_file(&second);
+	let _ = std::fs::remove_file(&below);
 }
 
 /// A saturated render queue closes the decode service's prefetch gate: a

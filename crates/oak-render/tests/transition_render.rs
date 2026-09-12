@@ -218,11 +218,10 @@ fn set_style(project: &Arc<Mutex<Project>>, block: NodeId, style: i64) {
 }
 
 /// The raw CPU frame bytes of a rendered texture.
-fn frame_data(texture: &Texture) -> &[u8] {
-	let Texture::Cpu(frame) = texture else {
-		panic!("graph render produced a non-CPU texture");
-	};
-	&frame.data
+/// The raw frame bytes of a rendered texture (GPU textures are read back
+/// for the assertion; the playback path itself never downloads).
+fn frame_data(texture: &Texture) -> Vec<u8> {
+	texture.to_frame().expect("graph frame readback").data
 }
 
 /// Render one 64x64 F32 frame of `seq` at `time` and return its bytes.
@@ -230,7 +229,7 @@ fn render_frame(project: &Arc<Mutex<Project>>, seq: NodeId, time: Rational) -> V
 	let texture =
 		oak_render::eval::render_graph_frame(project, seq, time, (64, 64), PixelFormat::F32)
 			.expect("graph render");
-	frame_data(&texture).to_vec()
+	frame_data(&texture)
 }
 
 /// The F32 RGBA channel of a 64x64 frame at `(x, y)`.
@@ -261,8 +260,9 @@ fn channel_mean(data: &[u8], c: usize, xs: &[usize], ys: &[usize]) -> f32 {
 /// Skipped (with a note) when no GPU adapter exists.
 #[test]
 fn cross_dissolve_blends_the_two_sides_of_a_cut() {
-	if oak_core::backend::GpuContext::shared().is_none() {
-		eprintln!("skipping cross_dissolve_blends_the_two_sides_of_a_cut: no GPU adapter");
+	if oak_core::backend::shared_gpu_or_skip("cross_dissolve_blends_the_two_sides_of_a_cut")
+		.is_none()
+	{
 		return;
 	}
 	let red = clip_path("dissolve_red");
@@ -344,8 +344,9 @@ fn cross_dissolve_blends_the_two_sides_of_a_cut() {
 /// outgoing one on the right (the outgoing image leads the sweep).
 #[test]
 fn wipe_style_splits_the_frame_at_the_boundary() {
-	if oak_core::backend::GpuContext::shared().is_none() {
-		eprintln!("skipping wipe_style_splits_the_frame_at_the_boundary: no GPU adapter");
+	if oak_core::backend::shared_gpu_or_skip("wipe_style_splits_the_frame_at_the_boundary")
+		.is_none()
+	{
 		return;
 	}
 	let red = clip_path("wipe_red");
@@ -402,8 +403,9 @@ fn wipe_style_splits_the_frame_at_the_boundary() {
 /// same shader with the open side generated transparent.
 #[test]
 fn single_sided_transitions_fade_from_and_to_black() {
-    if oak_core::backend::GpuContext::shared().is_none() {
-        eprintln!("skipping single_sided_transitions_fade_from_and_to_black: no GPU adapter");
+    if oak_core::backend::shared_gpu_or_skip("single_sided_transitions_fade_from_and_to_black")
+        .is_none()
+    {
         return;
     }
     let red = clip_path("edge_red");

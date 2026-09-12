@@ -27,7 +27,7 @@ mod common;
 
 use oak_core::{PixelFormat, Rational};
 
-use oak_core::backend::{BackendKind, DisplayRenderer, GpuContext};
+use oak_core::backend::{BackendKind, DisplayRenderer};
 use oak_core::frame::VideoParamsPod;
 use oak_core::texture::{Frame, Texture};
 
@@ -149,8 +149,7 @@ fn texture_roundtrip_bit_exact_f32() {
 /// backend; tolerance 1e-4 for driver variance.
 #[test]
 fn gpu_path_f32_invariants() {
-	let Some(ctx) = GpuContext::create(BackendKind::Auto) else {
-		eprintln!("no GPU adapter; skipping gpu_path_f32_invariants");
+	let Some(ctx) = oak_core::backend::gpu_or_skip("gpu_path_f32_invariants") else {
 		return;
 	};
 	let w = 16;

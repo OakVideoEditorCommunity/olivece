@@ -544,9 +544,10 @@ pub fn audio_montage(p: &ProjectRef, seq: NodeId, range: TimeRange) -> Vec<Monta
 // Ticket rendering
 // ---------------------------------------------------------------------------
 
-/// A rendered frame's pixel payload (M15 S2): a process-backend shm slot
-/// (BGRA8, zero-copy read) or an in-process F32 CPU frame (the test-only
-/// inline backend).
+/// A rendered frame's pixel payload (M15 S2, M2): a process-backend shm
+/// slot (BGRA8/F32, zero-copy read), an in-process F32 CPU frame (the
+/// inline backend), or a GPU-resident engine texture (the thread
+/// pipeline — presented zero-copy when the UI's device is adopted).
 pub enum RenderedFrame {
 	/// Process backend: a BGRA8 frame in a worker's shared-memory slot.
 	/// Read with `shm.slot_bytes(slot)` (no counted copy on the preview
@@ -564,6 +565,10 @@ pub enum RenderedFrame {
 		/// Pixel data (at least `linesize * height` bytes).
 		data: Vec<u8>,
 	},
+	/// Thread pipeline: an engine `Texture` — GPU-resident when a device
+	/// is available (M2 zero-copy present), otherwise an F32 CPU frame
+	/// from the inline fallback.
+	Gpu(oak_core::texture::Texture),
 }
 
 impl RenderedFrame {
@@ -572,6 +577,7 @@ impl RenderedFrame {
 		match self {
 			RenderedFrame::Shm(f) => f.meta.width,
 			RenderedFrame::CpuF32 { width, .. } => *width,
+			RenderedFrame::Gpu(texture) => texture.size().0,
 		}
 	}
 
@@ -580,6 +586,7 @@ impl RenderedFrame {
 		match self {
 			RenderedFrame::Shm(f) => f.meta.height,
 			RenderedFrame::CpuF32 { height, .. } => *height,
+			RenderedFrame::Gpu(texture) => texture.size().1,
 		}
 	}
 
@@ -591,12 +598,18 @@ impl RenderedFrame {
 		match self {
 			RenderedFrame::Shm(f) => f.meta.format,
 			RenderedFrame::CpuF32 { .. } => PIXEL_FORMAT_F32,
+			RenderedFrame::Gpu(_) => PIXEL_FORMAT_F32,
 		}
 	}
 
 	/// True for the process-backend shm variant.
 	pub fn is_shm(&self) -> bool {
 		matches!(self, RenderedFrame::Shm(_))
+	}
+
+	/// True for the thread-pipeline GPU texture variant.
+	pub fn is_gpu(&self) -> bool {
+		matches!(self, RenderedFrame::Gpu(_))
 	}
 
 	/// Build the viewer display image plus the scope samples (M15 S2
@@ -644,6 +657,41 @@ impl RenderedFrame {
 					let image = bgra_bytes_to_render_image(w, h, &owned)?;
 					Some((image, scope, None))
 				}
+			}
+			RenderedFrame::Gpu(texture) => {
+				let (w, h) = texture.size();
+				if w <= 0 || h <= 0 {
+					return None;
+				}
+				// M2 zero-copy present: when the engine renders on the
+				// UI's adopted device, the display LUT runs on the GPU and
+				// the raw texture goes straight to the viewer. A 1×1
+				// transparent image keys the GPU texture (the viewer's
+				// `cpu_image` fallback; the picture itself is the surface).
+				let presented = super::gpu::present_gpu_frame(texture);
+				let image = bgra_bytes_to_render_image(1, 1, &[0, 0, 0, 0])?;
+				if let Some(tex) = presented {
+					super::gpu::register_texture(image.id.0, w as u32, h as u32, tex);
+					return Some((image, ScopeData::default(), None));
+				}
+				// Device not shared (e.g. a private engine context): the
+				// explicit readback boundary, then the CPU display chain.
+				let frame = texture.to_frame().ok()?;
+				let (w, h) = (frame.width.max(0) as u32, frame.height.max(0) as u32);
+				let mut samples = repack_f32_rows(
+					frame.width,
+					frame.height,
+					frame.linesize_bytes() as i32,
+					&frame.data,
+				)?;
+				apply_output_node_f32(&mut samples);
+				let scope = analyze_f32_rgba(w, h, &samples);
+				super::displaycolor::apply_f32_rgba(&mut samples, (w * h) as i64);
+				Some((
+					f32_rgba_to_bgra_image(w, h, &samples),
+					scope,
+					Some(samples),
+				))
 			}
 			RenderedFrame::CpuF32 {
 				width,
@@ -849,8 +897,10 @@ fn render_video(params: VideoTicketParams) -> Result<RenderedFrame, String> {
 			linesize: frame.linesize_bytes() as i32,
 			data: frame.data.clone(),
 		}),
+		Ok(TicketPayload::Video(texture @ Texture::Gpu { .. })) => {
+			Ok(RenderedFrame::Gpu(texture.clone()))
+		}
 		Ok(TicketPayload::ShmFrame(frame)) => Ok(RenderedFrame::Shm(frame.clone())),
-		Ok(TicketPayload::Video(_)) => Err("render produced a non-CPU frame".to_string()),
 		_ => Err("render produced no video frame".to_string()),
 	}
 }
@@ -1349,6 +1399,62 @@ mod tests {
 		graphops::place_footage_clip(&project, seq, footage, TrackType::Video, 0, 0, 10, 0)
 			.expect("place the clip");
 		(project, seq, footage)
+	}
+
+	/// M2: a GPU-resident thread-pipeline frame presents with zero CPU
+	/// readback when the engine context is an adopted (shared) device,
+	/// and falls back to one explicit readback otherwise.
+	#[test]
+	fn gpu_frame_to_display_is_zero_copy_on_adopted_context() {
+		let _media = media_lock();
+		let Some(base) = oak_core::backend::gpu_or_skip("the GPU present assertion") else {
+			return;
+		};
+		let (device, queue) = base.device_queue();
+		let adopted = oak_core::backend::GpuContext::adopt(
+			device,
+			queue,
+			oak_core::backend::BackendKind::Auto,
+		);
+		let mut frame =
+			oak_render::eval::generate_frame(Rational::new(0, 1), (2, 1), oak_core::PixelFormat::F32)
+				.unwrap();
+		for px in frame.data.chunks_exact_mut(16) {
+			for (c, v) in px.chunks_exact_mut(4).zip([0.25f32, 0.5, 0.75, 1.0]) {
+				c.copy_from_slice(&v.to_le_bytes());
+			}
+		}
+		let token = adopted.create_texture(2, 1).unwrap();
+		adopted.upload(token, &frame).unwrap();
+		let texture = Texture::gpu(adopted.clone(), token, 2, 1, oak_core::PixelFormat::F32);
+
+		oak_core::backend::reset_gpu_transfer_counters();
+		let displayed = RenderedFrame::Gpu(texture)
+			.to_display()
+			.expect("GPU frame displays");
+		assert_eq!(
+			oak_core::backend::gpu_transfer_counters().1,
+			0,
+			"an adopted-context GPU frame must present without a readback"
+		);
+		assert!(
+			displayed.2.is_none(),
+			"the zero-copy path hands a GPU surface, not CPU samples"
+		);
+
+		// A private (non-adopted) context cannot be sampled by the UI:
+		// the display function takes the single explicit readback.
+		let token = base.create_texture(2, 1).unwrap();
+		base.upload(token, &frame).unwrap();
+		let private = RenderedFrame::Gpu(Texture::gpu(base.clone(), token, 2, 1, oak_core::PixelFormat::F32));
+		oak_core::backend::reset_gpu_transfer_counters();
+		let displayed = private.to_display().expect("fallback display");
+		assert!(displayed.2.is_some(), "the fallback hands CPU samples");
+		assert_eq!(
+			oak_core::backend::gpu_transfer_counters().1,
+			1,
+			"the fallback is exactly one explicit readback"
+		);
 	}
 
 	/// The Chroma Key effect's boolean inputs read as `Boolean(false)`
@@ -2108,17 +2214,10 @@ mod tests {
 			oak_core::PixelFormat::F32,
 		)
 		.expect("graph render");
-		let grow;
-		let gdata;
-		let goff;
-		{
-			let oak_core::texture::Texture::Cpu(ref gf) = &graph_frame else {
-				panic!("graph render produced a non-CPU frame");
-			};
-			grow = gf.linesize_bytes();
-			gdata = gf.data.clone();
-		}
-		goff = (8 * grow as usize + 8 * 16) as usize;
+		let gf = graph_frame.to_frame().expect("graph frame readback");
+		let grow = gf.linesize_bytes();
+		let gdata = gf.data;
+		let goff = (8 * grow as usize + 8 * 16) as usize;
 		let gr = f32::from_le_bytes(gdata[goff..goff + 4].try_into().unwrap());
 		assert!(
 			gr > 0.05,
@@ -2220,9 +2319,7 @@ mod tests {
 					oak_core::PixelFormat::F32,
 				)
 				.expect("graph render");
-				let oak_core::texture::Texture::Cpu(ref gf) = texture else {
-					panic!("non-CPU frame");
-				};
+				let gf = texture.to_frame().expect("graph frame readback");
 				let stride = gf.linesize_bytes();
 				let off = (8 * stride as usize + 8 * 16) as usize;
 				(

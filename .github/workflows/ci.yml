@@ -122,6 +122,10 @@ jobs:
       # and no failure, so after 1800 s it dumps every hung process's
       # thread stacks and kills the suite.
       - name: Test
+        env:
+          # lavapipe is present on this job: a missing adapter must fail
+          # the GPU acceptance tests instead of silently skipping them.
+          OAK_REQUIRE_GPU: "1"
         run: |
           sudo apt-get install -y gdb
           run_suite() {

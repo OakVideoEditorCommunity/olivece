@@ -673,12 +673,25 @@ pub fn render_frame(
 				data: frame.data.clone(),
 			})
 		}
+		Ok(TicketPayload::Video(texture @ oak_core::texture::Texture::Gpu { .. })) => {
+			// M2: the thread pipeline renders all-GPU; the CLI writes CPU
+			// pixels, so this is an explicit readback boundary.
+			let frame = texture
+				.to_frame()
+				.map_err(|e| format!("render readback: {e:?}"))?;
+			Ok(RenderedFrame {
+				width: frame.width,
+				height: frame.height,
+				format: frame.format as i32,
+				linesize: frame.linesize_bytes() as i32,
+				data: frame.data,
+			})
+		}
 		Ok(TicketPayload::ShmFrame(frame)) => {
 			let out = shm_to_rendered_frame(frame);
 			m.release_frame(frame);
 			Ok(out)
 		}
-		Ok(TicketPayload::Video(_)) => Err("render produced a non-CPU frame".to_string()),
 		_ => Err("render produced no video frame".to_string()),
 	}
 }

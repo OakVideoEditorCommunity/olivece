@@ -38,12 +38,111 @@ use std::sync::Mutex;
 static GPU_CONTEXT: Mutex<Option<(std::sync::Arc<wgpu::Device>, std::sync::Arc<wgpu::Queue>)>> =
 	Mutex::new(None);
 
-/// Register the window's wgpu device/queue for the 10-bit display path.
-/// The app's window builder calls this once per window (last one wins; the
-/// renderers all share the same device).
+/// The cached CPU-baked display LUT (M2): keyed by the display/color
+/// generation so a settings or monitor change rebuilds it, and
+/// re-installed whenever the engine context does not have it.
+static DISPLAY_LUT: Mutex<Option<(String, oak_core::lut::Lut3d)>> = Mutex::new(None);
+
+/// A key covering every input of the display chain: the displaycolor
+/// generation (policy + monitor ICC) and the project's working/output
+/// color settings.
+fn display_lut_key() -> String {
+	format!(
+		"{}|{:?}|{:?}",
+		super::displaycolor::generation(),
+		oak_core::color::pipeline_working_space(),
+		oak_core::color::pipeline_output_spec()
+	)
+}
+
+/// Build the working-space → display-device 3D LUT with the exact CPU
+/// reference implementation: the output node
+/// ([`oak_core::colormath::working_to_display_target`]) followed by the
+/// display ICC chain ([`super::displaycolor::apply_f32_rgba`]). This is
+/// what makes the GPU present path color-managed: every per-pixel step the
+/// CPU path performs runs here once per settings change, on the GPU's
+/// behalf, at full precision.
+fn build_display_lut() -> oak_core::lut::Lut3d {
+	let edge = oak_core::lut::Lut3d::DISPLAY_EDGE;
+	let lo = oak_core::lut::Lut3d::DISPLAY_LO;
+	let hi = oak_core::lut::Lut3d::DISPLAY_HI;
+	let n = (edge as usize).pow(3);
+	let mut samples = vec![0.0f32; n * 4];
+	let step = |i: usize, axis: usize| -> f32 {
+		let t = i as f32 / (edge - 1) as f32;
+		lo[axis] + (hi[axis] - lo[axis]) * t
+	};
+	for b in 0..edge as usize {
+		for g in 0..edge as usize {
+			for r in 0..edge as usize {
+				let idx = ((b * edge as usize + g) * edge as usize + r) * 4;
+				samples[idx] = step(r, 0);
+				samples[idx + 1] = step(g, 1);
+				samples[idx + 2] = step(b, 2);
+				samples[idx + 3] = 1.0;
+			}
+		}
+	}
+	oak_core::colormath::working_to_display_target(
+		&mut samples,
+		oak_core::color::pipeline_working_space(),
+		oak_core::color::pipeline_output_spec(),
+	);
+	super::displaycolor::apply_f32_rgba(&mut samples, n as i64);
+	let mut data = Vec::with_capacity(n * 3);
+	for px in samples.chunks_exact(4) {
+		data.extend_from_slice(&px[..3]);
+	}
+	oak_core::lut::Lut3d { edge, lo, hi, data }
+}
+
+/// Install the display LUT on the engine context when missing or stale.
+fn ensure_display_lut(ctx: &oak_core::backend::GpuContext) {
+	let key = display_lut_key();
+	let mut cache = DISPLAY_LUT.lock().unwrap_or_else(|e| e.into_inner());
+	let fresh = cache.as_ref().is_some_and(|(k, _)| *k == key);
+	if fresh && ctx.has_display_lut() {
+		return;
+	}
+	let lut = if fresh {
+		cache
+			.as_ref()
+			.map(|(_, l)| l.clone())
+			.unwrap_or_else(build_display_lut)
+	} else {
+		build_display_lut()
+	};
+	if ctx.set_display_lut(&lut).is_ok() {
+		*cache = Some((key, lut));
+	}
+}
+
+/// Register the window's wgpu device/queue for the 10-bit display path
+/// and adopt it into the engine (M2). The engine's render thread then
+/// renders on the very device gpui presents with, so finished frames are
+/// sampled zero-copy via [`gpui::SurfaceSource::Texture`]. The adoption
+/// is a no-op when the engine already created its own device (then
+/// [`present_gpu_frame`] reports `None` and the caller stages through the
+/// CPU as before).
 pub fn register_context(device: std::sync::Arc<wgpu::Device>, queue: std::sync::Arc<wgpu::Queue>) {
 	if let Ok(mut ctx) = GPU_CONTEXT.lock() {
-		*ctx = Some((device, queue));
+		*ctx = Some((device.clone(), queue.clone()));
+	}
+	let adopted = oak_core::backend::GpuContext::adopt(device, queue, oak_core::backend::BackendKind::Auto);
+	if !oak_core::backend::GpuContext::install_shared(Some(adopted)) {
+		// The engine context was already used for GPU work before the
+		// window opened: it cannot be replaced, so present falls back to
+		// the single staging readback. Log once — this is the only silent
+		// degradation of the M2 zero-copy path.
+		static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+		if oak_core::backend::GpuContext::shared().is_some_and(|c| !c.is_adopted())
+			&& !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+		{
+			log::error!(
+				"GPU device adoption refused: the engine created and used a device before the \
+				 window opened; preview presentation falls back to a staging readback"
+			);
+		}
 	}
 }
 
@@ -51,6 +150,31 @@ pub fn register_context(device: std::sync::Arc<wgpu::Device>, queue: std::sync::
 /// this to decide between the 10-bit surface path and the BGRA8 fallback.
 pub fn context_ready() -> bool {
 	GPU_CONTEXT.lock().map(|ctx| ctx.is_some()).unwrap_or(false)
+}
+
+/// Present an engine-rendered GPU texture (M2): apply the display LUT on
+/// the shared device and return the raw `wgpu::Texture` gpui samples.
+/// `None` when the texture is CPU-resident, the engine device is not the
+/// adopted one, or the LUT pass is unavailable — the caller then falls
+/// back to the CPU display path.
+pub fn present_gpu_frame(
+	texture: &oak_core::texture::Texture,
+) -> Option<std::sync::Arc<wgpu::Texture>> {
+	let oak_core::texture::Texture::Gpu { token, ctx, .. } = texture else {
+		return None;
+	};
+	let concrete = ctx
+		.as_any()?
+		.downcast_ref::<oak_core::backend::GpuContext>()?;
+	if !concrete.is_adopted() {
+		return None;
+	}
+	ensure_display_lut(concrete);
+	let dst = concrete.present_texture(*token).ok()?;
+	let handle = concrete.texture_handle(dst);
+	// gpui's `Arc` owns the texture now; release the engine registry entry.
+	concrete.destroy_texture(dst);
+	handle
 }
 
 /// Upload F32 RGBA samples (tightly packed, `width * height * 4` values) as
@@ -117,6 +241,18 @@ pub fn register_display_frame(image_id: usize, width: u32, height: u32, samples:
 	let Some(texture) = upload_rgba16f(width, height, samples) else {
 		return;
 	};
+	register_texture(image_id, width, height, texture);
+}
+
+/// Register an already-created `wgpu::Texture` (the M2 zero-copy present
+/// result) for `image_id`, so the viewer samples it instead of a CPU
+/// upload. The texture must live on the registered window device.
+pub fn register_texture(
+	image_id: usize,
+	width: u32,
+	height: u32,
+	texture: std::sync::Arc<wgpu::Texture>,
+) {
 	gpui_widgets::viewer::register_gpu_frame(
 		image_id,
 		texture,

@@ -195,11 +195,10 @@ fn build_project(
 }
 
 /// The raw CPU frame bytes of a rendered texture.
-fn frame_data(texture: &Texture) -> &[u8] {
-	let Texture::Cpu(frame) = texture else {
-		panic!("graph render produced a non-CPU texture");
-	};
-	&frame.data
+/// The raw frame bytes of a rendered texture (GPU textures are read back
+/// for the assertion; the playback path itself never downloads).
+fn frame_data(texture: &Texture) -> Vec<u8> {
+	texture.to_frame().expect("graph frame readback").data
 }
 
 /// Render one 64x64 F32 frame of `seq` at `time` and return its bytes.
@@ -207,7 +206,7 @@ fn render_frame(project: &Arc<Mutex<Project>>, seq: NodeId, time: Rational) -> V
 	let texture =
 		oak_render::eval::render_graph_frame(project, seq, time, (64, 64), PixelFormat::F32)
 			.expect("graph render");
-	frame_data(&texture).to_vec()
+	frame_data(&texture)
 }
 
 /// The F32 RGBA channel of a 64x64 frame at `(x, y)`.
@@ -229,8 +228,9 @@ fn channel(data: &[u8], x: usize, y: usize, c: usize) -> f32 {
 /// Skipped (with a note) when no GPU adapter exists.
 #[test]
 fn adjustment_layer_affects_lower_tracks_across_clips() {
-	if oak_core::backend::GpuContext::shared().is_none() {
-		eprintln!("skipping adjustment_layer_affects_lower_tracks_across_clips: no GPU adapter");
+	if oak_core::backend::shared_gpu_or_skip("adjustment_layer_affects_lower_tracks_across_clips")
+		.is_none()
+	{
 		return;
 	}
 	let red = clip_path("across_red");

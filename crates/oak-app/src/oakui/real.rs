@@ -708,7 +708,45 @@ fn rendered_to_owned_image(rendered: &super::renderops::RenderedFrame) -> Option
 			super::gpu::register_display_frame(image.id.0, w, h, &samples);
 			Some(Arc::new(image))
 		}
+		super::renderops::RenderedFrame::Gpu(texture) => {
+			// Long-lived caches (full-res fill, thumbnails) must own pixels:
+			// the explicit CPU readback boundary, then the same display
+			// chain as the other variants.
+			let frame = texture.to_frame().ok()?;
+			let (w, h, mut samples) = samples_from_cpu_frame(&frame)?;
+			apply_output_node_f32(&mut samples);
+			super::displaycolor::apply_f32_rgba(&mut samples, (w * h) as i64);
+			let image = f32_rgba_to_bgra_image(w, h, &samples);
+			super::gpu::register_display_frame(image.id.0, w, h, &samples);
+			Some(Arc::new(image))
+		}
 	}
+}
+
+/// Decode a tightly packed/linesize-padded F32 RGBA engine frame into
+/// tightly packed samples (the GPU readback path's pixel decode).
+fn samples_from_cpu_frame(frame: &oak_core::texture::Frame) -> Option<(u32, u32, Vec<f32>)> {
+	if frame.width <= 0 || frame.height <= 0 {
+		return None;
+	}
+	let (w, h) = (frame.width as usize, frame.height as usize);
+	let stride = frame.linesize_bytes();
+	if frame.data.len() < stride * h {
+		return None;
+	}
+	let mut samples = vec![0.0f32; w * h * 4];
+	for y in 0..h {
+		for (i, px) in frame.data[y * stride..y * stride + w * 16]
+			.chunks_exact(16)
+			.enumerate()
+		{
+			for c in 0..4 {
+				samples[(y * w + i) * 4 + c] =
+					f32::from_ne_bytes([px[c * 4], px[c * 4 + 1], px[c * 4 + 2], px[c * 4 + 3]]);
+			}
+		}
+	}
+	Some((w as u32, h as u32, samples))
 }
 
 /// The app-side output node for F32 frames (working colorspace → the
@@ -2530,6 +2568,15 @@ impl RealEngine {
 			}
 			super::renderops::RenderedFrame::CpuF32 { .. } => {
 				let (w, h, samples) = read_f32_frame(&rendered)?;
+				let bytes: Vec<u8> = samples
+					.iter()
+					.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+					.collect();
+				(w, h, bytes)
+			}
+			super::renderops::RenderedFrame::Gpu(texture) => {
+				let frame = texture.to_frame().ok()?;
+				let (w, h, samples) = samples_from_cpu_frame(&frame)?;
 				let bytes: Vec<u8> = samples
 					.iter()
 					.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)

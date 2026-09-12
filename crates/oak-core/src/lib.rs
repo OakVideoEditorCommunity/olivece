@@ -73,6 +73,7 @@ pub mod color;
 pub mod texture;
 pub mod frame;
 pub mod backend;
+pub mod lut;
 
 pub use handle::CHandle;
 pub use rational::Rational;

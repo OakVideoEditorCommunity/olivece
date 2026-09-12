@@ -1280,24 +1280,39 @@ fn render_f32_into(
 				match viewer_id {
 					Some(viewer_id) => {
 						let rendered = eval::render_graph_frame(project, viewer_id, time, (w, h), PixelFormat::F32);
-						match &rendered {
-							Ok(oak_core::texture::Texture::Cpu(frame)) => {
-								let src_stride = frame.linesize_bytes() as usize;
-								let row_bytes = (w as usize) * 16;
-								if frame.data.len() < src_stride * (h as usize)
-									|| dst.len() < row_bytes * (h as usize)
-								{
-									return Err("graph frame geometry mismatch".to_string());
+						// M2: the graph renders all-GPU in-process; the worker's
+						// wire format is a CPU shm slot, so this is the explicit
+						// readback boundary of the process backend.
+						let frame = match rendered {
+							Ok(oak_core::texture::Texture::Cpu(frame)) => Some(frame),
+							Ok(texture @ oak_core::texture::Texture::Gpu { .. }) => {
+								match texture.to_frame() {
+									Ok(frame) => Some(frame),
+									Err(e) => {
+										warn_graph_fallback(spec.viewer_node, &e.to_string());
+										None
+									}
 								}
-								for y in 0..h as usize {
-									dst[y * row_bytes..(y + 1) * row_bytes].copy_from_slice(
-										&frame.data[y * src_stride..y * src_stride + row_bytes],
-									);
-								}
-								return Ok(());
 							}
-							Ok(_) => return Err("graph render produced a GPU texture".to_string()),
-							Err(e) => warn_graph_fallback(spec.viewer_node, &e.to_string()),
+							Err(e) => {
+								warn_graph_fallback(spec.viewer_node, &e.to_string());
+								None
+							}
+						};
+						if let Some(frame) = frame {
+							let src_stride = frame.linesize_bytes() as usize;
+							let row_bytes = (w as usize) * 16;
+							if frame.data.len() < src_stride * (h as usize)
+								|| dst.len() < row_bytes * (h as usize)
+							{
+								return Err("graph frame geometry mismatch".to_string());
+							}
+							for y in 0..h as usize {
+								dst[y * row_bytes..(y + 1) * row_bytes].copy_from_slice(
+									&frame.data[y * src_stride..y * src_stride + row_bytes],
+								);
+							}
+							return Ok(());
 						}
 					}
 					None => warn_graph_fallback(spec.viewer_node, "viewer node not in graph"),
@@ -1320,8 +1335,13 @@ fn render_f32_into(
 			PixelFormat::F32,
 		)
 		.map_err(|e| format!("footage decode: {e}"))?;
-		let oak_core::texture::Texture::Cpu(frame) = &decoded else {
-			return Err("decode produced a GPU texture".to_string());
+		// M2: decode stays CPU for now (M5 makes it GPU); an imported GPU
+		// texture would still have to cross into the shm slot here.
+		let frame = match &decoded {
+			oak_core::texture::Texture::Cpu(frame) => frame.clone(),
+			gpu @ oak_core::texture::Texture::Gpu { .. } => gpu
+				.to_frame()
+				.map_err(|e| format!("decode readback: {e}"))?,
 		};
 		let src_stride = frame.linesize_bytes() as usize;
 		let row_bytes = (w as usize) * 16;

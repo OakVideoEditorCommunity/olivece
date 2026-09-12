@@ -10,7 +10,7 @@ use oak_node::nodes::textbackend::{
 
 #[allow(dead_code)]
 fn texture_value(t: Texture) -> NodeValue { NodeValue::Texture(oak_node::handle::make_owned(t)) }
-fn gpu() -> bool { oak_core::backend::GpuContext::shared().is_some() }
+fn gpu() -> bool { oak_core::backend::shared_gpu_or_skip("a text outline/glow GPU test").is_some() }
 #[allow(dead_code)]
 fn filled_frame(size: (i32, i32), rgba: [f32; 4]) -> Texture {
     let mut f = oak_render::eval::generate_frame(Rational::new(0, 1), size, PixelFormat::F32).unwrap();

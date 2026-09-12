@@ -886,7 +886,7 @@ pub enum YuvMatrix {
 
 impl YuvMatrix {
 	/// The (Kr, Kb) luma-coefficient pair of this matrix.
-	fn kr_kb(self) -> (f32, f32) {
+	pub(crate) fn kr_kb(self) -> (f32, f32) {
 		match self {
 			YuvMatrix::Bt601 => (0.299, 0.114),
 			YuvMatrix::Bt709 => (0.2126, 0.0722),

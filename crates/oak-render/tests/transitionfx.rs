@@ -27,7 +27,7 @@ use oak_node::value::{NodeValue, NodeValueRow, NodeValueTable, ValueType};
 const TRANSITIONFX: &str = "org.olivevideoeditor.Olive.transitionfx";
 
 fn texture_value(t: Texture) -> NodeValue { NodeValue::Texture(oak_node::handle::make_owned(t)) }
-fn gpu() -> bool { oak_core::backend::GpuContext::shared().is_some() }
+fn gpu() -> bool { oak_core::backend::shared_gpu_or_skip("a transition effect test").is_some() }
 fn filled_frame(size: (i32, i32), rgba: [f32; 4]) -> Texture {
 	let mut f = oak_render::eval::generate_frame(Rational::new(0, 1), size, PixelFormat::F32).unwrap();
 	for px in f.data.chunks_exact_mut(16) { for (c, v) in px.chunks_exact_mut(4).zip(rgba) { c.copy_from_slice(&v.to_le_bytes()); } }

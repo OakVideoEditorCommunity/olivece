@@ -17,13 +17,13 @@ oak-codec = { path = "../oak-codec" }
 oak-node = { path = "../oak-node" }
 # wgpu: portable GPU backend (Metal/Vulkan/GL/DX12 in one safe API) — the
 # direct replacement for the C++ liboakgl2/liboakvulkan backend plugins.
-# Version 25 (2025 stable line); the only GPU dependency.
-wgpu = "25"
+# Version 29 matches gpui_wgpu's device (M2 zero-copy present).
+wgpu = "29"
 # naga: GLSL → WGSL translation for the node shaders (the embedded GLSL
 # stays the single source of truth, matching the C++ Vulkan backend's
-# mechanical-conversion approach). Pinned to wgpu 25's naga generation;
+# mechanical-conversion approach). Pinned to wgpu 29's naga generation;
 # only the GLSL frontend and WGSL writer are compiled.
-naga = { version = "25", default-features = false, features = ["glsl-in", "wgsl-out"] }
+naga = { version = "29", default-features = false, features = ["glsl-in", "wgsl-out"] }
 # ocio-rs: safe Rust bindings for OpenColorIO v2.5.2 — the ColorProcessor
 # implementation; OCIO is never rewritten. The `bundled` feature compiles
 # the vendored OpenColorIO C++ sources (cmake/ninja required); without it

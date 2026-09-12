@@ -298,11 +298,12 @@ impl RenderEvalHooks {
 
     /// C++ process_color_transform: apply the job's OCIO processor to the
     /// input texture. A CPU frame converts in place (the real OCIO
-    /// `convert_frame`); a GPU input passes through with a one-time log —
-    /// the color-managed GPU blit is deferred at the backend
-    /// (`GpuContext::blit` rejects a processor). An invalid processor
-    /// passes the input through unchanged (C++ creates processors
-    /// non-fatally); a non-texture input is `Error::Invalid`.
+    /// `convert_frame`); a GPU input gets the same transform baked into a
+    /// 3D LUT and applied by the GPU LUT pass (M2: color management is
+    /// never skipped), with a readback+convert+re-upload fallback for
+    /// exotic processors. An invalid processor passes the input through
+    /// unchanged (C++ creates processors non-fatally); a non-texture input
+    /// is `Error::Invalid`.
     fn process_color_transform_job(
         &mut self,
         payload: &ColorTransformJobPayload,
@@ -328,19 +329,54 @@ impl RenderEvalHooks {
             payload.color_processor.convert_frame(frame)?;
             return Ok(tex);
         }
-        // GPU leg: deferred at the backend — pass through, logged once
-        // per processor.
-        let key = format!(
-            "colortransform:gpu:{}",
-            payload.color_processor.cache_id()
-        );
-        if unsupported_warned().insert(key) {
-            eprintln!(
-                "color transform on a GPU texture passes through unchanged: \
-                 color-managed GPU blit deferred at the backend"
-            );
+        // GPU leg: bake the processor into a 3D LUT and run the GPU color
+        // pass (no readback). Fall back to an explicit readback + CPU
+        // conversion + re-upload when the processor cannot be baked or the
+        // texture's context is not a real GPU context.
+        let (token, ctx, width, height) = match &tex {
+            Texture::Gpu {
+                token,
+                ctx,
+                width,
+                height,
+                ..
+            } => (*token, ctx.clone(), *width, *height),
+            Texture::Cpu(_) => unreachable!("handled above"),
+        };
+        let concrete = ctx
+            .as_any()
+            .and_then(|a| a.downcast_ref::<oak_core::backend::GpuContext>());
+        if let Some(concrete) = concrete {
+            if let Some(lut) = color_transform_lut(&payload.color_processor) {
+                if let Ok(dst) = concrete.apply_color_lut(
+                    token,
+                    &payload.color_processor.cache_id(),
+                    &lut,
+                ) {
+                    return Ok(Texture::gpu(
+                        ctx,
+                        dst,
+                        width,
+                        height,
+                        PixelFormat::F32,
+                    ));
+                }
+            }
+            let mut frame = tex.to_frame()?;
+            payload.color_processor.convert_frame(&mut frame)?;
+            let dst = concrete.create_texture(frame.width, frame.height)?;
+            concrete.upload(dst, &frame)?;
+            return Ok(Texture::gpu(
+                ctx,
+                dst,
+                frame.width,
+                frame.height,
+                PixelFormat::F32,
+            ));
         }
-        Ok(tex)
+        let mut frame = tex.to_frame()?;
+        payload.color_processor.convert_frame(&mut frame)?;
+        Ok(Texture::wrap_frame(frame))
     }
 
     /// C++ process_frame_generation: fill the destination with a generated
@@ -929,14 +965,13 @@ impl RenderEvalHooks {
             ctx.destroy_texture(*t);
         }
         match result {
-            Ok(()) => Some(Texture::Gpu {
-                token: dst,
-                backend: ctx.kind(),
-                width: size.0.max(1),
-                height: size.1.max(1),
-                format: PixelFormat::F32,
-                ctx: ctx.clone(),
-            }),
+            Ok(()) => Some(Texture::gpu(
+                ctx.clone(),
+                dst,
+                size.0.max(1),
+                size.1.max(1),
+                PixelFormat::F32,
+            )),
             Err(err) => {
                 ctx.destroy_texture(dst);
                 warn(&format!("run failed: {err:#}"));
@@ -1021,6 +1056,18 @@ pub fn render_produced_frame(
         return render_footage_frame(filename, *stream_index, time, (w, h), format);
     }
 
+    // Generated (transparent) frame: prefer a GPU clear so the pipeline
+    // stays GPU end to end (M2); fall back to the CPU producer.
+    if format == PixelFormat::F32 {
+        if let Some(ctx) = oak_core::backend::GpuContext::shared() {
+            if let Ok(token) = ctx.create_texture(w, h) {
+                if ctx.clear_texture(token).is_ok() {
+                    return Ok(Texture::gpu(ctx, token, w, h, PixelFormat::F32));
+                }
+                ctx.destroy_texture(token);
+            }
+        }
+    }
     let frame = generate_frame(time, (w, h), format)?;
     Ok(Texture::wrap_frame(frame))
 }
@@ -1423,46 +1470,80 @@ fn main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// GPU composite of `frames` into one `(w, h)` frame: bottom (last) to
+/// GPU composite of `frames` into one `(w, h)` texture: bottom (last) to
 /// top (first), alpha-over into a ping-pong accumulator pair. Frames that
 /// do not match `(w, h)` are skipped (the caller scales at decode time;
 /// mismatches are defensive).
+///
+/// GPU→GPU (M2): textures already on the context are used by token; CPU
+/// frames are uploaded into scratch textures (counted, and only when the
+/// caller has a CPU frame in the stack). Nothing is read back — the
+/// result stays on the GPU.
 fn composite_tracks_gpu(
-    ctx: &oak_core::backend::GpuContext,
-    frames: &[Frame],
-    size: (i32, i32),
-) -> Result<Frame> {
-    let (w, h) = size;
-    if w <= 0 || h <= 0 {
-        return Err(Error::Invalid);
-    }
-    let program = ctx.compile_shader_pass("oak/builtin/alpha-over", COMP_WGSL, 2, false, false)?;
-    let mut acc = ctx.create_texture(w, h)?;
-    let mut out = ctx.create_texture(w, h)?;
-    let src = ctx.create_texture(w, h)?;
-
-    let result = (|| {
-        // The accumulator starts fully transparent.
-        let clear = generate_frame(Rational::new(0, 1), (w, h), PixelFormat::F32)?;
-        ctx.upload(acc, &clear)?;
-        for frame in frames.iter().rev().filter(|f| f.width == w && f.height == h) {
-            ctx.upload(src, frame)?;
-            ctx.run_shader_pass(&program, &[], &[acc, src], out)?;
-            std::mem::swap(&mut acc, &mut out);
-        }
-        ctx.download(acc)
-    })();
-
-    ctx.destroy_texture(acc);
-    ctx.destroy_texture(out);
-    ctx.destroy_texture(src);
-    result
+	ctx: &std::sync::Arc<oak_core::backend::GpuContext>,
+	frames: &[Texture],
+	size: (i32, i32),
+) -> Result<Texture> {
+	let (w, h) = size;
+	if w <= 0 || h <= 0 {
+		return Err(Error::Invalid);
+	}
+	let program = ctx.compile_shader_pass("oak/builtin/alpha-over", COMP_WGSL, 2, false, false)?;
+	let acc = ctx.create_texture(w, h)?;
+	ctx.clear_texture(acc)?;
+	let mut scratch: Vec<u64> = Vec::new();
+	let mut current = acc;
+	let mut owned_current = true;
+	let result = (|| -> Result<u64> {
+		for frame in frames.iter().rev().filter(|f| f.size() == (w, h)) {
+			// Prefer the texture's own context when it is this one; a GPU
+			// texture from another context can only be read back.
+			let src_token = match frame {
+				Texture::Gpu { token, .. } if ctx.has_texture(*token) => *token,
+				Texture::Gpu { .. } => {
+					let cpu = frame.to_frame()?;
+					let t = ctx.create_texture(w, h)?;
+					ctx.upload(t, &cpu)?;
+					scratch.push(t);
+					t
+				}
+				Texture::Cpu(f) => {
+					let t = ctx.create_texture(w, h)?;
+					ctx.upload(t, f)?;
+					scratch.push(t);
+					t
+				}
+			};
+			let out = ctx.create_texture(w, h)?;
+			ctx.run_shader_pass(&program, &[], &[current, src_token], out)?;
+			if owned_current {
+				ctx.destroy_texture(current);
+			}
+			current = out;
+			owned_current = true;
+		}
+		Ok(current)
+	})();
+	for t in scratch {
+		ctx.destroy_texture(t);
+	}
+	match result {
+		Ok(token) => Ok(Texture::gpu(
+			ctx.clone(),
+			token,
+			w,
+			h,
+			PixelFormat::F32,
+		)),
+		Err(err) => {
+			if owned_current {
+				ctx.destroy_texture(current);
+			}
+			Err(err)
+		}
+	}
 }
 
-/// CPU composite of `frames` into one `size` frame — the fallback when no
-/// GPU device is available (or the pass fails): bottom (last) to top
-/// (first) via [`composite_over`].
-///
 /// GPU failures are remembered: a device whose wgpu pipeline fails
 /// validation (e.g. an adapter that advertises ComputePipeline yet lacks
 /// the required features) fails EVERY frame otherwise — each attempt
@@ -1472,45 +1553,58 @@ fn composite_tracks_gpu(
 static GPU_COMPOSITE_FAILED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-fn composite_tracks(frames: Vec<Frame>, size: (i32, i32)) -> Frame {
-    let (w, h) = size;
-    if w <= 0 || h <= 0 {
-        return Frame::dummy();
-    }
-    if !GPU_COMPOSITE_FAILED.load(std::sync::atomic::Ordering::Relaxed) {
-        // Single-frame composites (the common preview case) stay on the
-        // CPU path: the GPU route costs an upload+download round trip per
-        // frame for no benefit until two or more tracks overlap.
-        if frames.len() > 1 {
-            if let Some(ctx) = oak_core::backend::GpuContext::shared() {
-                match composite_tracks_gpu(&ctx, &frames, (w, h)) {
-                    Ok(frame) => return frame,
-                    Err(err) => {
-                        eprintln!(
-                            "GPU track composite failed, using CPU (and staying there): {err:#}"
-                        );
-                        GPU_COMPOSITE_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
-            }
-        }
-    }
-    let Ok(mut acc) = generate_frame(Rational::new(0, 1), (w, h), PixelFormat::F32) else {
-        return Frame::dummy();
-    };
-    let acc_stride = acc.linesize_bytes() as i32;
-    for frame in frames.iter().rev().filter(|f| f.width == w && f.height == h) {
-        composite_over(
-            &mut acc.data,
-            acc_stride,
-            w,
-            h,
-            &frame.data,
-            frame.linesize_bytes() as i32,
-            1.0,
-        );
-    }
-    acc
+/// Composite of `frames` into one `size` texture. The GPU path is
+/// preferred whenever a context is available (M2: the graph stays on the
+/// GPU end to end); the CPU path is the no-adapter fallback and the
+/// explicit (counted) readback for GPU frames that must go through a CPU
+/// consumer.
+///
+/// Compositing always runs — even a single frame passes through the
+/// alpha-over over a transparent accumulator, which is the graph's
+/// premultiply step (an adjustment sweep's 0.5-opacity result must become
+/// 0.25 after its final composite).
+fn composite_tracks(frames: Vec<Texture>, size: (i32, i32)) -> Texture {
+	let (w, h) = size;
+	if w <= 0 || h <= 0 {
+		return Texture::dummy();
+	}
+	if !GPU_COMPOSITE_FAILED.load(std::sync::atomic::Ordering::Relaxed) {
+		if let Some(ctx) = oak_core::backend::GpuContext::shared() {
+			match composite_tracks_gpu(&ctx, &frames, (w, h)) {
+				Ok(texture) => return texture,
+				Err(err) => {
+					eprintln!(
+						"GPU track composite failed, using CPU (and staying there): {err:#}"
+					);
+					GPU_COMPOSITE_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+				}
+			}
+		}
+	}
+	// CPU fallback: read every GPU frame back (the explicit boundary) and
+	// composite the CPU stack.
+	let Ok(mut acc) = generate_frame(Rational::new(0, 1), (w, h), PixelFormat::F32) else {
+		return Texture::dummy();
+	};
+	let acc_stride = acc.linesize_bytes() as i32;
+	for texture in frames.iter() {
+		let Ok(frame) = texture.to_frame() else {
+			continue;
+		};
+		if frame.width != w || frame.height != h {
+			continue;
+		}
+		composite_over(
+			&mut acc.data,
+			acc_stride,
+			w,
+			h,
+			&frame.data,
+			frame.linesize_bytes() as i32,
+			1.0,
+		);
+	}
+	Texture::wrap_frame(acc)
 }
 
 /// One video track's contribution to [`render_graph_frame`], resolved
@@ -1558,39 +1652,33 @@ fn layer_progress(in_: Rational, out: Rational, time: Rational) -> f64 {
     }
 }
 
-/// Evaluate one block at `time` and read its texture back to a CPU
-/// frame. Every non-texture outcome — the evaluator produced no texture
-/// channel, the handle is null, or the read-back failed — is `Ok(None)`
-/// so a caller can fall back instead of failing the whole frame.
+/// Evaluate one block at `time` and return its texture (GPU when the
+/// graph produced one). Every non-texture outcome — the evaluator
+/// produced no texture channel or the handle is null — is `Ok(None)` so a
+/// caller can fall back instead of failing the whole frame.
 fn evaluate_block_frame(
-    graph: &oak_node::graph::Graph,
-    traverser: &mut oak_node::traverser::Traverser,
-    hooks: &mut RenderEvalHooks,
-    block: oak_node::id::NodeId,
-    time: Rational,
-) -> Result<Option<Frame>> {
-    let request = oak_node::traverser::EvalRequest::new(block, time);
-    let table = traverser.evaluate(graph, &request, hooks).map_err(|e| {
-        Error::Failed(format!(
-            "graph evaluation of block {block:?} failed: {e:?}"
-        ))
-    })?;
-    let Some(NodeValue::Texture(handle)) = table.get(oak_node::value::ValueType::Texture) else {
-        return Ok(None);
-    };
-    if handle.ctx.is_null() {
-        return Ok(None);
-    }
-    let Some(texture) = (unsafe { oak_node::handle::get_checked::<Texture>(handle) }).cloned() else {
-        return Ok(None);
-    };
-    match texture.to_frame() {
-        Ok(frame) => Ok(Some(frame)),
-        Err(err) => {
-            eprintln!("graph sequence: texture read-back failed: {err:#}");
-            Ok(None)
-        }
-    }
+	graph: &oak_node::graph::Graph,
+	traverser: &mut oak_node::traverser::Traverser,
+	hooks: &mut RenderEvalHooks,
+	block: oak_node::id::NodeId,
+	time: Rational,
+) -> Result<Option<Texture>> {
+	let request = oak_node::traverser::EvalRequest::new(block, time);
+	let table = traverser.evaluate(graph, &request, hooks).map_err(|e| {
+		Error::Failed(format!(
+			"graph evaluation of block {block:?} failed: {e:?}"
+		))
+	})?;
+	let Some(NodeValue::Texture(handle)) = table.get(oak_node::value::ValueType::Texture) else {
+		return Ok(None);
+	};
+	if handle.ctx.is_null() {
+		return Ok(None);
+	}
+	let Some(texture) = (unsafe { oak_node::handle::get_checked::<Texture>(handle) }).cloned() else {
+		return Ok(None);
+	};
+	Ok(Some(texture))
 }
 
 /// Blend the two sides of a transition block at `time` with the block's
@@ -1609,7 +1697,7 @@ fn blend_transition(
     time: Rational,
     progress: f64,
     shader: &str,
-) -> Result<Option<Frame>> {
+) -> Result<Option<Texture>> {
     use oak_node::nodes::transitions;
     use oak_node::value::NodeValueRow;
 
@@ -1627,21 +1715,36 @@ fn blend_transition(
 
     // A single-sided transition blends against transparent black (a head
     // fade-in from nothing, a tail fade-out to nothing) — the same
-    // shaders, with one side generated empty.
+    // shaders, with one side generated empty. GPU-resident sides blend
+    // against a GPU-cleared texture; the CPU fallback generates a frame.
     let size = from
         .as_ref()
         .or(to.as_ref())
-        .map(|f| (f.width, f.height))
+        .map(|f| f.size())
         .or(hooks.frame_size)
         .unwrap_or((1, 1));
-    let black = |size: (i32, i32)| generate_frame(time, size, PixelFormat::F32).ok();
+    let black = |size: (i32, i32)| -> Option<Texture> {
+        if let Some(ctx) = oak_core::backend::GpuContext::shared() {
+            let token = ctx.create_texture(size.0, size.1).ok()?;
+            ctx.clear_texture(token).ok()?;
+            return Some(Texture::gpu(
+                ctx,
+                token,
+                size.0,
+                size.1,
+                PixelFormat::F32,
+            ));
+        }
+        generate_frame(time, size, PixelFormat::F32)
+            .ok()
+            .map(Texture::wrap_frame)
+    };
     let from = from.or_else(|| black(size));
     let to = to.or_else(|| black(size));
 
-    // Both sides present: blend them. The side frames are boxed as CPU
-    // textures (the shader-job path uploads those into scratch textures
-    // for the pass and releases them afterwards), so the originals stay
-    // around for the fallback below.
+    // Both sides present: blend them. GPU sides stay GPU (the shader-job
+    // path consumes their tokens directly); CPU sides upload only inside
+    // the shader job. The originals stay around for the fallback below.
     let blended = match (from.as_ref(), to.as_ref()) {
         (Some(from), Some(to)) => {
             let payload = ShaderJobPayload {
@@ -1654,11 +1757,11 @@ fn blend_transition(
                 params: NodeValueRow::from([
                     (
                         transitions::TEXTURE_INPUT.to_string(),
-                        texture_value(Texture::wrap_frame(from.clone())),
+                        texture_value(from.clone()),
                     ),
                     (
                         transitions::BLEND_INPUT.to_string(),
-                        texture_value(Texture::wrap_frame(to.clone())),
+                        texture_value(to.clone()),
                     ),
                     (
                         transitions::PROGRESS_INPUT.to_string(),
@@ -1667,16 +1770,7 @@ fn blend_transition(
                 ]),
                 iterative_input: String::new(),
             };
-            match hooks.process_shader_job(&payload) {
-                Some(texture) => match texture.to_frame() {
-                    Ok(frame) => Some(frame),
-                    Err(err) => {
-                        eprintln!("graph sequence: transition read-back failed: {err:#}");
-                        None
-                    }
-                },
-                None => None,
-            }
+            hooks.process_shader_job(&payload)
         }
         _ => None,
     };
@@ -1726,18 +1820,19 @@ fn adjustment_chain_head(
 /// sweep.
 ///
 /// `Ok(None)` means the boundary changes nothing (no effect chain, or the
-/// chain produced no readable texture); `Ok(Some(frame))` is the chain's
-/// output, which replaces the lower layers.
+/// chain produced no texture); `Ok(Some(texture))` is the chain's output,
+/// which replaces the lower layers. The sweep stays on the GPU when the
+/// collected layers are GPU textures (M2).
 fn flush_adjustment_layer(
     graph: &mut oak_node::graph::Graph,
     traverser: &mut oak_node::traverser::Traverser,
     hooks: &mut RenderEvalHooks,
     block: oak_node::id::NodeId,
-    below: &[Frame],
+    below: &[Texture],
     size: (i32, i32),
     time: Rational,
     progress: f64,
-) -> Result<Option<Frame>> {
+) -> Result<Option<Texture>> {
     let Some((head, head_input)) = adjustment_chain_head(graph, block) else {
         return Ok(None);
     };
@@ -1748,7 +1843,7 @@ fn flush_adjustment_layer(
         entry.core.set_standard_value(
             oak_node::nodes::compositesource::TEXTURE_INPUT,
             -1,
-            texture_value(Texture::wrap_frame(below)),
+            texture_value(below),
         );
     }
     if let Err(err) = graph.connect(source, head, &head_input, -1) {
@@ -1777,13 +1872,7 @@ fn flush_adjustment_layer(
     else {
         return Ok(None);
     };
-    match texture.to_frame() {
-        Ok(frame) => Ok(Some(frame)),
-        Err(err) => {
-            eprintln!("graph sequence: adjustment layer read-back failed: {err:#}");
-            Ok(None)
-        }
-    }
+    Ok(Some(texture))
 }
 
 /// Render one frame of `viewer` (a sequence) at `time`: evaluate every
@@ -2000,7 +2089,7 @@ pub fn render_graph_frame(
     let mut perf_collect = perf.then(std::time::Instant::now);
     let mut perf_collect_ms = 0.0f64;
     // Topmost frame first (see the track walk above).
-    let mut frames: Vec<Frame> = Vec::new();
+    let mut frames: Vec<Texture> = Vec::new();
     let mut perf_clip_hist: Vec<(&'static str, oak_node::id::NodeId, f64)> = Vec::new();
     for step in steps {
         match step {
@@ -2041,12 +2130,7 @@ pub fn render_graph_frame(
                     else {
                         continue;
                     };
-                    match texture.to_frame() {
-                        Ok(frame) => frames.insert(0, frame),
-                        Err(err) => {
-                            eprintln!("graph sequence: texture read-back failed: {err:#}")
-                        }
-                    }
+                    frames.insert(0, texture);
                 }
             }
             TrackRenderStep::Transition {
@@ -2118,7 +2202,11 @@ pub fn render_graph_frame(
 
     let composite_started = perf.then(std::time::Instant::now);
     let mut frame = composite_tracks(frames, size);
-    frame.timestamp = time;
+    if let Texture::Cpu(cpu) = &mut frame {
+        // The GPU path carries no timestamp (there is nowhere to put it);
+        // the 10-bit present path uses the ticket's time, not this field.
+        cpu.timestamp = time;
+    }
     if perf {
         let composite_ms = composite_started
             .map(|t| t.elapsed().as_secs_f64() * 1000.0)
@@ -2131,7 +2219,7 @@ pub fn render_graph_frame(
             perf_collect_ms + composite_ms
         );
     }
-    Ok(Texture::wrap_frame(frame))
+    Ok(frame)
 }
 
 /// Render the audio montage over `params.range` (M12 P1): every clip
@@ -2592,6 +2680,67 @@ fn unsupported_warned() -> std::sync::MutexGuard<'static, std::collections::Hash
         .unwrap_or_else(|e| e.into_inner())
 }
 
+/// Build (and cache) the 3D LUT for an OCIO color processor (M2): the
+/// CPU reference (`convert_f32_rgba`) fills the grid, and the per-pixel
+/// transform then runs on the GPU via `GpuContext::apply_color_lut` —
+/// color management is never skipped on a GPU texture. Cached by the
+/// processor's OCIO cache id.
+fn color_transform_lut(
+    processor: &oak_core::color::ColorProcessor,
+) -> Option<std::sync::Arc<oak_core::lut::Lut3d>> {
+    type Cache = std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<oak_core::lut::Lut3d>>,
+    >;
+    static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    let key = processor.cache_id();
+    let mut cache = CACHE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(lut) = cache.get(&key) {
+        return Some(lut.clone());
+    }
+    let lut = build_color_transform_lut(processor)?;
+    if cache.len() >= 16 {
+        cache.clear();
+    }
+    cache.insert(key, lut.clone());
+    Some(lut)
+}
+
+/// Bake a processor into a 3D LUT over the display domain (scene-linear
+/// working values; the same range the presentation LUT covers).
+fn build_color_transform_lut(
+    processor: &oak_core::color::ColorProcessor,
+) -> Option<std::sync::Arc<oak_core::lut::Lut3d>> {
+    use oak_core::lut::Lut3d;
+    let edge = Lut3d::DISPLAY_EDGE;
+    let (lo, hi) = (Lut3d::DISPLAY_LO, Lut3d::DISPLAY_HI);
+    let n = (edge as usize).pow(3);
+    let mut samples = vec![0.0f32; n * 4];
+    let step = |i: usize, axis: usize| -> f32 {
+        let t = i as f32 / (edge - 1) as f32;
+        lo[axis] + (hi[axis] - lo[axis]) * t
+    };
+    for b in 0..edge as usize {
+        for g in 0..edge as usize {
+            for r in 0..edge as usize {
+                let idx = ((b * edge as usize + g) * edge as usize + r) * 4;
+                samples[idx] = step(r, 0);
+                samples[idx + 1] = step(g, 1);
+                samples[idx + 2] = step(b, 2);
+                samples[idx + 3] = 1.0;
+            }
+        }
+    }
+    processor.convert_f32_rgba(&mut samples, n as i64).ok()?;
+    let mut data = Vec::with_capacity(n * 3);
+    for px in samples.chunks_exact(4) {
+        data.extend_from_slice(&px[..3]);
+    }
+    Some(std::sync::Arc::new(Lut3d { edge, lo, hi, data }))
+}
+
 /// Log an unsupported-effect passthrough once per type id.
 fn warn_unsupported_once(type_id: &str, reason: &str) {
     if unsupported_warned().insert(type_id.to_string()) {
@@ -2945,14 +3094,13 @@ mod tests {
         assert_eq!(f.timestamp, Rational::new(3, 1));
         assert!(f.data.iter().all(|&b| b == 0));
         // GPU destination rejected.
-        let mut gpu = Texture::Gpu {
-            token: 0,
-            backend: oak_core::backend::BackendKind::Cpu,
-            width: 8,
-            height: 8,
-            format: PixelFormat::F32,
-            ctx: Arc::new(UnusedCtx),
-        };
+        let mut gpu = Texture::gpu(
+            Arc::new(UnusedCtx),
+            0,
+            8,
+            8,
+            PixelFormat::F32,
+        );
         assert!(hooks
             .process_frame_generation(&mut gpu, Rational::new(1, 1))
             .is_err());
@@ -2973,9 +3121,9 @@ mod tests {
     }
 
     fn first_pixel(texture: &Texture) -> [f32; 4] {
-        let Texture::Cpu(frame) = texture else {
-            unreachable!()
-        };
+        // GPU textures are read back for the assertion (tests may take
+        // the counted boundary; the playback path never does).
+        let frame = texture.to_frame().expect("texture readback");
         let mut out = [0f32; 4];
         for i in 0..4 {
             out[i] = f32::from_le_bytes(frame.data[i * 4..i * 4 + 4].try_into().unwrap());
@@ -3445,6 +3593,81 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// M2: a ColorTransformJob on a GPU texture bakes the processor into
+    /// a 3D LUT and runs the GPU color pass — the transform is applied
+    /// (not passed through) and the result stays GPU-resident.
+    #[test]
+    fn resolve_color_transform_job_applies_lut_on_gpu() {
+        if oak_core::color::set_up_default_config().is_err() {
+            eprintln!("bundled OCIO missing; skipping");
+            return;
+        }
+        let Some(ctx) = oak_core::backend::shared_gpu_or_skip("an eval GPU test") else {
+            return;
+        };
+        // 1D LUT doubling the red channel (linear ramp 0→0, 1→2).
+        let path = std::env::temp_dir()
+            .join(format!("oakrender_lut_double_gpu_{}.cube", std::process::id()));
+        std::fs::write(&path, "LUT_1D_SIZE 2\n0.0 0.0 0.0\n2.0 1.0 1.0\n").unwrap();
+        let Some(processor) = oak_core::color::ColorProcessor::create_lut(
+            path.to_str().unwrap(),
+            oak_core::color::Direction::Normal,
+        )
+        .filter(|p| p.is_valid()) else {
+            eprintln!("LUT processor unavailable; skipping");
+            let _ = std::fs::remove_file(&path);
+            return;
+        };
+
+        let mut frame = generate_frame(Rational::new(0, 1), (2, 2), PixelFormat::F32).unwrap();
+        for px in frame.data.chunks_exact_mut(16) {
+            for (c, v) in px.chunks_exact_mut(4).zip([0.25f32, 0.25, 0.25, 1.0]) {
+                c.copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        let token = ctx.create_texture(2, 2).unwrap();
+        ctx.upload(token, &frame).unwrap();
+        let input = Texture::gpu(ctx.clone(), token, 2, 2, PixelFormat::F32);
+        let payload = ColorTransformJobPayload {
+            color_processor: std::sync::Arc::new(processor),
+            input: NodeValue::Texture(oak_node::handle::make_owned(input)),
+            time: Rational::new(0, 1),
+        };
+        let mut table = NodeValueTable::default();
+        table.push(
+            oak_node::value::ValueType::Texture,
+            NodeValue::Texture(oak_node::handle::make_owned(Job::ColorTransformJob(payload))),
+            None,
+        );
+
+        use oak_node::traverser::RenderHooks;
+        let mut hooks = RenderEvalHooks::new();
+        hooks.resolve(
+            oak_node::id::NodeId::INVALID,
+            &NodeValueRow::new(),
+            &mut table,
+        );
+
+        let rows = table.rows();
+        let NodeValue::Texture(handle) = &rows[0].1 else {
+            unreachable!()
+        };
+        let out = unsafe { oak_node::handle::get_checked::<Texture>(handle) }
+            .expect("the job box is replaced by the converted texture");
+        assert!(
+            matches!(out, Texture::Gpu { .. }),
+            "the GPU color transform stays on the GPU"
+        );
+        let px = first_pixel(out);
+        assert!(
+            (px[0] - 0.5).abs() < 5e-3,
+            "red channel doubles through the GPU LUT: {px:?}"
+        );
+        assert!((px[1] - 0.25).abs() < 5e-3, "green unchanged: {px:?}");
+        assert_eq!(px[3], 1.0, "alpha preserved");
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// An invalid processor passes the input texture through unchanged
     /// (C++ creates processors non-fatally).
     #[test]
@@ -3485,24 +3708,19 @@ mod tests {
             .expect("the job box is replaced by the input texture");
         assert_eq!(first_pixel(out), [0.4, 0.3, 0.2, 1.0], "untouched");
     }
-    /// into transparent, then top (first) over it — `out = src*a +
-    /// dst*(1-a)`, `out_a = a + dst_a*(1-a)` (premultiplied source).
     #[test]
     fn composite_tracks_matches_alpha_over_math() {
-        let Texture::Cpu(top) = &solid_texture(0.5, 0.25, 0.125, 0.5) else {
-            unreachable!()
-        };
-        let Texture::Cpu(bottom) = &solid_texture(1.0, 1.0, 1.0, 0.75) else {
-            unreachable!()
-        };
-        let frames = vec![top.clone(), bottom.clone()];
+        let frames = vec![
+            solid_texture(0.5, 0.25, 0.125, 0.5),
+            solid_texture(1.0, 1.0, 1.0, 0.75),
+        ];
         let expected = [0.625f32, 0.5, 0.4375, 0.875];
 
         // bottom over transparent: (0.75, 0.75, 0.75, 0.75), then top over:
         // r = 0.5*0.5 + 0.75*0.5, g = 0.25*0.5 + 0.75*0.5,
         // b = 0.125*0.5 + 0.75*0.5, a = 0.5 + 0.75*0.5.
         let out = composite_tracks(frames.clone(), (2, 1));
-        let pixel = first_pixel(&Texture::wrap_frame(out));
+        let pixel = first_pixel(&out);
         for (got, want) in pixel.iter().zip(expected) {
             assert!((got - want).abs() < 1e-4, "CPU composite: expected {want}, got {got}");
         }
@@ -3510,7 +3728,7 @@ mod tests {
         // Same math through the GPU pass when a device is available.
         if let Some(ctx) = oak_core::backend::GpuContext::shared() {
             let gpu_out = composite_tracks_gpu(&ctx, &frames, (2, 1)).expect("GPU composite");
-            let pixel = first_pixel(&Texture::wrap_frame(gpu_out));
+            let pixel = first_pixel(&gpu_out);
             for (got, want) in pixel.iter().zip(expected) {
                 assert!((got - want).abs() < 1e-3, "GPU composite: expected {want}, got {got}");
             }
@@ -3529,8 +3747,7 @@ mod tests {
     /// under their (fixed) input-id spelling.
     #[test]
     fn gpu_chromakey_keys_green_with_ocio_stub() {
-        let Some(ctx) = oak_core::backend::GpuContext::shared() else {
-            eprintln!("no adapter; skipping");
+        let Some(ctx) = oak_core::backend::shared_gpu_or_skip("an eval GPU test") else {
             return;
         };
         // Install the process-wide default config (the C++
@@ -3562,14 +3779,7 @@ mod tests {
 
         let src = ctx.create_texture(size.0, size.1).unwrap();
         ctx.upload(src, &frame).unwrap();
-        let input = Texture::Gpu {
-            token: src,
-            backend: ctx.kind(),
-            width: size.0,
-            height: size.1,
-            format: PixelFormat::F32,
-            ctx: ctx.clone(),
-        };
+        let input = Texture::gpu(ctx.clone(), src, size.0, size.1, PixelFormat::F32);
 
         let mut params = NodeValueRow::new();
         params.insert("tex_in".into(), NodeValue::Texture(oak_node::handle::make_owned(input)));
@@ -3673,8 +3883,7 @@ mod tests {
     /// run at all. Red base + half-alpha green blend -> (0.5, 1, 0, 1).
     #[test]
     fn gpu_merge_alpha_over_binds_base_and_blend() {
-        if oak_core::backend::GpuContext::shared().is_none() {
-            eprintln!("no adapter; skipping");
+        if oak_core::backend::shared_gpu_or_skip("an eval GPU test").is_none() {
             return;
         }
         let mut inputs = NodeValueRow::new();
@@ -3704,8 +3913,7 @@ mod tests {
     /// size instead of a 1x1 the composite step would drop.
     #[test]
     fn gpu_generator_without_input_renders_at_frame_size() {
-        if oak_core::backend::GpuContext::shared().is_none() {
-            eprintln!("no adapter; skipping");
+        if oak_core::backend::shared_gpu_or_skip("an eval GPU test").is_none() {
             return;
         }
         let mut inputs = NodeValueRow::new();
@@ -3731,8 +3939,7 @@ mod tests {
     /// (the generated layer), the corners stay red (the base).
     #[test]
     fn gpu_generator_over_base_composites_nested_job() {
-        if oak_core::backend::GpuContext::shared().is_none() {
-            eprintln!("no adapter; skipping");
+        if oak_core::backend::shared_gpu_or_skip("an eval GPU test").is_none() {
             return;
         }
         let mut inputs = NodeValueRow::new();
@@ -3760,8 +3967,7 @@ mod tests {
     /// from the source, widening the non-transparent area.
     #[test]
     fn gpu_dropshadow_softness_blurs_and_offsets() {
-        if oak_core::backend::GpuContext::shared().is_none() {
-            eprintln!("no adapter; skipping");
+        if oak_core::backend::shared_gpu_or_skip("an eval GPU test").is_none() {
             return;
         }
         // 16x16 transparent frame with an opaque 4x4 square at (4,4).
@@ -3800,8 +4006,7 @@ mod tests {
     /// translation moves the white pixel from (2, 3) to (5, 3).
     #[test]
     fn gpu_transform_translates_pixels() {
-        if oak_core::backend::GpuContext::shared().is_none() {
-            eprintln!("no adapter; skipping");
+        if oak_core::backend::shared_gpu_or_skip("an eval GPU test").is_none() {
             return;
         }
         // 8x8 black frame with one white pixel at (2, 3).
@@ -3827,8 +4032,7 @@ mod tests {
     /// with no scaling or smearing (the turn is lossless).
     #[test]
     fn gpu_transform_rotates_around_the_frame_center() {
-        if oak_core::backend::GpuContext::shared().is_none() {
-            eprintln!("no adapter; skipping");
+        if oak_core::backend::shared_gpu_or_skip("an eval GPU test").is_none() {
             return;
         }
         // 8x8 black frame with one white pixel at (6, 4) — center+(2, 0).
@@ -3861,8 +4065,7 @@ mod tests {
     /// corner pivot would drag it toward the bottom-right instead).
     #[test]
     fn gpu_transform_scales_around_the_frame_center() {
-        if oak_core::backend::GpuContext::shared().is_none() {
-            eprintln!("no adapter; skipping");
+        if oak_core::backend::shared_gpu_or_skip("an eval GPU test").is_none() {
             return;
         }
         // 8x8 black frame with a white 2x2 block at texels (3..4, 3..4).
@@ -3907,8 +4110,7 @@ mod tests {
     /// translation vacates exactly the left three columns.
     #[test]
     fn gpu_transform_off_frame_is_transparent() {
-        if oak_core::backend::GpuContext::shared().is_none() {
-            eprintln!("no adapter; skipping");
+        if oak_core::backend::shared_gpu_or_skip("an eval GPU test").is_none() {
             return;
         }
         let white = filled_frame((8, 8), [1.0, 1.0, 1.0, 1.0]);
@@ -3948,8 +4150,7 @@ mod tests {
     /// transparent.
     #[test]
     fn gpu_shape_rectangle_draws_centered_block() {
-        if oak_core::backend::GpuContext::shared().is_none() {
-            eprintln!("no adapter; skipping");
+        if oak_core::backend::shared_gpu_or_skip("an eval GPU test").is_none() {
             return;
         }
         let mut inputs = NodeValueRow::new();
@@ -3977,8 +4178,7 @@ mod tests {
     /// (radius 20 clamps to half the 8px size).
     #[test]
     fn gpu_shape_ellipse_and_rounded_rect() {
-        if oak_core::backend::GpuContext::shared().is_none() {
-            eprintln!("no adapter; skipping");
+        if oak_core::backend::shared_gpu_or_skip("an eval GPU test").is_none() {
             return;
         }
         let base_inputs = || {
@@ -4014,8 +4214,7 @@ mod tests {
     /// dispatch must survive translation).
     #[test]
     fn gpu_despill_average_caps_green() {
-        if oak_core::backend::GpuContext::shared().is_none() {
-            eprintln!("no adapter; skipping");
+        if oak_core::backend::shared_gpu_or_skip("an eval GPU test").is_none() {
             return;
         }
         let mut inputs = NodeValueRow::new();
@@ -4053,8 +4252,7 @@ mod tests {
     fn bfs_endpoint_sweep_renders_footage_through_position() {
         use oak_node::nodes::graphendpoints::{GRAPH_INPUT_FEED_INPUT, GRAPH_OUTPUT_INPUT};
 
-        if oak_core::backend::GpuContext::shared().is_none() {
-            eprintln!("no adapter; skipping");
+        if oak_core::backend::shared_gpu_or_skip("an eval GPU test").is_none() {
             return;
         }
 

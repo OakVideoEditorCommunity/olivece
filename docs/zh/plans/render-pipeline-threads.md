@@ -239,6 +239,51 @@
 - CPU 边界的显式回读点只有三处：CPU OFX 插件（§3.2）、导出编码器输入、
   磁盘帧缓存写入（FrameHashCache::SaveCacheFrame 对应物）。
 
+> **M2 攻关结论（2026-09-11 回填）**：共享 device 路线可行且已落地，前提是
+> **引擎与 gpui 统一到同一个 wgpu 大版本**。攻关发现：
+>
+> 1. gpui 的 `Window::gpu_context()`（Linux/FreeBSD）确实暴露窗口的
+>    `(Arc<wgpu::Device>, Arc<wgpu::Queue>)`，但 vendored gpui_wgpu 用的是
+>    **wgpu 29**，而引擎此前是 **wgpu 25**——两个大版本的 `wgpu::Texture`
+>    是不同类型，纹理无法跨越。M2 把 `oak-core`/`oak-render` 升到
+>    **wgpu 29 + naga 29**（`backend.rs` 的 8 处破坏性 API 改动；其余代码
+>    只经 `GpuContext`），版本鸿沟消除。
+> 2. `GpuContext::adopt(device, queue, kind)` 采用宿主 device；
+>    `register_context`（`oak-app/src/oakui/gpu.rs`）在窗口建立时调用
+>    `install_shared` 把它装进进程级 shared 槽，渲染线程因此在预览器同一
+>    device 上出帧。`GpuContext::texture_handle` 把引擎纹理的
+>    `Arc<wgpu::Texture>` 交给 gpui 的 `SurfaceSource::Texture`，上屏零拷贝。
+> 3. **色彩管理必须留在链上**：GPU 路径不能跳过 output node 与显示器 ICC。
+>    做法是把「工作空间 → 输出规格（`colormath::working_to_display_target`）
+>    → 显示器 ICC（`displaycolor::apply_f32_rgba`）」在 CPU 上用**原有精确
+>    实现**烘焙成 65³ 3D LUT（`oak-core::lut::Lut3d`，域
+>    `[-0.25, 4]³`），经 `GpuContext::set_display_lut` 上传为 GPU 3D 纹理，
+>    由 `present_texture` 的 WGSL pass 做手工三线性插值（不依赖
+>    `FLOAT32_FILTERABLE`）。设置/显示器/ICC 变化（`displaycolor::generation`
+>    或项目色彩设置）时重建。CPU 路径的 `apply_f32_rgba` 一行未动，GPU 与
+>    CPU 逐点一致（测试对拍，f16 输出量化内）。同一套 LUT 机制也用于图内
+>    `ColorTransformJob`：`process_color_transform_job` 对 GPU 纹理把 OCIO
+>    processor 经 CPU 参考烘焙成 3D LUT，用 `GpuContext::apply_color_lut`
+>    在 GPU 上应用（`color_transform_lut` 按 processor cache id 缓存），不再
+>    pass-through；只有无法烘焙时才走一次显式回读。
+> 4. **平台边界**：macOS/Windows 的 gpui 暂不暴露 device（macOS 走
+>    `oak_bridge` IOSurface 的未来路线，见 acescg 计划 P2），此时
+>    `present_gpu_frame` 返回 `None`，`to_display` 走**单点显式回读**
+>    （唯一一次 download，之后仍 CPU 上传到 gpui）。Linux 上若引擎
+>    device 不是 adopted（例如进程池 worker 的独立 device），同样回退这条
+>    单点路径。CPU OFX、导出编码器、磁盘缓存三处边界显式回读不变。
+>    `install_shared` 对「引擎已创建但尚未创建任何 GPU 资源」的上下文
+>    允许被 UI 设备**替换**（时序守卫：开窗前任何 `shared()` 触碰都不会
+>    静默丢掉零拷贝上屏），用过的上下文拒绝替换并记一条错误日志。
+> 5. 进程池后端（默认）仍在 worker 内完成图求值后**显式回读**成 shm 槽
+>    （oak-worker/worker.rs 的 graph 分支），这是进程模型的必然；M4 通过
+>    验收前进程池仍是默认，线程管线（`OAK_PIPELINE=threads`）才走上述
+>    零拷贝上屏。
+> 6. 已知取舍：GPU 帧没有 `Frame::timestamp`（GPU 路径不需要）；scopes/
+>    取色器的 CPU 兜底图是 1×1 占位（需要时可作为显式回读点按需填充）；
+>    上屏每帧新建一张 `Rgba16Float` 目标纹理（与 gpui 的取帧生命周期一致，
+>    后续可做纹理环）。
+
 ### 3.6 平台互操作分支（解码零拷贝与上屏，用户硬性要求）
 
 **解码必须尽可能 GPU，并与渲染共用同一片 GPU 内存；CPU 解码后上传只作为
@@ -340,7 +385,7 @@ fallback。** 解码上传与上屏共用一层 `gpuinteop` 抽象，按后端�
 | **M0a Job 枚举化 + 单循环 resolve** | §3.7 全量：Job 枚举补全（含 CacheJob）并挂进输出表、resolve 单循环 match、子 job 递归 resolve | 全 workspace 测试绿；新增 CacheJob 磁盘缓存往返测试；`resolve_*_jobs` 四函数删除 |
 | **M0b Job 图 + 虚拟端点 + BFS** | §3.8 全量：图固定 GraphInput/GraphOutput 虚拟节点（默认相连、禁删禁复制、序列化往返）、节点编辑器显示两节点、resolve 改为从输入节点的 Kahn 形态 BFS | 新增测试：多输入汇合等齐全部输入、多输出分叉各自成帧、非全连通图不可达节点不执行、环报错断支、虚拟节点删除/复制被拒、序列化往返后端点仍在；节点编辑器 UI 测试（端点可见、入线/出线规则）；既有测试全绿 |
 | **M1 线程管线骨架** | 解码/渲染/上屏三线程+三队列进 oak-render（`pipeline` 模块）；RenderManager 增加线程后端，进程池后端保留，`OAK_PIPELINE=processes` 可回退 | 同一套渲染测试在两个后端下都绿（测试矩阵化）；播放/seek/导出 smoke 等价 |
-| **M2 GPU 零拷贝** | 图内全程 `Texture::Gpu`；上屏互操作攻关（§3.5）落地；导出/缓存/OFX 三处边界显式回读；内置 YUV→RGB GPU pass 替代 CPU swscale | 播放路径 GPU↔CPU 搬运次数为 0（计数断言，参照 M15 S2 的 `main_heap_frame_copies` 范式）；`to_display` 不再接收 CPU 帧 |
+| **M2 GPU 零拷贝** | 图内全程 `Texture::Gpu`（合成/转场/调整层不再逐帧回读）；wgpu 29 统一 + 采用 gpui device（§3.5 攻关已回填）；GPU 色彩管理（工作空间→输出规格→显示器 ICC 烘焙 3D LUT，GPU 执行）；导出/缓存/OFX 三处边界显式回读；内置 YUV→RGB GPU pass（M5 解码导入的依赖项，解码接线随 M5） | 图播放路径 **GPU→CPU 回读为 0**（`oak_core::backend::gpu_transfer_counters` 计数断言，M1 帧缓存范式）；`RenderedFrame::Gpu` + `to_display` 上屏在 adopted device 上零拷贝（app 测试）；YUV→RGB pass 与 `colormath::yuv444p16_to_rgb_f32` 对拍；全 workspace 测试绿 |
 | **M3 OFX 独立进程** | oak-ofx-host 单进程宿主；PluginJob 经 IPC；崩溃重生+紫帧回退；进度/取消协议搬运 | 杀掉 ofx-host 进程 → 在途 job 重投成功；连续三次崩溃 → 紫帧；进度条/取消行为与现状一致 |
 | **M4 流水线预取** | 调度层按 §3.4 投依赖窗口；背压策略 | 1080p 播放 CPU 占用不升、fps 不低于进程池后端；首帧延迟不劣化（基准对比留档） |
 | **M5 GPU 解码零拷贝** | §3.6 表逐行落地：staging fallback 基线 → Linux NVDEC/VAAPI 导入 → Windows D3D11VA 导入 → macOS VideoToolbox 导入；FFmpeg 无 hwaccel 的组合才评估手写 GPU 解码 | 硬解路径 `HW_TRANSFERS` 计数归零（不再下载）；逐平台导入开/关对比测试；每行独立 PR 可回退 |
@@ -371,9 +416,12 @@ M1（与 M2 可并行）；M4 依赖 M2；M5 依赖 M2（YUV→RGB pass 与互�
 
 ## 6. 风险与对策
 
-1. **上屏互操作不确定**（gpui 的 wgpu device 能否共享）：M2 第一个工作项
-   就是攻关并回填结论；最坏情况退回"渲染线程 blit 到共享纹理"或"单点
-   staging"，损失一次拷贝而非架构。
+1. **上屏互操作不确定**（gpui 的 wgpu device 能否共享）：**M2 已攻关并落地**
+   （结论见 §3.5 回填）：把引擎从 wgpu 25 升到 29 后，`register_context`
+   采用 gpui 的 device，`Texture::Gpu` 的原始纹理经
+   `SurfaceSource::Texture` 直通 gpui，上屏零拷贝；颜色由 CPU 烘焙的 3D LUT
+   在 GPU 应用，不跳过色彩管理。macOS/Windows 的 gpui 暂不暴露 device，
+   自动回退到单点 staging（仍只此一处）。
 2. **解码器线程安全性**：oak-codec 会话当前按进程级互斥共享，集中到一个
    线程后语义更简单，但 hwaccel 解码上下文可能有线程亲和（VAAPI/NVDEC），
    M1 先做软解路径，hwaccel 随 M5 逐项验证。

@@ -171,14 +171,41 @@ impl Frame {
 	}
 }
 
+/// Shared ownership of a registry texture (M2). A `Texture::Gpu` value can
+/// be cloned freely — the table handles, the graph compositor and the
+/// present path all do — and the registry entry is destroyed exactly once,
+/// when the last lease drops. Without it, dropping any one clone would
+/// pull the texture out from under the others.
+pub struct GpuLease {
+	token: u64,
+	ctx: Arc<dyn GpuContextLike>,
+}
+
+impl GpuLease {
+	/// A lease for `token` on `ctx`.
+	pub fn new(ctx: Arc<dyn GpuContextLike>, token: u64) -> Arc<Self> {
+		Arc::new(Self { token, ctx })
+	}
+
+	/// The leased token.
+	pub fn token(&self) -> u64 {
+		self.token
+	}
+}
+
+impl Drop for GpuLease {
+	fn drop(&mut self) {
+		self.ctx.destroy_texture(self.token);
+	}
+}
+
 /// A texture: either backend-resident (GPU) or a CPU-frame wrapper.
-/// `Clone` is safe: the GPU token destroy is idempotent (registry
-/// lookup), so two clones both release safely at their own drop.
 ///
-/// GPU textures carry an `Arc` to their [`GpuContext`] (the C++ `TexturePtr`
-/// keeps its renderer alive the same way), so a texture value can upload/
-/// download/blit without a separate renderer handle. `Drop` releases the
-/// backend token; destroying a token twice is harmless (registry lookup).
+/// GPU textures carry an `Arc` to their [`GpuContext`](crate::backend::GpuContext)
+/// (the C++ `TexturePtr` keeps its renderer alive the same way), so a
+/// texture value can upload/download/blit without a separate renderer
+/// handle, plus a [`GpuLease`] that releases the backend token when the
+/// last clone goes away.
 #[derive(Clone)]
 pub enum Texture {
 	/// Backend GPU texture.
@@ -196,6 +223,8 @@ pub enum Texture {
 		/// The context owning the texture (trait object so tests can fake
 		/// the GPU side; `GpuContext` is the only production implementor).
 		ctx: Arc<dyn GpuContextLike>,
+		/// Shared token ownership (destroyed with the last clone).
+		lease: Arc<GpuLease>,
 	},
 	/// CPU-frame wrapper (uploaded lazily by the backend).
 	Cpu(Frame),
@@ -224,15 +253,28 @@ impl std::fmt::Debug for Texture {
 	}
 }
 
-impl Drop for Texture {
-	fn drop(&mut self) {
-		if let Texture::Gpu { token, ctx, .. } = self {
-			ctx.destroy_texture(*token);
+impl Texture {
+	/// Wrap a registry texture (M2): builds the shared [`GpuLease`] so
+	/// clones release the token exactly once.
+	pub fn gpu(
+		ctx: Arc<dyn GpuContextLike>,
+		token: u64,
+		width: i32,
+		height: i32,
+		format: PixelFormat,
+	) -> Self {
+		let lease = GpuLease::new(ctx.clone(), token);
+		Texture::Gpu {
+			token,
+			backend: ctx.kind(),
+			width,
+			height,
+			format,
+			ctx,
+			lease,
 		}
 	}
-}
 
-impl Texture {
 	/// A dummy/empty texture (C++ `Texture::dummy` semantics): reads as
 	/// transparent black, never uploaded.
 	pub fn dummy() -> Self {
