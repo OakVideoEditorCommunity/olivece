@@ -50,7 +50,6 @@ jobs:
             libasound2-dev libpulse-dev libsndfile1-dev \
             libgl1-mesa-dev libgl1-mesa-dri mesa-vulkan-drivers \
             libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev xvfb libdrm-dev \
-            libva2 libva-drm2 libvdpau1 \
             autoconf autoconf-archive automake libtool
 
       # ------------------------------------------------------------------
@@ -69,17 +68,31 @@ jobs:
 
       # The archives dir is vcpkg's binary cache: a manifest bump then
       # rebuilds only what changed. Same key scheme as the Windows job.
-      - name: Cache vcpkg artifacts
-        uses: actions/cache@v4
+      - name: Restore vcpkg artifacts
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             vcpkg_installed
             ~/.cache/vcpkg/archives
           key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
-          save-always: true
 
       - name: Install dependencies (vcpkg manifest)
         run: vcpkg install --triplet x64-linux
+
+      # Explicit restore/save pair: the old `save-always: true` on the
+      # combined step does not actually save on a failed job (the action
+      # deprecation warning), so a run that failed after the install left
+      # no binary cache and the next run rebuilt FFmpeg from source
+      # (~40 min on Windows).
+      - name: Save vcpkg artifacts
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            vcpkg_installed
+            ~/.cache/vcpkg/archives
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
       # ------------------------------------------------------------------
       # Build environment
@@ -96,6 +109,10 @@ jobs:
           echo "FFMPEG_DIR=$prefix" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "$prefix/tools/pkgconf" >> "$GITHUB_PATH"
+          # vcpkg's libva/libva-drm are shared libraries that FFmpeg links
+          # dynamically; without this path the loader picks a system libva
+          # that may predate symbols FFmpeg uses (undefined vaMapBuffer2).
+          echo "LD_LIBRARY_PATH=$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       # ------------------------------------------------------------------
       # Caches
@@ -254,17 +271,29 @@ jobs:
           "$env:GITHUB_WORKSPACE\.cache\vcpkg" >> $env:GITHUB_PATH
           "VCPKG_ROOT=$env:GITHUB_WORKSPACE\.cache\vcpkg" >> $env:GITHUB_ENV
 
-      - name: Cache vcpkg artifacts
-        uses: actions/cache@v4
+      - name: Restore vcpkg artifacts
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             vcpkg_installed
             ~/AppData/Local/vcpkg/archives
           key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
-          save-always: true
 
       - name: Install dependencies (vcpkg manifest)
         run: vcpkg install --triplet x64-windows
+
+      # Explicit restore/save pair (see the Linux job: `save-always` did
+      # not save after a failed job, so Windows rebuilt FFmpeg from source
+      # for ~40 minutes on every run).
+      - name: Save vcpkg artifacts
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            vcpkg_installed
+            ~/AppData/Local/vcpkg/archives
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
       # ------------------------------------------------------------------
       # Build environment
@@ -354,17 +383,26 @@ jobs:
 
       # The archives dir is vcpkg's binary cache: a manifest bump then
       # rebuilds only what changed. Same key scheme as the Windows job.
-      - name: Cache vcpkg artifacts
-        uses: actions/cache@v4
+      - name: Restore vcpkg artifacts
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             vcpkg_installed
             ~/.cache/vcpkg/archives
           key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
-          save-always: true
 
       - name: Install dependencies (vcpkg manifest)
         run: vcpkg install --triplet arm64-osx
+
+      - name: Save vcpkg artifacts
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            vcpkg_installed
+            ~/.cache/vcpkg/archives
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
       # ------------------------------------------------------------------
       # Build environment
@@ -417,7 +455,12 @@ jobs:
   openkylin:
     name: Build & test (openKylin ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    container: openkylin/openkylin:latest
+    container:
+      image: openkylin/openkylin:latest
+      # A container's default /dev/shm is 64 MiB; the process pool reserves
+      # >64 MiB per worker eagerly (posix_fallocate) and the render manager
+      # fails to start when the reservation is refused.
+      options: --shm-size=2g
     strategy:
       fail-fast: false
       matrix:
@@ -464,7 +507,6 @@ jobs:
             libasound2-dev libpulse-dev libsndfile1-dev \
             libgl1-mesa-dev libgl1-mesa-dri mesa-vulkan-drivers \
             libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev xvfb libdrm-dev \
-            libva2 libva-drm2 libvdpau1 \
             gdb file autoconf autoconf-archive automake libtool
 
       # ------------------------------------------------------------------
@@ -480,8 +522,9 @@ jobs:
 
       # The archives dir is vcpkg's binary cache: a manifest bump then
       # rebuilds only what changed.
-      - name: Cache vcpkg artifacts
-        uses: actions/cache@v4
+      - name: Restore vcpkg artifacts
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             vcpkg_installed
@@ -489,10 +532,18 @@ jobs:
           # The arch prefix matters here: both jobs run the same distro
           # image through the same cache scope, unlike the OS jobs.
           key: vcpkg-${{ runner.os }}-${{ matrix.arch }}-openkylin-${{ hashFiles('vcpkg.json') }}
-          save-always: true
 
       - name: Install dependencies (vcpkg manifest)
         run: vcpkg install --triplet ${{ matrix.triplet }}
+
+      - name: Save vcpkg artifacts
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            vcpkg_installed
+            ~/.cache/vcpkg/archives
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
       # ------------------------------------------------------------------
       # Build environment
@@ -508,6 +559,8 @@ jobs:
           echo "FFMPEG_DIR=$prefix" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "$prefix/tools/pkgconf" >> "$GITHUB_PATH"
+          # See the Linux job: vcpkg's shared libva must win at runtime.
+          echo "LD_LIBRARY_PATH=$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       # Covers the whole target/ dir plus ~/.cargo.
       - name: Cache cargo artifacts
