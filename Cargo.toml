@@ -70,8 +70,9 @@ opt-level = 1
 
 # ocio-sys 0.2.1's vendored sources fail to build on GCC >= 16 (yaml-cpp
 # misses <cstdint>) and misdetect a system zlib-ng (minizip-ng then emits
-# zng_* symbols the vendored zlib cannot satisfy). The fork tracks
-# shaloong/ocio-rs main plus both build fixes; return to the crates.io
-# release once it carries them.
+# zng_* symbols the vendored zlib cannot satisfy); upstream also hard-codes
+# `char*` as `*const i8`, which does not compile on aarch64 (c_char = u8).
+# The fork carries all three fixes; return to the crates.io release once it
+# does (the ocio-rs patch pulls the fork's `ocio-sys` path dependency too).
 [patch.crates-io]
-ocio-sys = { git = "https://github.com/Mike-Solar/ocio-rs.git", branch = "main" }
+ocio-rs = { git = "https://github.com/Mike-Solar/ocio-rs.git", rev = "30338c6a169bbbada862fb3ac256e79b656159cf" }

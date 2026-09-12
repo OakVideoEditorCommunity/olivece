@@ -50,6 +50,7 @@ jobs:
             libasound2-dev libpulse-dev libsndfile1-dev \
             libgl1-mesa-dev libgl1-mesa-dri mesa-vulkan-drivers \
             libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev xvfb libdrm-dev \
+            libva2 libva-drm2 libvdpau1 \
             autoconf autoconf-archive automake libtool
 
       # ------------------------------------------------------------------
@@ -463,6 +464,7 @@ jobs:
             libasound2-dev libpulse-dev libsndfile1-dev \
             libgl1-mesa-dev libgl1-mesa-dri mesa-vulkan-drivers \
             libvulkan-dev libxkbcommon-dev libxkbcommon-x11-dev xvfb libdrm-dev \
+            libva2 libva-drm2 libvdpau1 \
             gdb file autoconf autoconf-archive automake libtool
 
       # ------------------------------------------------------------------

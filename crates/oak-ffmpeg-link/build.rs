@@ -64,29 +64,48 @@ fn main() {
 	}
 
 	let pkg_path = env_or_dotenv("PKG_CONFIG_PATH").unwrap_or_default();
-	let output = Command::new("pkg-config")
-		.arg("--static")
-		.arg("--libs")
-		.args([
-			"libavformat",
-			"libavcodec",
-			"libavfilter",
-			"libavdevice",
-			"libavutil",
-			"libswscale",
-			"libswresample",
-		])
-		.env(
-			"PKG_CONFIG_PATH",
-			format!(
-				"{}{}{}",
-				pc_dir.display(),
-				if pkg_path.is_empty() { "" } else { ":" },
-				pkg_path
-			),
-		)
-		.output()
-		.expect("pkg-config is required when FFMPEG_DIR is set");
+	// The pkg-config child must see the FFMPEG_DIR .pc files. Join with the
+	// platform separator (`:` on Unix, `;` on Windows): formatting a `:`
+	// into a Windows `C:\...` path list makes pkgconf split the drive
+	// letter off.
+	let joined_path = {
+		let mut paths = vec![pc_dir.clone()];
+		if !pkg_path.is_empty() {
+			paths.extend(std::env::split_paths(&pkg_path));
+		}
+		std::env::join_paths(paths).unwrap_or_default()
+	};
+	const FFMPEG_LIBS: [&str; 7] = [
+		"libavformat",
+		"libavcodec",
+		"libavfilter",
+		"libavdevice",
+		"libavutil",
+		"libswscale",
+		"libswresample",
+	];
+	let run = |program: &str| {
+		Command::new(program)
+			.arg("--static")
+			.arg("--libs")
+			.args(FFMPEG_LIBS)
+			.env("PKG_CONFIG_PATH", &joined_path)
+			.output()
+	};
+	// vcpkg ships `pkgconf` on Windows without a `pkg-config` shim (macOS
+	// Homebrew ships both); fall back on the standard name first, then
+	// pkgconf. Only a missing program falls back — a pkg-config that runs
+	// and fails is a real error (bad .pc, missing libs) and must surface.
+	let output = match env_or_dotenv("PKG_CONFIG").filter(|p| !p.trim().is_empty()) {
+		Some(custom) => run(&custom).expect("PKG_CONFIG points at a program that failed to run"),
+		None => match run("pkg-config") {
+			Ok(output) => output,
+			Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+				run("pkgconf").expect("pkg-config/pkgconf is required when FFMPEG_DIR is set")
+			}
+			Err(e) => panic!("failed to run pkg-config: {e}"),
+		},
+	};
 	if !output.status.success() {
 		panic!(
 			"pkg-config --static --libs failed for the FFMPEG_DIR install: {}",

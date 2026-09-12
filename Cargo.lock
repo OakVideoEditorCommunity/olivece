@@ -5084,8 +5084,7 @@ dependencies = [
 [[package]]
 name = "ocio-rs"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3492534019b59e29dba06014f907dd12824537ed4d293d4108c4bfc669de7fd"
+source = "git+https://github.com/Mike-Solar/ocio-rs.git?rev=30338c6a169bbbada862fb3ac256e79b656159cf#30338c6a169bbbada862fb3ac256e79b656159cf"
 dependencies = [
  "ocio-sys",
  "thiserror 1.0.69",
@@ -5094,7 +5093,7 @@ dependencies = [
 [[package]]
 name = "ocio-sys"
 version = "0.2.1"
-source = "git+https://github.com/Mike-Solar/ocio-rs.git?branch=main#ddb677d8a71d1047c2dd3f8a04fc88f7c5c23ccc"
+source = "git+https://github.com/Mike-Solar/ocio-rs.git?rev=30338c6a169bbbada862fb3ac256e79b656159cf#30338c6a169bbbada862fb3ac256e79b656159cf"
 dependencies = [
  "cc",
  "cmake",
